@@ -45,7 +45,7 @@ import { createLoadingWindow, createMainWindow, setBackgroundColor, setDockIcon 
 type ServerConnection =
   | { variant: "existing"; url: string }
   | {
-      variant: "cli"
+      variant: "local"
       url: string
       password: null | string
       health: {
@@ -149,7 +149,7 @@ async function setupServerConnection(): Promise<ServerConnection> {
   server = listener
 
   return {
-    variant: "cli",
+    variant: "local",
     url: localUrl,
     password,
     health,
@@ -180,7 +180,7 @@ async function initialize() {
     logger.log("server connection started")
 
     const cliHealthCheck = (() => {
-      if (serverConnection.variant === "cli") {
+      if (serverConnection.variant === "local") {
         return async () => {
           const { health } = serverConnection
           await health.wait
