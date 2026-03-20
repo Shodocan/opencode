@@ -6,18 +6,19 @@ import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
 import { LoginCommand, LogoutCommand, OrgsCommand, SwitchCommand } from "./cli/cmd/account"
 import { AcpCommand } from "./cli/cmd/acp"
+import { ConsoleCommand } from "./cli/cmd/account"
+import { GenerateCommand } from "./cli/cmd/generate"
+import { RunCommand } from "./cli/cmd/run"
+import { ProvidersCommand } from "./cli/cmd/providers"
 import { AgentCommand } from "./cli/cmd/agent"
 import { DbCommand } from "./cli/cmd/db"
 import { DebugCommand } from "./cli/cmd/debug"
 import { ExportCommand } from "./cli/cmd/export"
-import { GenerateCommand } from "./cli/cmd/generate"
 import { GithubCommand } from "./cli/cmd/github"
 import { ImportCommand } from "./cli/cmd/import"
 import { McpCommand } from "./cli/cmd/mcp"
 import { ModelsCommand } from "./cli/cmd/models"
 import { PrCommand } from "./cli/cmd/pr"
-import { ProvidersCommand } from "./cli/cmd/providers"
-import { RunCommand } from "./cli/cmd/run"
 import { ServeCommand } from "./cli/cmd/serve"
 import { SessionCommand } from "./cli/cmd/session"
 import { StatsCommand } from "./cli/cmd/stats"
@@ -47,11 +48,6 @@ process.on("uncaughtException", (e) => {
     e: e instanceof Error ? e.message : e,
   })
 })
-
-// Ensure the process exits on terminal hangup (eg. closing the terminal tab).
-// Without this, long-running commands like `serve` block on a never-resolving
-// promise and survive as orphaned processes.
-process.on("SIGHUP", () => process.exit())
 
 let cli = yargs(hideBin(process.argv))
   .parserConfiguration({ "populate--": true })
@@ -136,10 +132,7 @@ let cli = yargs(hideBin(process.argv))
   .command(RunCommand)
   .command(GenerateCommand)
   .command(DebugCommand)
-  .command(LoginCommand)
-  .command(LogoutCommand)
-  .command(SwitchCommand)
-  .command(OrgsCommand)
+  .command(ConsoleCommand)
   .command(ProvidersCommand)
   .command(AgentCommand)
   .command(UpgradeCommand)

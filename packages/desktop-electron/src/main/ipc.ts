@@ -2,8 +2,9 @@ import { execFile } from "node:child_process"
 import type { IpcMainEvent, IpcMainInvokeEvent } from "electron"
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Notification, shell } from "electron"
 
-import type { InitStep, ServerReadyData, SqliteMigrationProgress, WslConfig } from "../preload/types"
+import type { InitStep, ServerReadyData, SqliteMigrationProgress, TitlebarTheme, WslConfig } from "../preload/types"
 import { getStore } from "./store"
+import { setTitlebar } from "./windows"
 
 type Deps = {
   killSidecar: () => void
@@ -22,6 +23,7 @@ type Deps = {
   runUpdater: (alertOnFail: boolean) => Promise<void> | void
   checkUpdate: () => Promise<{ updateAvailable: boolean; version?: string }>
   installUpdate: () => Promise<void> | void
+  setBackgroundColor: (color: string) => void
 }
 
 export function registerIpcHandlers(deps: Deps) {
@@ -50,6 +52,7 @@ export function registerIpcHandlers(deps: Deps) {
   ipcMain.handle("run-updater", (_event: IpcMainInvokeEvent, alertOnFail: boolean) => deps.runUpdater(alertOnFail))
   ipcMain.handle("check-update", () => deps.checkUpdate())
   ipcMain.handle("install-update", () => deps.installUpdate())
+  ipcMain.handle("set-background-color", (_event: IpcMainInvokeEvent, color: string) => deps.setBackgroundColor(color))
   ipcMain.handle("store-get", (_event: IpcMainInvokeEvent, name: string, key: string) => {
     const store = getStore(name)
     const value = store.get(key)
@@ -137,6 +140,8 @@ export function registerIpcHandlers(deps: Deps) {
     new Notification({ title, body }).show()
   })
 
+  ipcMain.handle("get-window-count", () => BrowserWindow.getAllWindows().length)
+
   ipcMain.handle("get-window-focused", (event: IpcMainInvokeEvent) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     return win?.isFocused() ?? false
@@ -159,6 +164,11 @@ export function registerIpcHandlers(deps: Deps) {
 
   ipcMain.handle("get-zoom-factor", (event: IpcMainInvokeEvent) => event.sender.getZoomFactor())
   ipcMain.handle("set-zoom-factor", (event: IpcMainInvokeEvent, factor: number) => event.sender.setZoomFactor(factor))
+  ipcMain.handle("set-titlebar", (event: IpcMainInvokeEvent, theme: TitlebarTheme) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) return
+    setTitlebar(win, theme)
+  })
 }
 
 export function sendSqliteMigrationProgress(win: BrowserWindow, progress: SqliteMigrationProgress) {

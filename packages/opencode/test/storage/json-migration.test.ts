@@ -7,9 +7,11 @@ import fs from "fs/promises"
 import path from "path"
 import { Global } from "../../src/global"
 import { ProjectTable } from "../../src/project/project.sql"
+import { ProjectID } from "../../src/project/schema"
 import { MessageTable, PartTable, PermissionTable, SessionTable, TodoTable } from "../../src/session/session.sql"
 import { SessionShareTable } from "../../src/share/share.sql"
 import { JsonMigration } from "../../src/storage/json-migration"
+import { SessionID, MessageID, PartID } from "../../src/session/schema"
 
 // Test fixtures
 const fixtures = {
@@ -130,7 +132,7 @@ describe("JSON to SQLite migration", () => {
 
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
-    expect(projects[0].id).toBe("proj_test123abc")
+    expect(projects[0].id).toBe(ProjectID.make("proj_test123abc"))
     expect(projects[0].worktree).toBe("/test/path")
     expect(projects[0].name).toBe("Test Project")
     expect(projects[0].sandboxes).toEqual(["/test/sandbox"])
@@ -154,7 +156,7 @@ describe("JSON to SQLite migration", () => {
 
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
-    expect(projects[0].id).toBe("proj_filename") // Uses filename, not JSON id
+    expect(projects[0].id).toBe(ProjectID.make("proj_filename")) // Uses filename, not JSON id
   })
 
   test("migrates project with commands", async () => {
@@ -174,7 +176,7 @@ describe("JSON to SQLite migration", () => {
 
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
-    expect(projects[0].id).toBe("proj_with_commands")
+    expect(projects[0].id).toBe(ProjectID.make("proj_with_commands"))
     expect(projects[0].commands).toEqual({ start: "npm run dev" })
   })
 
@@ -194,7 +196,7 @@ describe("JSON to SQLite migration", () => {
 
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
-    expect(projects[0].id).toBe("proj_no_commands")
+    expect(projects[0].id).toBe(ProjectID.make("proj_no_commands"))
     expect(projects[0].commands).toBeNull()
   })
 
@@ -222,8 +224,8 @@ describe("JSON to SQLite migration", () => {
 
     const sessions = db.select().from(SessionTable).all()
     expect(sessions.length).toBe(1)
-    expect(sessions[0].id).toBe("ses_test456def")
-    expect(sessions[0].project_id).toBe("proj_test123abc")
+    expect(sessions[0].id).toBe(SessionID.make("ses_test456def"))
+    expect(sessions[0].project_id).toBe(ProjectID.make("proj_test123abc"))
     expect(sessions[0].slug).toBe("test-session")
     expect(sessions[0].title).toBe("Test Session Title")
     expect(sessions[0].summary_additions).toBe(10)
@@ -255,11 +257,11 @@ describe("JSON to SQLite migration", () => {
 
     const messages = db.select().from(MessageTable).all()
     expect(messages.length).toBe(1)
-    expect(messages[0].id).toBe("msg_test789ghi")
+    expect(messages[0].id).toBe(MessageID.make("msg_test789ghi"))
 
     const parts = db.select().from(PartTable).all()
     expect(parts.length).toBe(1)
-    expect(parts[0].id).toBe("prt_testabc123")
+    expect(parts[0].id).toBe(PartID.make("prt_testabc123"))
   })
 
   test("migrates legacy parts without ids in body", async () => {
@@ -294,16 +296,16 @@ describe("JSON to SQLite migration", () => {
 
     const messages = db.select().from(MessageTable).all()
     expect(messages.length).toBe(1)
-    expect(messages[0].id).toBe("msg_test789ghi")
-    expect(messages[0].session_id).toBe("ses_test456def")
+    expect(messages[0].id).toBe(MessageID.make("msg_test789ghi"))
+    expect(messages[0].session_id).toBe(SessionID.make("ses_test456def"))
     expect(messages[0].data).not.toHaveProperty("id")
     expect(messages[0].data).not.toHaveProperty("sessionID")
 
     const parts = db.select().from(PartTable).all()
     expect(parts.length).toBe(1)
-    expect(parts[0].id).toBe("prt_testabc123")
-    expect(parts[0].message_id).toBe("msg_test789ghi")
-    expect(parts[0].session_id).toBe("ses_test456def")
+    expect(parts[0].id).toBe(PartID.make("prt_testabc123"))
+    expect(parts[0].message_id).toBe(MessageID.make("msg_test789ghi"))
+    expect(parts[0].session_id).toBe(SessionID.make("ses_test456def"))
     expect(parts[0].data).not.toHaveProperty("id")
     expect(parts[0].data).not.toHaveProperty("messageID")
     expect(parts[0].data).not.toHaveProperty("sessionID")
@@ -334,8 +336,8 @@ describe("JSON to SQLite migration", () => {
 
     const messages = db.select().from(MessageTable).all()
     expect(messages.length).toBe(1)
-    expect(messages[0].id).toBe("msg_from_filename") // Uses filename, not JSON id
-    expect(messages[0].session_id).toBe("ses_test456def")
+    expect(messages[0].id).toBe(MessageID.make("msg_from_filename")) // Uses filename, not JSON id
+    expect(messages[0].session_id).toBe(SessionID.make("ses_test456def"))
   })
 
   test("uses paths for part id and messageID when JSON has different values", async () => {
@@ -371,8 +373,8 @@ describe("JSON to SQLite migration", () => {
 
     const parts = db.select().from(PartTable).all()
     expect(parts.length).toBe(1)
-    expect(parts[0].id).toBe("prt_from_filename") // Uses filename, not JSON id
-    expect(parts[0].message_id).toBe("msg_realmsgid") // Uses parent dir, not JSON messageID
+    expect(parts[0].id).toBe(PartID.make("prt_from_filename")) // Uses filename, not JSON id
+    expect(parts[0].message_id).toBe(MessageID.make("msg_realmsgid")) // Uses parent dir, not JSON messageID
   })
 
   test("skips orphaned sessions (no parent project)", async () => {
@@ -423,8 +425,8 @@ describe("JSON to SQLite migration", () => {
 
     const sessions = db.select().from(SessionTable).all()
     expect(sessions.length).toBe(1)
-    expect(sessions[0].id).toBe("ses_migrated")
-    expect(sessions[0].project_id).toBe(gitBasedProjectID) // Uses directory, not stale JSON
+    expect(sessions[0].id).toBe(SessionID.make("ses_migrated"))
+    expect(sessions[0].project_id).toBe(ProjectID.make(gitBasedProjectID)) // Uses directory, not stale JSON
   })
 
   test("uses filename for session id when JSON has different value", async () => {
@@ -454,8 +456,8 @@ describe("JSON to SQLite migration", () => {
 
     const sessions = db.select().from(SessionTable).all()
     expect(sessions.length).toBe(1)
-    expect(sessions[0].id).toBe("ses_from_filename") // Uses filename, not JSON id
-    expect(sessions[0].project_id).toBe("proj_test123abc")
+    expect(sessions[0].id).toBe(SessionID.make("ses_from_filename")) // Uses filename, not JSON id
+    expect(sessions[0].project_id).toBe(ProjectID.make("proj_test123abc"))
   })
 
   test("is idempotent (running twice doesn't duplicate)", async () => {
@@ -646,7 +648,7 @@ describe("JSON to SQLite migration", () => {
 
     const projects = db.select().from(ProjectTable).all()
     expect(projects.length).toBe(1)
-    expect(projects[0].id).toBe("proj_test123abc")
+    expect(projects[0].id).toBe(ProjectID.make("proj_test123abc"))
   })
 
   test("skips invalid todo entries while preserving source positions", async () => {

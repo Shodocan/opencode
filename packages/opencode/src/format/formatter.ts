@@ -1,40 +1,40 @@
 import { text } from "node:stream/consumers"
+import { BunProc } from "../bun"
 import { Instance } from "../project/instance"
 import { Filesystem } from "../util/filesystem"
 import { Process } from "../util/process"
 import { which } from "../util/which"
 import { Flag } from "@/flag/flag"
-import { Npm } from "@/npm"
 
 export interface Info {
   name: string
+  command: string[]
   environment?: Record<string, string>
   extensions: string[]
-  enabled(): Promise<string[] | false>
+  enabled(): Promise<boolean>
 }
 
 export const gofmt: Info = {
   name: "gofmt",
+  command: ["gofmt", "-w", "$FILE"],
   extensions: [".go"],
   async enabled() {
-    const p = which("gofmt")
-    if (p === null) return false
-    return [p, "-w", "$FILE"]
+    return which("gofmt") !== null
   },
 }
 
 export const mix: Info = {
   name: "mix",
+  command: ["mix", "format", "$FILE"],
   extensions: [".ex", ".exs", ".eex", ".heex", ".leex", ".neex", ".sface"],
   async enabled() {
-    const p = which("mix")
-    if (p === null) return false
-    return [p, "format", "$FILE"]
+    return which("mix") !== null
   },
 }
 
 export const prettier: Info = {
   name: "prettier",
+  command: [BunProc.which(), "x", "prettier", "--write", "$FILE"],
   environment: {
     BUN_BE_BUN: "1",
   },
@@ -73,9 +73,8 @@ export const prettier: Info = {
         dependencies?: Record<string, string>
         devDependencies?: Record<string, string>
       }>(item)
-      if (json.dependencies?.prettier || json.devDependencies?.prettier) {
-        return [await Npm.which("prettier"), "--write", "$FILE"]
-      }
+      if (json.dependencies?.prettier) return true
+      if (json.devDependencies?.prettier) return true
     }
     return false
   },
@@ -83,6 +82,7 @@ export const prettier: Info = {
 
 export const oxfmt: Info = {
   name: "oxfmt",
+  command: [BunProc.which(), "x", "oxfmt", "$FILE"],
   environment: {
     BUN_BE_BUN: "1",
   },
@@ -95,9 +95,8 @@ export const oxfmt: Info = {
         dependencies?: Record<string, string>
         devDependencies?: Record<string, string>
       }>(item)
-      if (json.dependencies?.oxfmt || json.devDependencies?.oxfmt) {
-        return [await Npm.which("oxfmt"), "$FILE"]
-      }
+      if (json.dependencies?.oxfmt) return true
+      if (json.devDependencies?.oxfmt) return true
     }
     return false
   },
@@ -105,6 +104,7 @@ export const oxfmt: Info = {
 
 export const biome: Info = {
   name: "biome",
+  command: [BunProc.which(), "x", "@biomejs/biome", "check", "--write", "$FILE"],
   environment: {
     BUN_BE_BUN: "1",
   },
@@ -141,7 +141,7 @@ export const biome: Info = {
     for (const config of configs) {
       const found = await Filesystem.findUp(config, Instance.directory, Instance.worktree)
       if (found.length > 0) {
-        return [await Npm.which("@biomejs/biome"), "check", "--write", "$FILE"]
+        return true
       }
     }
     return false
@@ -150,49 +150,47 @@ export const biome: Info = {
 
 export const zig: Info = {
   name: "zig",
+  command: ["zig", "fmt", "$FILE"],
   extensions: [".zig", ".zon"],
   async enabled() {
-    const p = which("zig")
-    if (p === null) return false
-    return [p, "fmt", "$FILE"]
+    return which("zig") !== null
   },
 }
 
 export const clang: Info = {
   name: "clang-format",
+  command: ["clang-format", "-i", "$FILE"],
   extensions: [".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++", ".ino", ".C", ".H"],
   async enabled() {
     const items = await Filesystem.findUp(".clang-format", Instance.directory, Instance.worktree)
-    if (items.length === 0) return false
-    return ["clang-format", "-i", "$FILE"]
+    return items.length > 0
   },
 }
 
 export const ktlint: Info = {
   name: "ktlint",
+  command: ["ktlint", "-F", "$FILE"],
   extensions: [".kt", ".kts"],
   async enabled() {
-    const p = which("ktlint")
-    if (p === null) return false
-    return [p, "-F", "$FILE"]
+    return which("ktlint") !== null
   },
 }
 
 export const ruff: Info = {
   name: "ruff",
+  command: ["ruff", "format", "$FILE"],
   extensions: [".py", ".pyi"],
   async enabled() {
-    const p = which("ruff")
-    if (p === null) return false
+    if (!which("ruff")) return false
     const configs = ["pyproject.toml", "ruff.toml", ".ruff.toml"]
     for (const config of configs) {
       const found = await Filesystem.findUp(config, Instance.directory, Instance.worktree)
       if (found.length > 0) {
         if (config === "pyproject.toml") {
           const content = await Filesystem.readText(found[0])
-          if (content.includes("[tool.ruff]")) return [p, "format", "$FILE"]
+          if (content.includes("[tool.ruff]")) return true
         } else {
-          return [p, "format", "$FILE"]
+          return true
         }
       }
     }
@@ -201,7 +199,7 @@ export const ruff: Info = {
       const found = await Filesystem.findUp(dep, Instance.directory, Instance.worktree)
       if (found.length > 0) {
         const content = await Filesystem.readText(found[0])
-        if (content.includes("ruff")) return [p, "format", "$FILE"]
+        if (content.includes("ruff")) return true
       }
     }
     return false
@@ -210,13 +208,14 @@ export const ruff: Info = {
 
 export const rlang: Info = {
   name: "air",
+  command: ["air", "format", "$FILE"],
   extensions: [".R"],
   async enabled() {
     const airPath = which("air")
     if (airPath == null) return false
 
     try {
-      const proc = Process.spawn([airPath, "--help"], {
+      const proc = Process.spawn(["air", "--help"], {
         stdout: "pipe",
         stderr: "pipe",
       })
@@ -228,10 +227,7 @@ export const rlang: Info = {
       const firstLine = output.split("\n")[0]
       const hasR = firstLine.includes("R language")
       const hasFormatter = firstLine.includes("formatter")
-      if (hasR && hasFormatter) {
-        return [airPath, "format", "$FILE"]
-      }
-      return false
+      return hasR && hasFormatter
     } catch (error) {
       return false
     }
@@ -240,14 +236,14 @@ export const rlang: Info = {
 
 export const uvformat: Info = {
   name: "uv",
+  command: ["uv", "format", "--", "$FILE"],
   extensions: [".py", ".pyi"],
   async enabled() {
     if (await ruff.enabled()) return false
-    const uvPath = which("uv")
-    if (uvPath !== null) {
-      const proc = Process.spawn([uvPath, "format", "--help"], { stderr: "pipe", stdout: "pipe" })
+    if (which("uv") !== null) {
+      const proc = Process.spawn(["uv", "format", "--help"], { stderr: "pipe", stdout: "pipe" })
       const code = await proc.exited
-      if (code === 0) return [uvPath, "format", "--", "$FILE"]
+      return code === 0
     }
     return false
   },
@@ -255,118 +251,108 @@ export const uvformat: Info = {
 
 export const rubocop: Info = {
   name: "rubocop",
+  command: ["rubocop", "--autocorrect", "$FILE"],
   extensions: [".rb", ".rake", ".gemspec", ".ru"],
   async enabled() {
-    const path = which("rubocop")
-    if (path === null) return false
-    return [path, "--autocorrect", "$FILE"]
+    return which("rubocop") !== null
   },
 }
 
 export const standardrb: Info = {
   name: "standardrb",
+  command: ["standardrb", "--fix", "$FILE"],
   extensions: [".rb", ".rake", ".gemspec", ".ru"],
   async enabled() {
-    const path = which("standardrb")
-    if (path === null) return false
-    return [path, "--fix", "$FILE"]
+    return which("standardrb") !== null
   },
 }
 
 export const htmlbeautifier: Info = {
   name: "htmlbeautifier",
+  command: ["htmlbeautifier", "$FILE"],
   extensions: [".erb", ".html.erb"],
   async enabled() {
-    const path = which("htmlbeautifier")
-    if (path === null) return false
-    return [path, "$FILE"]
+    return which("htmlbeautifier") !== null
   },
 }
 
 export const dart: Info = {
   name: "dart",
+  command: ["dart", "format", "$FILE"],
   extensions: [".dart"],
   async enabled() {
-    const path = which("dart")
-    if (path === null) return false
-    return [path, "format", "$FILE"]
+    return which("dart") !== null
   },
 }
 
 export const ocamlformat: Info = {
   name: "ocamlformat",
+  command: ["ocamlformat", "-i", "$FILE"],
   extensions: [".ml", ".mli"],
   async enabled() {
-    const path = which("ocamlformat")
-    if (!path) return false
+    if (!which("ocamlformat")) return false
     const items = await Filesystem.findUp(".ocamlformat", Instance.directory, Instance.worktree)
-    if (items.length === 0) return false
-    return [path, "-i", "$FILE"]
+    return items.length > 0
   },
 }
 
 export const terraform: Info = {
   name: "terraform",
+  command: ["terraform", "fmt", "$FILE"],
   extensions: [".tf", ".tfvars"],
   async enabled() {
-    const path = which("terraform")
-    if (path === null) return false
-    return [path, "fmt", "$FILE"]
+    return which("terraform") !== null
   },
 }
 
 export const latexindent: Info = {
   name: "latexindent",
+  command: ["latexindent", "-w", "-s", "$FILE"],
   extensions: [".tex"],
   async enabled() {
-    const path = which("latexindent")
-    if (path === null) return false
-    return [path, "-w", "-s", "$FILE"]
+    return which("latexindent") !== null
   },
 }
 
 export const gleam: Info = {
   name: "gleam",
+  command: ["gleam", "format", "$FILE"],
   extensions: [".gleam"],
   async enabled() {
-    const path = which("gleam")
-    if (path === null) return false
-    return [path, "format", "$FILE"]
+    return which("gleam") !== null
   },
 }
 
 export const shfmt: Info = {
   name: "shfmt",
+  command: ["shfmt", "-w", "$FILE"],
   extensions: [".sh", ".bash"],
   async enabled() {
-    const path = which("shfmt")
-    if (path === null) return false
-    return [path, "-w", "$FILE"]
+    return which("shfmt") !== null
   },
 }
 
 export const nixfmt: Info = {
   name: "nixfmt",
+  command: ["nixfmt", "$FILE"],
   extensions: [".nix"],
   async enabled() {
-    const path = which("nixfmt")
-    if (path === null) return false
-    return [path, "$FILE"]
+    return which("nixfmt") !== null
   },
 }
 
 export const rustfmt: Info = {
   name: "rustfmt",
+  command: ["rustfmt", "$FILE"],
   extensions: [".rs"],
   async enabled() {
-    const path = which("rustfmt")
-    if (path === null) return false
-    return [path, "$FILE"]
+    return which("rustfmt") !== null
   },
 }
 
 export const pint: Info = {
   name: "pint",
+  command: ["./vendor/bin/pint", "$FILE"],
   extensions: [".php"],
   async enabled() {
     const items = await Filesystem.findUp("composer.json", Instance.directory, Instance.worktree)
@@ -375,9 +361,8 @@ export const pint: Info = {
         require?: Record<string, string>
         "require-dev"?: Record<string, string>
       }>(item)
-      if (json.require?.["laravel/pint"] || json["require-dev"]?.["laravel/pint"]) {
-        return ["./vendor/bin/pint", "$FILE"]
-      }
+      if (json.require?.["laravel/pint"]) return true
+      if (json["require-dev"]?.["laravel/pint"]) return true
     }
     return false
   },
@@ -385,30 +370,27 @@ export const pint: Info = {
 
 export const ormolu: Info = {
   name: "ormolu",
+  command: ["ormolu", "-i", "$FILE"],
   extensions: [".hs"],
   async enabled() {
-    const path = which("ormolu")
-    if (path === null) return false
-    return [path, "-i", "$FILE"]
+    return which("ormolu") !== null
   },
 }
 
 export const cljfmt: Info = {
   name: "cljfmt",
+  command: ["cljfmt", "fix", "--quiet", "$FILE"],
   extensions: [".clj", ".cljs", ".cljc", ".edn"],
   async enabled() {
-    const path = which("cljfmt")
-    if (path === null) return false
-    return [path, "fix", "--quiet", "$FILE"]
+    return which("cljfmt") !== null
   },
 }
 
 export const dfmt: Info = {
   name: "dfmt",
+  command: ["dfmt", "-i", "$FILE"],
   extensions: [".d"],
   async enabled() {
-    const path = which("dfmt")
-    if (path === null) return false
-    return [path, "-i", "$FILE"]
+    return which("dfmt") !== null
   },
 }

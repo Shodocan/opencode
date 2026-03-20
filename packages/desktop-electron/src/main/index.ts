@@ -5,7 +5,7 @@ import { createServer } from "node:net"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { Event } from "electron"
-import { app, type BrowserWindow, dialog } from "electron"
+import { app, BrowserWindow, dialog } from "electron"
 import pkg from "electron-updater"
 
 const APP_NAMES: Record<string, string> = {
@@ -40,7 +40,7 @@ import {
   setWslConfig,
   spawnLocalServer,
 } from "./server"
-import { createLoadingWindow, createMainWindow, setDockIcon } from "./windows"
+import { createLoadingWindow, createMainWindow, setBackgroundColor, setDockIcon } from "./windows"
 
 type ServerConnection =
   | { variant: "existing"; url: string }
@@ -131,7 +131,7 @@ async function setupServerConnection(): Promise<ServerConnection> {
   const customUrl = await getSavedServerUrl()
 
   if (customUrl && (await checkHealthOrAskRetry(customUrl))) {
-    serverReady.resolve({ url: customUrl, password: null })
+    serverReady.resolve({ url: customUrl, username: "opencode", password: null })
     return { variant: "existing", url: customUrl }
   }
 
@@ -140,7 +140,7 @@ async function setupServerConnection(): Promise<ServerConnection> {
   const localUrl = `http://${hostname}:${port}`
 
   if (await checkHealth(localUrl)) {
-    serverReady.resolve({ url: localUrl, password: null })
+    serverReady.resolve({ url: localUrl, username: "opencode", password: null })
     return { variant: "existing", url: localUrl }
   }
 
@@ -162,6 +162,9 @@ async function initialize() {
 
   const needsMigration = !sqliteFileExists()
   const sqliteDone = needsMigration ? defer<void>() : undefined
+  let loadingWindow: BrowserWindow | undefined
+
+  const serverConnection = await setupServerConnection()
 
   if (needsMigration) {
     initEmitter.on("sqlite", (progress: SqliteMigrationProgress) => {
@@ -174,12 +177,7 @@ async function initialize() {
   }
 
   const loadingTask = (async () => {
-    logger.log("setting up server connection")
-    const serverConnection = await setupServerConnection()
-    logger.log("server connection ready", {
-      variant: serverConnection.variant,
-      url: serverConnection.url,
-    })
+    logger.log("server connection started")
 
     const cliHealthCheck = (() => {
       if (serverConnection.variant === "cli") {
@@ -188,40 +186,34 @@ async function initialize() {
           await health.wait
           serverReady.resolve({
             url: serverConnection.url,
+            username: "opencode",
             password: serverConnection.password,
           })
         }
       } else {
-        serverReady.resolve({ url: serverConnection.url, password: null })
+        serverReady.resolve({ url: serverConnection.url, username: "opencode", password: null })
         return null
       }
     })()
 
-    logger.log("server connection started")
-
     if (cliHealthCheck) {
       if (needsMigration) await sqliteDone?.promise
-      cliHealthCheck?.()
+      cliHealthCheck()
     }
-
-    logger.log("loading task finished")
   })()
 
   const globals = {
     updaterEnabled: UPDATER_ENABLED,
-    wsl: getWslConfig().enabled,
     deepLinks: pendingDeepLinks,
   }
 
-  const loadingWindow = await (async () => {
-    if (needsMigration) {
-      return createLoadingWindow(globals)
-    } else {
-      logger.log("showing main window without loading window")
-      mainWindow = createMainWindow(globals)
-      wireMenu()
-    }
-  })()
+  if (needsMigration) {
+    loadingWindow = createLoadingWindow(globals)
+  } else {
+    logger.log("showing main window without loading window")
+    mainWindow = createMainWindow(globals)
+    wireMenu()
+  }
 
   await loadingTask
   setInitStep({ phase: "done" })
@@ -230,10 +222,8 @@ async function initialize() {
     await loadingComplete.promise
   }
 
-  if (!mainWindow) {
-    mainWindow = createMainWindow(globals)
-    wireMenu()
-  }
+  mainWindow = createMainWindow(globals)
+  wireMenu()
 
   loadingWindow?.close()
 }
@@ -283,6 +273,7 @@ registerIpcHandlers({
   runUpdater: async (alertOnFail) => checkForUpdates(alertOnFail),
   checkUpdate: async () => checkUpdate(),
   installUpdate: async () => installUpdate(),
+  setBackgroundColor: (color) => setBackgroundColor(color),
 })
 
 function killSidecar() {

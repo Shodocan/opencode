@@ -1,6 +1,5 @@
 import { bootstrap, Config, Server } from "virtual:opencode-server"
 import { dialog } from "electron"
-
 import { DEFAULT_SERVER_URL_KEY, WSL_ENABLED_KEY } from "./constants"
 import { store } from "./store"
 

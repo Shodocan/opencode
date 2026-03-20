@@ -3,6 +3,7 @@ import { describeRoute, validator, resolver } from "hono-openapi"
 import type { UpgradeWebSocket } from "hono/ws"
 import z from "zod"
 import { Pty } from "@/pty"
+import { PtyID } from "@/pty/schema"
 import { NotFoundError } from "../../storage/db"
 import { errors } from "../error"
 
@@ -71,7 +72,7 @@ export function PtyRoutes(upgradeWebSocket: UpgradeWebSocket) {
           ...errors(404),
         },
       }),
-      validator("param", z.object({ ptyID: z.string() })),
+      validator("param", z.object({ ptyID: PtyID.zod })),
       async (c) => {
         const info = Pty.get(c.req.valid("param").ptyID)
         if (!info) {
@@ -98,7 +99,7 @@ export function PtyRoutes(upgradeWebSocket: UpgradeWebSocket) {
           ...errors(400),
         },
       }),
-      validator("param", z.object({ ptyID: z.string() })),
+      validator("param", z.object({ ptyID: PtyID.zod })),
       validator("json", Pty.UpdateInput),
       async (c) => {
         const info = await Pty.update(c.req.valid("param").ptyID, c.req.valid("json"))
@@ -123,7 +124,7 @@ export function PtyRoutes(upgradeWebSocket: UpgradeWebSocket) {
           ...errors(404),
         },
       }),
-      validator("param", z.object({ ptyID: z.string() })),
+      validator("param", z.object({ ptyID: PtyID.zod })),
       async (c) => {
         await Pty.remove(c.req.valid("param").ptyID)
         return c.json(true)
@@ -147,9 +148,9 @@ export function PtyRoutes(upgradeWebSocket: UpgradeWebSocket) {
           ...errors(404),
         },
       }),
-      validator("param", z.object({ ptyID: z.string() })),
+      validator("param", z.object({ ptyID: PtyID.zod })),
       upgradeWebSocket((c) => {
-        const id = c.req.param("ptyID")
+        const id = PtyID.zod.parse(c.req.param("ptyID"))
         const cursor = (() => {
           const value = c.req.query("cursor")
           if (!value) return

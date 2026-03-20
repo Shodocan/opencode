@@ -3,6 +3,7 @@ import { describeRoute, resolver, validator } from "hono-openapi"
 import z from "zod"
 import { zodToJsonSchema } from "zod-to-json-schema"
 import { MCP } from "../../mcp"
+import { ProviderID, ModelID } from "../../provider/schema"
 import { Instance } from "../../project/instance"
 import { Project } from "../../project/project"
 import { Session } from "../../session"
@@ -77,10 +78,7 @@ export const ExperimentalRoutes = lazy(() =>
       ),
       async (c) => {
         const { provider, model } = c.req.valid("query")
-        const tools = await ToolRegistry.tools({
-          providerID: provider,
-          modelID: model,
-        })
+        const tools = await ToolRegistry.tools({ providerID: ProviderID.make(provider), modelID: ModelID.make(model) })
         return c.json(
           tools.map((t) => ({
             id: t.id,

@@ -1,10 +1,10 @@
-import { BusEvent } from "@/bus/bus-event"
-import { Bus } from "@/bus"
+import { streamSSE } from "hono/streaming"
 import { Log } from "../util/log"
+import { Bus } from "../bus"
+import { BusEvent } from "../bus/bus-event"
 import { describeRoute, generateSpecs, validator, resolver, openAPIRouteHandler } from "hono-openapi"
 import { Hono } from "hono"
 import { cors } from "hono/cors"
-import { streamSSE } from "hono/streaming"
 import { proxy } from "hono/proxy"
 import { basicAuth } from "hono/basic-auth"
 import z from "zod"
@@ -15,6 +15,7 @@ import { Format } from "../format"
 import { TuiRoutes } from "./routes/tui"
 import { Instance } from "../project/instance"
 import { Vcs } from "../project/vcs"
+import { runPromiseInstance } from "@/effect/runtime"
 import { Agent } from "../agent/agent"
 import { Skill } from "../skill/skill"
 import { Auth } from "../auth"
@@ -22,6 +23,8 @@ import { Flag } from "../flag/flag"
 import { Command } from "../command"
 import { Global } from "../global"
 import { WorkspaceContext } from "../control-plane/workspace-context"
+import { WorkspaceID } from "../control-plane/schema"
+import { ProviderID } from "../provider/schema"
 import { WorkspaceRouterMiddleware } from "../control-plane/workspace-router-middleware"
 import { ProjectRoutes } from "./routes/project"
 import { SessionRoutes } from "./routes/session"
@@ -31,6 +34,7 @@ import { FileRoutes } from "./routes/file"
 import { ConfigRoutes } from "./routes/config"
 import { ExperimentalRoutes } from "./routes/experimental"
 import { ProviderRoutes } from "./routes/provider"
+import { EventRoutes } from "./routes/event"
 import { InstanceBootstrap } from "../project/bootstrap"
 import { NotFoundError } from "../storage/db"
 import type { ContentfulStatusCode } from "hono/utils/http-status"
@@ -71,6 +75,7 @@ export namespace Server {
           let status: ContentfulStatusCode
           if (err instanceof NotFoundError) status = 404
           else if (err instanceof Provider.ModelNotFoundError) status = 400
+          else if (err.name === "ProviderAuthValidationFailed") status = 400
           else if (err.name.startsWith("Worktree")) status = 400
           else status = 500
           return c.json(err.toObject(), { status })
@@ -155,7 +160,7 @@ export namespace Server {
         validator(
           "param",
           z.object({
-            providerID: z.string(),
+            providerID: ProviderID.zod,
           }),
         ),
         validator("json", Auth.Info),
@@ -187,7 +192,7 @@ export namespace Server {
         validator(
           "param",
           z.object({
-            providerID: z.string(),
+            providerID: ProviderID.zod,
           }),
         ),
         async (c) => {
@@ -198,7 +203,7 @@ export namespace Server {
       )
       .use(async (c, next) => {
         if (c.req.path === "/log") return next()
-        const workspaceID = c.req.query("workspace") || c.req.header("x-opencode-workspace")
+        const rawWorkspaceID = c.req.query("workspace") || c.req.header("x-opencode-workspace")
         const raw = c.req.query("directory") || c.req.header("x-opencode-directory") || process.cwd()
         const directory = Filesystem.resolve(
           (() => {
@@ -211,7 +216,7 @@ export namespace Server {
         )
 
         return WorkspaceContext.provide({
-          workspaceID,
+          workspaceID: rawWorkspaceID ? WorkspaceID.make(rawWorkspaceID) : undefined,
           async fn() {
             return Instance.provide({
               directory,
@@ -254,6 +259,7 @@ export namespace Server {
       .route("/question", QuestionRoutes())
       .route("/provider", ProviderRoutes())
       .route("/", FileRoutes())
+      .route("/", EventRoutes())
       .route("/mcp", McpRoutes())
       .route("/tui", TuiRoutes())
       .post(
@@ -335,7 +341,7 @@ export namespace Server {
           },
         }),
         async (c) => {
-          const branch = await Vcs.branch()
+          const branch = await runPromiseInstance(Vcs.Service.use((s) => s.branch()))
           return c.json({
             branch,
           })
@@ -559,23 +565,7 @@ export namespace Server {
           })
         },
       )
-      // .route("/pty", PtyRoutes(ws.upgradeWebSocket))
-      .all("/*", async (c) => {
-        const path = c.req.path
-
-        const response = await proxy(`https://app.opencode.ai${path}`, {
-          ...c.req,
-          headers: {
-            ...c.req.raw.headers,
-            host: "app.opencode.ai",
-          },
-        })
-        response.headers.set(
-          "Content-Security-Policy",
-          "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
-        )
-        return response
-      })
+    // .route("/pty", PtyRoutes(ws.upgradeWebSocket))
 
     return {
       app: route as Hono,
@@ -597,6 +587,8 @@ export namespace Server {
     })
     return result
   }
+
+  export let url: URL
 
   export async function listen(opts: {
     port: number
@@ -641,6 +633,7 @@ export namespace Server {
     const url = new URL("http://localhost")
     url.hostname = opts.hostname
     url.port = String(addr.port)
+    Server.url = url
 
     const shouldPublishMDNS =
       opts.mdns &&

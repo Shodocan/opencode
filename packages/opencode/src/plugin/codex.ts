@@ -4,8 +4,8 @@ import { Installation } from "../installation"
 import { Auth, OAUTH_DUMMY_KEY } from "../auth"
 import os from "os"
 import { ProviderTransform } from "@/provider/transform"
+import { ModelID, ProviderID } from "@/provider/schema"
 import { setTimeout as sleep } from "node:timers/promises"
-import { createServer } from "http"
 
 const log = Log.create({ service: "plugin.codex" })
 
@@ -241,7 +241,7 @@ interface PendingOAuth {
   reject: (error: Error) => void
 }
 
-let oauthServer: ReturnType<typeof createServer> | undefined
+let oauthServer: ReturnType<typeof Bun.serve> | undefined
 let pendingOAuth: PendingOAuth | undefined
 
 async function startOAuthServer(): Promise<{ port: number; redirectUri: string }> {
@@ -249,83 +249,77 @@ async function startOAuthServer(): Promise<{ port: number; redirectUri: string }
     return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
   }
 
-  oauthServer = createServer((req, res) => {
-    const url = new URL(req.url || "/", `http://localhost:${OAUTH_PORT}`)
+  oauthServer = Bun.serve({
+    port: OAUTH_PORT,
+    fetch(req) {
+      const url = new URL(req.url)
 
-    if (url.pathname === "/auth/callback") {
-      const code = url.searchParams.get("code")
-      const state = url.searchParams.get("state")
-      const error = url.searchParams.get("error")
-      const errorDescription = url.searchParams.get("error_description")
+      if (url.pathname === "/auth/callback") {
+        const code = url.searchParams.get("code")
+        const state = url.searchParams.get("state")
+        const error = url.searchParams.get("error")
+        const errorDescription = url.searchParams.get("error_description")
 
-      if (error) {
-        const errorMsg = errorDescription || error
-        pendingOAuth?.reject(new Error(errorMsg))
+        if (error) {
+          const errorMsg = errorDescription || error
+          pendingOAuth?.reject(new Error(errorMsg))
+          pendingOAuth = undefined
+          return new Response(HTML_ERROR(errorMsg), {
+            headers: { "Content-Type": "text/html" },
+          })
+        }
+
+        if (!code) {
+          const errorMsg = "Missing authorization code"
+          pendingOAuth?.reject(new Error(errorMsg))
+          pendingOAuth = undefined
+          return new Response(HTML_ERROR(errorMsg), {
+            status: 400,
+            headers: { "Content-Type": "text/html" },
+          })
+        }
+
+        if (!pendingOAuth || state !== pendingOAuth.state) {
+          const errorMsg = "Invalid state - potential CSRF attack"
+          pendingOAuth?.reject(new Error(errorMsg))
+          pendingOAuth = undefined
+          return new Response(HTML_ERROR(errorMsg), {
+            status: 400,
+            headers: { "Content-Type": "text/html" },
+          })
+        }
+
+        const current = pendingOAuth
         pendingOAuth = undefined
-        res.writeHead(200, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
+
+        exchangeCodeForTokens(code, `http://localhost:${OAUTH_PORT}/auth/callback`, current.pkce)
+          .then((tokens) => current.resolve(tokens))
+          .catch((err) => current.reject(err))
+
+        return new Response(HTML_SUCCESS, {
+          headers: { "Content-Type": "text/html" },
+        })
       }
 
-      if (!code) {
-        const errorMsg = "Missing authorization code"
-        pendingOAuth?.reject(new Error(errorMsg))
+      if (url.pathname === "/cancel") {
+        pendingOAuth?.reject(new Error("Login cancelled"))
         pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
+        return new Response("Login cancelled", { status: 200 })
       }
 
-      if (!pendingOAuth || state !== pendingOAuth.state) {
-        const errorMsg = "Invalid state - potential CSRF attack"
-        pendingOAuth?.reject(new Error(errorMsg))
-        pendingOAuth = undefined
-        res.writeHead(400, { "Content-Type": "text/html" })
-        res.end(HTML_ERROR(errorMsg))
-        return
-      }
-
-      const current = pendingOAuth
-      pendingOAuth = undefined
-
-      exchangeCodeForTokens(code, `http://localhost:${OAUTH_PORT}/auth/callback`, current.pkce)
-        .then((tokens) => current.resolve(tokens))
-        .catch((err) => current.reject(err))
-
-      res.writeHead(200, { "Content-Type": "text/html" })
-      res.end(HTML_SUCCESS)
-      return
-    }
-
-    if (url.pathname === "/cancel") {
-      pendingOAuth?.reject(new Error("Login cancelled"))
-      pendingOAuth = undefined
-      res.writeHead(200)
-      res.end("Login cancelled")
-      return
-    }
-
-    res.writeHead(404)
-    res.end("Not found")
+      return new Response("Not found", { status: 404 })
+    },
   })
 
-  await new Promise<void>((resolve, reject) => {
-    oauthServer!.listen(OAUTH_PORT, () => {
-      log.info("codex oauth server started", { port: OAUTH_PORT })
-      resolve()
-    })
-    oauthServer!.on("error", reject)
-  })
-
+  log.info("codex oauth server started", { port: OAUTH_PORT })
   return { port: OAUTH_PORT, redirectUri: `http://localhost:${OAUTH_PORT}/auth/callback` }
 }
 
 function stopOAuthServer() {
   if (oauthServer) {
-    oauthServer.close(() => {
-      log.info("codex oauth server stopped")
-    })
+    oauthServer.stop()
     oauthServer = undefined
+    log.info("codex oauth server stopped")
   }
 }
 
@@ -366,13 +360,14 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
 
         // Filter models to only allowed Codex models for OAuth
         const allowedModels = new Set([
+          "gpt-5.1-codex",
           "gpt-5.1-codex-max",
           "gpt-5.1-codex-mini",
           "gpt-5.2",
-          "gpt-5.4",
           "gpt-5.2-codex",
           "gpt-5.3-codex",
-          "gpt-5.1-codex",
+          "gpt-5.4",
+          "gpt-5.4-mini",
         ])
         for (const modelId of Object.keys(provider.models)) {
           if (modelId.includes("codex")) continue
@@ -382,8 +377,8 @@ export async function CodexAuthPlugin(input: PluginInput): Promise<Hooks> {
 
         if (!provider.models["gpt-5.3-codex"]) {
           const model = {
-            id: "gpt-5.3-codex",
-            providerID: "openai",
+            id: ModelID.make("gpt-5.3-codex"),
+            providerID: ProviderID.openai,
             api: {
               id: "gpt-5.3-codex",
               url: "https://chatgpt.com/backend-api/codex",
