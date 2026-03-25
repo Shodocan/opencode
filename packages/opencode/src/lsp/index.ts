@@ -223,6 +223,7 @@ export namespace LSP {
       )
 
       const getClients = Effect.fnUntraced(function* (file: string) {
+        if (!Instance.containsPath(file)) return [] as LSPClient.Info[]
         const s = yield* InstanceState.get(cache)
         return yield* Effect.promise(async () => {
           const extension = path.parse(file).ext || file
