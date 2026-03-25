@@ -460,7 +460,10 @@ export namespace LSP {
         return results.flat().filter(Boolean)
       })
 
-      const incomingCalls = Effect.fn("LSP.incomingCalls")(function* (input: LocInput) {
+      const callHierarchyRequest = Effect.fnUntraced(function* (
+        input: LocInput,
+        direction: "callHierarchy/incomingCalls" | "callHierarchy/outgoingCalls",
+      ) {
         const results = yield* runForFile(input.file, async (client) => {
           const items = (await client.connection
             .sendRequest("textDocument/prepareCallHierarchy", {
@@ -469,23 +472,17 @@ export namespace LSP {
             })
             .catch(() => [])) as any[]
           if (!items?.length) return []
-          return client.connection.sendRequest("callHierarchy/incomingCalls", { item: items[0] }).catch(() => [])
+          return client.connection.sendRequest(direction, { item: items[0] }).catch(() => [])
         })
         return results.flat().filter(Boolean)
       })
 
+      const incomingCalls = Effect.fn("LSP.incomingCalls")(function* (input: LocInput) {
+        return yield* callHierarchyRequest(input, "callHierarchy/incomingCalls")
+      })
+
       const outgoingCalls = Effect.fn("LSP.outgoingCalls")(function* (input: LocInput) {
-        const results = yield* runForFile(input.file, async (client) => {
-          const items = (await client.connection
-            .sendRequest("textDocument/prepareCallHierarchy", {
-              textDocument: { uri: pathToFileURL(input.file).href },
-              position: { line: input.line, character: input.character },
-            })
-            .catch(() => [])) as any[]
-          if (!items?.length) return []
-          return client.connection.sendRequest("callHierarchy/outgoingCalls", { item: items[0] }).catch(() => [])
-        })
-        return results.flat().filter(Boolean)
+        return yield* callHierarchyRequest(input, "callHierarchy/outgoingCalls")
       })
 
       return Service.of({
