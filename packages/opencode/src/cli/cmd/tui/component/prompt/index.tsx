@@ -24,7 +24,6 @@ import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { FilePart } from "@opencode-ai/sdk/v2"
 import { TuiEvent } from "../../event"
-import { Bus } from "@/bus"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
@@ -101,16 +100,20 @@ export function Prompt(props: PromptProps) {
 
   sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
     if (!input || input.isDestroyed) return
+
     input.insertText(evt.properties.text)
+    setStore("prompt", "input", input.plainText)
+    autocomplete.onInput(input.plainText)
+
     setTimeout(() => {
-      // setTimeout is a workaround and needs to be addressed properly
       if (!input || input.isDestroyed) return
+      input.focus()
       input.getLayoutNode().markDirty()
       input.gotoBufferEnd()
       renderer.requestRender()
-      // Auto-submit after inserting channel message
+
       setTimeout(() => {
-        Bus.publish(TuiEvent.CommandExecute, { command: "prompt.submit" })
+        void submit()
       }, 100)
     }, 0)
   })

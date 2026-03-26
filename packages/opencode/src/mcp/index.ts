@@ -65,6 +65,7 @@ export namespace MCP {
         .object({
           from: z.string().optional(),
           to: z.string().optional(),
+          subject: z.string().optional(),
           priority: z.string().optional(),
           message_id: z.string().optional(),
           thread_id: z.string().optional(),
@@ -72,17 +73,6 @@ export namespace MCP {
         .optional(),
     }),
   })
-
-  export const IncomingChannelMessage = BusEvent.define(
-    "mcp.incoming.channel.message",
-    z.object({
-      server: z.string(),
-      content: z.string(),
-      from: z.string().optional(),
-      priority: z.string().optional(),
-      threadId: z.string().optional(),
-    }),
-  )
 
   export const BrowserOpenFailed = BusEvent.define(
     "mcp.browser.open.failed",
@@ -508,6 +498,7 @@ export namespace MCP {
           const content = notification.params.content
           const from = notification.params.meta?.from
           const to = notification.params.meta?.to
+          const subject = notification.params.meta?.subject
           const priority = notification.params.meta?.priority
           const threadId = notification.params.meta?.thread_id
 
@@ -517,7 +508,7 @@ export namespace MCP {
             `From: ${from || "unknown"}`,
             to ? `To: ${to}` : "",
             `Via: ${name}`,
-            `Subject: ${threadId ? `Thread: ${threadId}` : "Direct message"}`,
+            `Subject: ${subject || (threadId ? `Thread: ${threadId}` : "Direct message")}`,
             `Priority: ${priority || "normal"}`,
             `---`,
             content,
@@ -538,15 +529,6 @@ export namespace MCP {
           await Bus.publish(TuiEvent.PromptAppend, {
             text: formattedMessage,
           }).catch((error) => log.error("failed to append prompt for channel message", { error }))
-
-          // Publish to bus so UI can display the message
-          await Bus.publish(IncomingChannelMessage, {
-            server: name,
-            content,
-            from,
-            priority,
-            threadId,
-          }).catch((error) => log.debug("failed to publish channel message", { error }))
         })
       }
 
