@@ -63,7 +63,12 @@ export function toPartialRow(info: DeepPartial<Session.Info>) {
 
 export default [
   SyncEvent.project(Session.Event.Created, (db, data) => {
-    db.insert(SessionTable).values(Session.toRow(data.info)).run()
+    try {
+      db.insert(SessionTable).values(Session.toRow(data.info)).run()
+    } catch (err) {
+      if (!foreign(err)) throw err
+      log.warn("ignored session create — project missing", { sessionID: data.info.id, projectID: data.info.projectID })
+    }
   }),
 
   SyncEvent.project(Session.Event.Updated, (db, data) => {
