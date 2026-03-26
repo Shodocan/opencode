@@ -9,6 +9,7 @@ import { Npm } from "../npm"
 import { Hash } from "../util/hash"
 import { Plugin } from "../plugin"
 import { NamedError } from "@opencode-ai/util/error"
+import { type LanguageModelV3 } from "@ai-sdk/provider"
 import { ModelsDev } from "./models"
 import { Auth } from "../auth"
 import { Env } from "../env"
@@ -28,7 +29,7 @@ import { createVertex } from "@ai-sdk/google-vertex"
 import { createVertexAnthropic } from "@ai-sdk/google-vertex/anthropic"
 import { createOpenAI } from "@ai-sdk/openai"
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
-import { createOpenRouter, type LanguageModelV2 } from "@openrouter/ai-sdk-provider"
+import { createOpenRouter } from "@openrouter/ai-sdk-provider"
 import { createOpenaiCompatible as createGitHubCopilotOpenAICompatible } from "./sdk/copilot"
 import { createXai } from "@ai-sdk/xai"
 import { createMistral } from "@ai-sdk/mistral"
@@ -109,7 +110,7 @@ export namespace Provider {
     })
   }
 
-  const BUNDLED_PROVIDERS: Record<string, (options: any) => SDK> = {
+  const BUNDLED_PROVIDERS: Record<string, (options: any) => any> = {
     "@ai-sdk/amazon-bedrock": createAmazonBedrock,
     "@ai-sdk/anthropic": createAnthropic,
     "@ai-sdk/azure": createAzure,
@@ -130,7 +131,6 @@ export namespace Provider {
     "@ai-sdk/perplexity": createPerplexity,
     "@ai-sdk/vercel": createVercel,
     "gitlab-ai-provider": createGitLab,
-    // @ts-ignore (TODO: kill this code so we dont have to maintain it)
     "@ai-sdk/github-copilot": createGitHubCopilotOpenAICompatible,
   }
 
@@ -591,7 +591,12 @@ export namespace Provider {
 
             if (!result.models.length) {
               log.info("gitlab model discovery skipped: no models found", {
-                project: result.project ? { id: result.project.id, path: result.project.pathWithNamespace } : null,
+                project: result.project
+                  ? {
+                      id: result.project.id,
+                      path: result.project.pathWithNamespace,
+                    }
+                  : null,
               })
               return {}
             }
@@ -619,8 +624,20 @@ export namespace Provider {
                     reasoning: true,
                     attachment: true,
                     toolcall: true,
-                    input: { text: true, audio: false, image: true, video: false, pdf: true },
-                    output: { text: true, audio: false, image: false, video: false, pdf: false },
+                    input: {
+                      text: true,
+                      audio: false,
+                      image: true,
+                      video: false,
+                      pdf: true,
+                    },
+                    output: {
+                      text: true,
+                      audio: false,
+                      image: false,
+                      video: false,
+                      pdf: false,
+                    },
                     interleaved: false,
                   },
                   release_date: "",
@@ -930,17 +947,17 @@ export namespace Provider {
     }
 
     const providers: Record<ProviderID, Info> = {} as Record<ProviderID, Info>
-    const languages = new Map<string, LanguageModelV2>()
+    const languages = new Map<string, LanguageModelV3>()
     const modelLoaders: {
       [providerID: string]: CustomModelLoader
     } = {}
     const varsLoaders: {
       [providerID: string]: CustomVarsLoader
     } = {}
+    const sdk = new Map<string, any>()
     const discoveryLoaders: {
       [providerID: string]: CustomDiscoverModels
     } = {}
-    const sdk = new Map<string, SDK>()
 
     log.info("init")
 
@@ -1232,7 +1249,13 @@ export namespace Provider {
           ...model.headers,
         }
 
-      const key = Hash.fast(JSON.stringify({ providerID: model.providerID, npm: model.api.npm, options }))
+      const key = Hash.fast(
+        JSON.stringify({
+          providerID: model.providerID,
+          npm: model.api.npm,
+          options,
+        }),
+      )
       const existing = s.sdk.get(key)
       if (existing) return existing
 
@@ -1285,7 +1308,10 @@ export namespace Provider {
 
       const bundledFn = BUNDLED_PROVIDERS[model.api.npm]
       if (bundledFn) {
-        log.info("using bundled provider", { providerID: model.providerID, pkg: model.api.npm })
+        log.info("using bundled provider", {
+          providerID: model.providerID,
+          pkg: model.api.npm,
+        })
         const loaded = bundledFn({
           name: model.providerID,
           ...options,
@@ -1325,7 +1351,10 @@ export namespace Provider {
     const provider = s.providers[providerID]
     if (!provider) {
       const availableProviders = Object.keys(s.providers)
-      const matches = fuzzysort.go(providerID, availableProviders, { limit: 3, threshold: -10000 })
+      const matches = fuzzysort.go(providerID, availableProviders, {
+        limit: 3,
+        threshold: -10000,
+      })
       const suggestions = matches.map((m) => m.target)
       throw new ModelNotFoundError({ providerID, modelID, suggestions })
     }
@@ -1333,14 +1362,17 @@ export namespace Provider {
     const info = provider.models[modelID]
     if (!info) {
       const availableModels = Object.keys(provider.models)
-      const matches = fuzzysort.go(modelID, availableModels, { limit: 3, threshold: -10000 })
+      const matches = fuzzysort.go(modelID, availableModels, {
+        limit: 3,
+        threshold: -10000,
+      })
       const suggestions = matches.map((m) => m.target)
       throw new ModelNotFoundError({ providerID, modelID, suggestions })
     }
     return info
   }
 
-  export async function getLanguage(model: Model): Promise<LanguageModelV2> {
+  export async function getLanguage(model: Model): Promise<LanguageModelV3> {
     const s = await state()
     const key = `${model.providerID}/${model.id}`
     if (s.models.has(key)) return s.models.get(key)!
@@ -1350,7 +1382,10 @@ export namespace Provider {
 
     try {
       const language = s.modelLoaders[model.providerID]
-        ? await s.modelLoaders[model.providerID](sdk, model.api.id, { ...provider.options, ...model.options })
+        ? await s.modelLoaders[model.providerID](sdk, model.api.id, {
+            ...provider.options,
+            ...model.options,
+          })
         : sdk.languageModel(model.api.id)
       s.models.set(key, language)
       return language
@@ -1457,9 +1492,9 @@ export namespace Provider {
     if (cfg.model) return parseModel(cfg.model)
 
     const providers = await list()
-    const recent = (await Filesystem.readJson<{ recent?: { providerID: ProviderID; modelID: ModelID }[] }>(
-      path.join(Global.Path.state, "model.json"),
-    )
+    const recent = (await Filesystem.readJson<{
+      recent?: { providerID: ProviderID; modelID: ModelID }[]
+    }>(path.join(Global.Path.state, "model.json"))
       .then((x) => (Array.isArray(x.recent) ? x.recent : []))
       .catch(() => [])) as { providerID: ProviderID; modelID: ModelID }[]
     for (const entry of recent) {
