@@ -101,6 +101,19 @@ export function Prompt(props: PromptProps) {
   const hiddenPromptQueue = new Map<string, string[]>()
   const hiddenPromptInFlight = new Set<string>()
 
+  function decodeHiddenModelPrompt(text: string) {
+    try {
+      const parsed = JSON.parse(text) as { opencodeHiddenModelPrompt?: boolean; text?: unknown }
+      if (parsed?.opencodeHiddenModelPrompt === true && typeof parsed.text === "string") {
+        return parsed.text
+      }
+    } catch {
+      // Ignore JSON parse failures; normal prompt text should fall through.
+    }
+
+    return undefined
+  }
+
   const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
     if (!sessionID) return
     if (hiddenPromptInFlight.has(sessionID)) return
@@ -155,17 +168,19 @@ export function Prompt(props: PromptProps) {
   })
 
   onMount(() => {
-    const unsubscribeModelPrompt = sdk.event.on(TuiEvent.ModelPrompt.type, (evt) => {
-      const sessionID = props.sessionID
-      if (!sessionID) return
-
-      const queue = hiddenPromptQueue.get(sessionID) ?? []
-      queue.push(evt.properties.text)
-      hiddenPromptQueue.set(sessionID, queue)
-      void drainHiddenPromptQueue(sessionID)
-    })
-
     const unsubscribePromptAppend = sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
+      const hiddenText = decodeHiddenModelPrompt(evt.properties.text)
+      if (hiddenText) {
+        const sessionID = props.sessionID
+        if (!sessionID) return
+
+        const queue = hiddenPromptQueue.get(sessionID) ?? []
+        queue.push(hiddenText)
+        hiddenPromptQueue.set(sessionID, queue)
+        void drainHiddenPromptQueue(sessionID)
+        return
+      }
+
       if (!input || input.isDestroyed) return
       const shouldSubmit = Boolean((evt.properties as { submit?: boolean }).submit)
 
@@ -189,7 +204,6 @@ export function Prompt(props: PromptProps) {
     })
 
     onCleanup(() => {
-      unsubscribeModelPrompt()
       unsubscribePromptAppend()
     })
   })

@@ -11,12 +11,6 @@ export const TuiEvent = {
       submit: z.boolean().optional(),
     }),
   ),
-  ModelPrompt: BusEvent.define(
-    "tui.model.prompt",
-    z.object({
-      text: z.string(),
-    }),
-  ),
   CommandExecute: BusEvent.define(
     "tui.command.execute",
     z.object({
