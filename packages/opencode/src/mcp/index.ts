@@ -8,6 +8,7 @@ import {
   CallToolResultSchema,
   type Tool as MCPToolDef,
   ToolListChangedNotificationSchema,
+  NotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "../config/config"
 import { Log } from "../util/log"
@@ -51,6 +52,35 @@ export namespace MCP {
     "mcp.tools.changed",
     z.object({
       server: z.string(),
+    }),
+  )
+
+  // Custom notification schema for server-initiated notifications like
+  // notifications/claude/channel used by work-tracker
+  const ClaudeChannelNotificationSchema = NotificationSchema.extend({
+    method: z.literal("notifications/claude/channel"),
+    params: z.object({
+      content: z.string(),
+      meta: z
+        .object({
+          from: z.string().optional(),
+          to: z.string().optional(),
+          priority: z.string().optional(),
+          message_id: z.string().optional(),
+          thread_id: z.string().optional(),
+        })
+        .optional(),
+    }),
+  })
+
+  export const IncomingChannelMessage = BusEvent.define(
+    "mcp.incoming.channel.message",
+    z.object({
+      server: z.string(),
+      content: z.string(),
+      from: z.string().optional(),
+      priority: z.string().optional(),
+      threadId: z.string().optional(),
     }),
   )
 
@@ -471,6 +501,41 @@ export namespace MCP {
           await Bus.publish(ToolsChanged, { server: name }).catch((error) =>
             log.warn("failed to publish tools changed", { server: name, error }),
           )
+        })
+
+        // Handle custom notifications like notifications/claude/channel
+        client.setNotificationHandler(ClaudeChannelNotificationSchema, async (notification) => {
+          log.info("channel notification received", {
+            server: name,
+            from: notification.params.meta?.from,
+          })
+
+          const content = notification.params.content
+          const from = notification.params.meta?.from
+          const priority = notification.params.meta?.priority
+          const threadId = notification.params.meta?.thread_id
+
+          // Show a toast notification to the user
+          await Bus.publish(TuiEvent.ToastShow, {
+            title: from ? `Message from ${from}` : "New Message",
+            message: content.substring(0, 100) + (content.length > 100 ? "..." : ""),
+            variant: priority === "urgent" ? "error" : priority === "high" ? "warning" : "info",
+            duration: 8000,
+          }).catch((error) => log.debug("failed to show toast for channel message", { error }))
+
+          // Inject message into AI prompt
+          await Bus.publish(TuiEvent.PromptAppend, {
+            text: from ? `[Message from ${from}]: ${content}` : content,
+          }).catch((error) => log.debug("failed to append prompt for channel message", { error }))
+
+          // Publish to bus so UI can display the message
+          await Bus.publish(IncomingChannelMessage, {
+            server: name,
+            content,
+            from,
+            priority,
+            threadId,
+          }).catch((error) => log.debug("failed to publish channel message", { error }))
         })
       }
 
