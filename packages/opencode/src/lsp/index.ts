@@ -13,7 +13,7 @@ import { Process } from "../util/process"
 import { spawn as lspspawn } from "./launch"
 import { Effect, Layer, ServiceMap } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { makeRunPromise } from "@/effect/run-service"
+import { makeRuntime } from "@/effect/run-service"
 
 export namespace LSP {
   const log = Log.create({ service: "lsp" })
@@ -504,7 +504,7 @@ export namespace LSP {
     }),
   )
 
-  const runPromise = makeRunPromise(Service, layer)
+  const { runPromise } = makeRuntime(Service, layer)
 
   export const init = async () => runPromise((svc) => svc.init())
 
