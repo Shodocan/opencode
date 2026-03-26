@@ -3,7 +3,7 @@ import { Config } from "../config/config"
 import { Bus } from "../bus"
 import { Log } from "../util/log"
 import { createOpencodeClient } from "@opencode-ai/sdk"
-import { BunProc } from "../bun"
+import { Npm } from "../npm"
 import { Flag } from "../flag/flag"
 import { CodexAuthPlugin } from "./codex"
 import { Session } from "../session"
@@ -22,7 +22,6 @@ export namespace Plugin {
     hooks: Hooks[]
   }
 
-  // Hook names that follow the (input, output) => Promise<void> trigger pattern
   type TriggerName = {
     [K in keyof Hooks]-?: NonNullable<Hooks[K]> extends (input: any, output: any) => Promise<void> ? K : never
   }[keyof Hooks]
@@ -43,10 +42,8 @@ export namespace Plugin {
 
   export class Service extends ServiceMap.Service<Service, Interface>()("@opencode/Plugin") {}
 
-  // Built-in plugins that are directly imported (not installed from npm)
   const INTERNAL_PLUGINS: PluginInstance[] = [CodexAuthPlugin, CopilotAuthPlugin, GitlabAuthPlugin, PoeAuthPlugin]
 
-  // Old npm package names for plugins that are now built-in — skip if users still have them in config
   const DEPRECATED_PLUGIN_PACKAGES = ["opencode-openai-codex-auth", "opencode-copilot-auth"]
 
   export const layer = Layer.effect(
@@ -85,7 +82,7 @@ export namespace Plugin {
 
             for (const plugin of INTERNAL_PLUGINS) {
               log.info("loading internal plugin", { name: plugin.name })
-              const init = await plugin(input).catch((err) => {
+              const init = await plugin(input).catch((err: unknown) => {
                 log.error("failed to load internal plugin", { name: plugin.name, error: err })
               })
               if (init) hooks.push(init)
@@ -98,16 +95,14 @@ export namespace Plugin {
               if (DEPRECATED_PLUGIN_PACKAGES.some((pkg) => plugin.includes(pkg))) continue
               log.info("loading plugin", { path: plugin })
               if (!plugin.startsWith("file://")) {
-                const idx = plugin.lastIndexOf("@")
-                const pkg = idx > 0 ? plugin.substring(0, idx) : plugin
-                const version = idx > 0 ? plugin.substring(idx + 1) : "latest"
-                plugin = await BunProc.install(pkg, version).catch((err) => {
+                const spec = plugin
+                plugin = await Npm.add(spec).catch((err: unknown) => {
                   const cause = err instanceof Error ? err.cause : err
                   const detail = cause instanceof Error ? cause.message : String(cause ?? err)
-                  log.error("failed to install plugin", { pkg, version, error: detail })
+                  log.error("failed to install plugin", { plugin: spec, error: detail })
                   Bus.publish(Session.Event.Error, {
                     error: new NamedError.Unknown({
-                      message: `Failed to install plugin ${pkg}@${version}: ${detail}`,
+                      message: `Failed to install plugin ${spec}: ${detail}`,
                     }).toObject(),
                   })
                   return ""
@@ -115,9 +110,6 @@ export namespace Plugin {
                 if (!plugin) continue
               }
 
-              // Prevent duplicate initialization when plugins export the same function
-              // as both a named export and default export (e.g., `export const X` and `export default X`).
-              // Object.entries(mod) would return both entries pointing to the same function reference.
               await import(plugin)
                 .then(async (mod) => {
                   const seen = new Set<PluginInstance>()
@@ -127,7 +119,7 @@ export namespace Plugin {
                     hooks.push(await fn(input))
                   }
                 })
-                .catch((err) => {
+                .catch((err: unknown) => {
                   const message = err instanceof Error ? err.message : String(err)
                   log.error("failed to load plugin", { path: plugin, error: message })
                   Bus.publish(Session.Event.Error, {
@@ -138,7 +130,6 @@ export namespace Plugin {
                 })
             }
 
-            // Notify plugins of current config
             for (const hook of hooks) {
               try {
                 await (hook as any).config?.(cfg)
@@ -148,7 +139,6 @@ export namespace Plugin {
             }
           })
 
-          // Subscribe to bus events, fiber interrupted when scope closes
           yield* bus.subscribeAll().pipe(
             Stream.runForEach((input) =>
               Effect.sync(() => {

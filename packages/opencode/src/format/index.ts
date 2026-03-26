@@ -37,9 +37,8 @@ export namespace Format {
     Effect.gen(function* () {
       const state = yield* InstanceState.make(
         Effect.fn("Format.state")(function* (_ctx) {
-          const enabled: Record<string, boolean> = {}
+          const enabled: Record<string, string[] | false> = {}
           const formatters: Record<string, Formatter.Info> = {}
-
           const cfg = yield* Effect.promise(() => Config.get())
 
           if (cfg.formatter !== false) {
@@ -58,11 +57,12 @@ export namespace Format {
               })
 
               if (info.command.length === 0) continue
+              const cmd = info.command as string[]
 
               formatters[name] = {
                 ...info,
                 name,
-                enabled: async () => true,
+                enabled: async () => cmd,
               }
             }
           } else {
@@ -79,21 +79,24 @@ export namespace Format {
           }
 
           async function getFormatter(ext: string) {
-            const matching = Object.values(formatters).filter((item) => item.extensions.includes(ext))
-            const checks = await Promise.all(
-              matching.map(async (item) => {
-                log.info("checking", { name: item.name, ext })
-                const on = await isEnabled(item)
-                if (on) {
-                  log.info("enabled", { name: item.name, ext })
-                }
-                return {
-                  item,
-                  enabled: on,
-                }
-              }),
-            )
-            return checks.filter((x) => x.enabled).map((x) => x.item)
+            const result: Array<{
+              name: string
+              command: string[]
+              environment?: Record<string, string>
+            }> = []
+            for (const item of Object.values(formatters)) {
+              log.info("checking", { name: item.name, ext })
+              if (!item.extensions.includes(ext)) continue
+              const cmd = await isEnabled(item)
+              if (!cmd) continue
+              log.info("enabled", { name: item.name, ext })
+              result.push({
+                name: item.name,
+                command: cmd,
+                environment: item.environment,
+              })
+            }
+            return result
           }
 
           async function formatFile(filepath: string) {
@@ -152,7 +155,7 @@ export namespace Format {
           result.push({
             name: formatter.name,
             extensions: formatter.extensions,
-            enabled: isOn,
+            enabled: !!isOn,
           })
         }
         return result
