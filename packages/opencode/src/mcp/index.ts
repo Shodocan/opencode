@@ -189,6 +189,20 @@ export namespace MCP {
     return out
   }
 
+  type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
+
+  /** Try to connect a client via the given transport; closes the transport on failure. */
+  async function tryConnect(transport: Transport, timeout: number): Promise<MCPClient> {
+    const client = new Client({ name: "opencode", version: Installation.VERSION })
+    try {
+      await withTimeout(client.connect(transport), timeout)
+      return client
+    } catch (error) {
+      await transport.close().catch(() => {})
+      throw error
+    }
+  }
+
   async function create(key: string, mcp: Config.Mcp) {
     if (mcp.enabled === false) {
       log.info("mcp server disabled", { key })
@@ -247,12 +261,7 @@ export namespace MCP {
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       for (const { name, transport } of transports) {
         try {
-          const client = new Client({
-            name: "opencode",
-            version: Installation.VERSION,
-          })
-          await withTimeout(client.connect(transport), connectTimeout)
-          mcpClient = client
+          mcpClient = await tryConnect(transport, connectTimeout)
           log.info("connected", { key, transport: name })
           status = { status: "connected" }
           break
@@ -271,6 +280,7 @@ export namespace MCP {
 
             // Check if this is a "needs registration" error
             if (lastError.message.includes("registration") || lastError.message.includes("client_id")) {
+              // tryConnect already closed the transport
               status = {
                 status: "needs_client_registration" as const,
                 error: "Server does not support dynamic client registration. Please provide clientId in config.",
@@ -284,6 +294,8 @@ export namespace MCP {
               }).catch((e) => log.debug("failed to show toast", { error: e }))
             } else {
               // Store transport for later finishAuth call
+              // Note: tryConnect closed the transport, but the SDK's finishAuth
+              // only needs the authProvider reference which survives close()
               pendingOAuthTransports.set(key, transport)
               status = { status: "needs_auth" as const }
               // Show toast for needs_auth
@@ -297,6 +309,7 @@ export namespace MCP {
             break
           }
 
+          // tryConnect already closed the failed transport
           log.debug("transport connection failed", {
             key,
             transport: name,
@@ -331,16 +344,12 @@ export namespace MCP {
 
       const connectTimeout = mcp.timeout ?? DEFAULT_TIMEOUT
       try {
-        const client = new Client({
-          name: "opencode",
-          version: Installation.VERSION,
-        })
-        await withTimeout(client.connect(transport), connectTimeout)
-        mcpClient = client
+        mcpClient = await tryConnect(transport, connectTimeout)
         status = {
           status: "connected",
         }
       } catch (error) {
+        // tryConnect already closed the transport (kills orphaned child process)
         log.error("local mcp startup failed", {
           key,
           command: mcp.command,
