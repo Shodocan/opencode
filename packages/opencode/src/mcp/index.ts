@@ -55,23 +55,24 @@ export namespace MCP {
     }),
   )
 
-  // Custom notification schema for server-initiated notifications like
-  // notifications/claude/channel used by work-tracker
-  const ClaudeChannelNotificationSchema = NotificationSchema.extend({
-    method: z.literal("notifications/claude/channel"),
-    params: z.object({
-      content: z.string(),
-      meta: z
-        .object({
-          from: z.string().optional(),
-          to: z.string().optional(),
-          subject: z.string().optional(),
-          priority: z.string().optional(),
-          message_id: z.string().optional(),
-          thread_id: z.string().optional(),
-        })
-        .optional(),
-    }),
+  const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
+    method: z.literal("notifications/opencode/prompt/append"),
+    params: TuiEvent.PromptAppend.properties,
+  })
+
+  const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
+    method: z.literal("notifications/opencode/command/execute"),
+    params: TuiEvent.CommandExecute.properties,
+  })
+
+  const TuiToastShowNotificationSchema = NotificationSchema.extend({
+    method: z.literal("notifications/opencode/toast/show"),
+    params: TuiEvent.ToastShow.properties,
+  })
+
+  const TuiSessionSelectNotificationSchema = NotificationSchema.extend({
+    method: z.literal("notifications/opencode/session/select"),
+    params: TuiEvent.SessionSelect.properties,
   })
 
   export const BrowserOpenFailed = BusEvent.define(
@@ -493,42 +494,28 @@ export namespace MCP {
           )
         })
 
-        // Handle custom notifications like notifications/claude/channel
-        client.setNotificationHandler(ClaudeChannelNotificationSchema, async (notification) => {
-          const content = notification.params.content
-          const from = notification.params.meta?.from
-          const to = notification.params.meta?.to
-          const subject = notification.params.meta?.subject
-          const priority = notification.params.meta?.priority
-          const threadId = notification.params.meta?.thread_id
+        client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
+          await Bus.publish(TuiEvent.PromptAppend, notification.params).catch((error) =>
+            log.error("failed to publish prompt append notification", { server: name, error }),
+          )
+        })
 
-          // Format rich message for AI context
-          const formattedMessage = [
-            `--- INCOMING MESSAGE ---`,
-            `From: ${from || "unknown"}`,
-            to ? `To: ${to}` : "",
-            `Via: ${name}`,
-            `Subject: ${subject || (threadId ? `Thread: ${threadId}` : "Direct message")}`,
-            `Priority: ${priority || "normal"}`,
-            `---`,
-            content,
-            `--- END MESSAGE ---`,
-          ]
-            .filter((line) => line !== "")
-            .join("\n")
+        client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {
+          await Bus.publish(TuiEvent.CommandExecute, notification.params).catch((error) =>
+            log.error("failed to publish command execute notification", { server: name, error }),
+          )
+        })
 
-          // Show a toast notification to the user
-          await Bus.publish(TuiEvent.ToastShow, {
-            title: from ? `Message from ${from}` : "New Message",
-            message: content.substring(0, 100) + (content.length > 100 ? "..." : ""),
-            variant: priority === "urgent" ? "error" : priority === "high" ? "warning" : "info",
-            duration: 8000,
-          }).catch((error) => log.error("failed to show toast for channel message", { error }))
+        client.setNotificationHandler(TuiToastShowNotificationSchema, async (notification) => {
+          await Bus.publish(TuiEvent.ToastShow, notification.params).catch((error) =>
+            log.error("failed to publish toast notification", { server: name, error }),
+          )
+        })
 
-          // Inject formatted message into AI prompt
-          await Bus.publish(TuiEvent.PromptAppend, {
-            text: formattedMessage,
-          }).catch((error) => log.error("failed to append prompt for channel message", { error }))
+        client.setNotificationHandler(TuiSessionSelectNotificationSchema, async (notification) => {
+          await Bus.publish(TuiEvent.SessionSelect, notification.params).catch((error) =>
+            log.error("failed to publish session select notification", { server: name, error }),
+          )
         })
       }
 

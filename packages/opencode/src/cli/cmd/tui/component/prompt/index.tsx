@@ -112,9 +112,11 @@ export function Prompt(props: PromptProps) {
       input.gotoBufferEnd()
       renderer.requestRender()
 
-      setTimeout(() => {
-        void submit()
-      }, 100)
+      if (evt.properties.submit) {
+        setTimeout(() => {
+          void submit()
+        }, 100)
+      }
     }, 0)
   })
 
