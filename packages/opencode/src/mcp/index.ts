@@ -55,9 +55,9 @@ export namespace MCP {
     }),
   )
 
-  const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
+  const TuiModelPromptNotificationSchema = NotificationSchema.extend({
     method: z.literal("notifications/opencode/prompt/append"),
-    params: TuiEvent.PromptAppend.properties,
+    params: TuiEvent.ModelPrompt.properties,
   })
 
   const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
@@ -494,9 +494,11 @@ export namespace MCP {
           )
         })
 
-        client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
-          await Bus.publish(TuiEvent.PromptAppend, notification.params).catch((error) =>
-            log.error("failed to publish prompt append notification", { server: name, error }),
+        client.setNotificationHandler(TuiModelPromptNotificationSchema, async (notification) => {
+          // Work-tracker messages become hidden synthetic prompts so the model sees them
+          // without mutating the user's visible textarea.
+          await Bus.publish(TuiEvent.ModelPrompt, { text: notification.params.text }).catch((error) =>
+            log.error("failed to publish model prompt notification", { server: name, error }),
           )
         })
 

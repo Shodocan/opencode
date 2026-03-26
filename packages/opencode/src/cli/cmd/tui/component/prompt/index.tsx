@@ -97,28 +97,101 @@ export function Prompt(props: PromptProps) {
   const agentStyleId = syntax().getStyleId("extmark.agent")!
   const pasteStyleId = syntax().getStyleId("extmark.paste")!
   let promptPartTypeId = 0
+  // Hidden work-tracker messages are delivered as synthetic model prompts.
+  const hiddenPromptQueue = new Map<string, string[]>()
+  const hiddenPromptInFlight = new Set<string>()
 
-  sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
-    if (!input || input.isDestroyed) return
-    const shouldSubmit = Boolean((evt.properties as { submit?: boolean }).submit)
+  const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
+    if (!sessionID) return
+    if (hiddenPromptInFlight.has(sessionID)) return
 
-    input.insertText(evt.properties.text)
-    setStore("prompt", "input", input.plainText)
-    autocomplete.onInput(input.plainText)
+    const queue = hiddenPromptQueue.get(sessionID)
+    if (!queue || queue.length === 0) return
 
-    setTimeout(() => {
-      if (!input || input.isDestroyed) return
-      input.focus()
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
+    hiddenPromptInFlight.add(sessionID)
+    try {
+      while (queue.length > 0) {
+        const text = queue.shift()
+        if (!text) continue
 
-      if (shouldSubmit) {
-        setTimeout(() => {
-          void submit()
-        }, 100)
+        const agent = local.agent.current()
+        const model = local.model.current()
+
+        await sdk.client.session
+          .prompt({
+            sessionID,
+            agent: agent.name,
+            ...(model ? { model } : {}),
+            variant: local.model.variant.current(),
+            parts: [
+              {
+                type: "text",
+                text,
+                synthetic: true,
+              },
+            ],
+          })
+          .catch((error) => {
+            console.error("failed to deliver hidden model prompt", error)
+          })
       }
-    }, 0)
+    } finally {
+      hiddenPromptInFlight.delete(sessionID)
+
+      if (queue.length === 0) {
+        hiddenPromptQueue.delete(sessionID)
+      }
+
+      if (queue.length > 0) {
+        void drainHiddenPromptQueue(sessionID)
+      }
+    }
+  }
+
+  createEffect(() => {
+    if (props.sessionID) {
+      void drainHiddenPromptQueue(props.sessionID)
+    }
+  })
+
+  onMount(() => {
+    const unsubscribeModelPrompt = sdk.event.on(TuiEvent.ModelPrompt.type, (evt) => {
+      const sessionID = props.sessionID
+      if (!sessionID) return
+
+      const queue = hiddenPromptQueue.get(sessionID) ?? []
+      queue.push(evt.properties.text)
+      hiddenPromptQueue.set(sessionID, queue)
+      void drainHiddenPromptQueue(sessionID)
+    })
+
+    const unsubscribePromptAppend = sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
+      if (!input || input.isDestroyed) return
+      const shouldSubmit = Boolean((evt.properties as { submit?: boolean }).submit)
+
+      input.insertText(evt.properties.text)
+      setStore("prompt", "input", input.plainText)
+      autocomplete.onInput(input.plainText)
+
+      setTimeout(() => {
+        if (!input || input.isDestroyed) return
+        input.focus()
+        input.getLayoutNode().markDirty()
+        input.gotoBufferEnd()
+        renderer.requestRender()
+
+        if (shouldSubmit) {
+          setTimeout(() => {
+            void submit()
+          }, 100)
+        }
+      }, 0)
+    })
+
+    onCleanup(() => {
+      unsubscribeModelPrompt()
+      unsubscribePromptAppend()
+    })
   })
 
   createEffect(() => {
