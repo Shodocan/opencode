@@ -100,6 +100,7 @@ export function Prompt(props: PromptProps) {
 
   sdk.event.on(TuiEvent.PromptAppend.type, (evt) => {
     if (!input || input.isDestroyed) return
+    const shouldSubmit = Boolean((evt.properties as { submit?: boolean }).submit)
 
     input.insertText(evt.properties.text)
     setStore("prompt", "input", input.plainText)
@@ -112,7 +113,7 @@ export function Prompt(props: PromptProps) {
       input.gotoBufferEnd()
       renderer.requestRender()
 
-      if (evt.properties.submit) {
+      if (shouldSubmit) {
         setTimeout(() => {
           void submit()
         }, 100)
