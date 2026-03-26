@@ -505,15 +505,26 @@ export namespace MCP {
 
         // Handle custom notifications like notifications/claude/channel
         client.setNotificationHandler(ClaudeChannelNotificationSchema, async (notification) => {
-          log.info("channel notification received", {
-            server: name,
-            from: notification.params.meta?.from,
-          })
-
           const content = notification.params.content
           const from = notification.params.meta?.from
+          const to = notification.params.meta?.to
           const priority = notification.params.meta?.priority
           const threadId = notification.params.meta?.thread_id
+
+          // Format rich message for AI context
+          const formattedMessage = [
+            `--- INCOMING MESSAGE ---`,
+            `From: ${from || "unknown"}`,
+            to ? `To: ${to}` : "",
+            `Via: ${name}`,
+            `Subject: ${threadId ? `Thread: ${threadId}` : "Direct message"}`,
+            `Priority: ${priority || "normal"}`,
+            `---`,
+            content,
+            `--- END MESSAGE ---`,
+          ]
+            .filter((line) => line !== "")
+            .join("\n")
 
           // Show a toast notification to the user
           await Bus.publish(TuiEvent.ToastShow, {
@@ -521,12 +532,12 @@ export namespace MCP {
             message: content.substring(0, 100) + (content.length > 100 ? "..." : ""),
             variant: priority === "urgent" ? "error" : priority === "high" ? "warning" : "info",
             duration: 8000,
-          }).catch((error) => log.debug("failed to show toast for channel message", { error }))
+          }).catch((error) => log.error("failed to show toast for channel message", { error }))
 
-          // Inject message into AI prompt
+          // Inject formatted message into AI prompt
           await Bus.publish(TuiEvent.PromptAppend, {
-            text: from ? `[Message from ${from}]: ${content}` : content,
-          }).catch((error) => log.debug("failed to append prompt for channel message", { error }))
+            text: formattedMessage,
+          }).catch((error) => log.error("failed to append prompt for channel message", { error }))
 
           // Publish to bus so UI can display the message
           await Bus.publish(IncomingChannelMessage, {

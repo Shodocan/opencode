@@ -24,6 +24,7 @@ import { useExit } from "../../context/exit"
 import { Clipboard } from "../../util/clipboard"
 import type { FilePart } from "@opencode-ai/sdk/v2"
 import { TuiEvent } from "../../event"
+import { Bus } from "@/bus"
 import { iife } from "@/util/iife"
 import { Locale } from "@/util/locale"
 import { formatDuration } from "@/util/format"
@@ -107,6 +108,10 @@ export function Prompt(props: PromptProps) {
       input.getLayoutNode().markDirty()
       input.gotoBufferEnd()
       renderer.requestRender()
+      // Auto-submit after inserting channel message
+      setTimeout(() => {
+        Bus.publish(TuiEvent.CommandExecute, { command: "prompt.submit" })
+      }, 100)
     }, 0)
   })
 
