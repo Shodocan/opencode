@@ -8,6 +8,14 @@ export const TuiEvent = {
     z.object({
       text: z.string(),
       submit: z.boolean().optional(),
+      sessionID: SessionID.zod.optional(),
+    }),
+  ),
+  PromptSynthetic: BusEvent.define(
+    "tui.prompt.synthetic",
+    z.object({
+      text: z.string(),
+      sessionID: SessionID.zod,
     }),
   ),
   CommandExecute: BusEvent.define(

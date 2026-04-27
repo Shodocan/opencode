@@ -370,6 +370,16 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic = {
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
   }
 }
 
@@ -1132,6 +1142,7 @@ export type GlobalEvent = {
     | EventSessionIdle
     | EventSessionCompacted
     | EventTuiPromptAppend
+    | EventTuiPromptSynthetic
     | EventTuiCommandExecute
     | EventTuiToastShow
     | EventTuiSessionSelect
@@ -2058,6 +2069,7 @@ export type Event =
   | EventSessionIdle
   | EventSessionCompacted
   | EventTuiPromptAppend
+  | EventTuiPromptSynthetic
   | EventTuiCommandExecute
   | EventTuiToastShow
   | EventTuiSessionSelect
@@ -5209,7 +5221,12 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
+  body?:
+    | EventTuiPromptAppend
+    | EventTuiPromptSynthetic
+    | EventTuiCommandExecute
+    | EventTuiToastShow
+    | EventTuiSessionSelect
   path?: never
   query?: {
     directory?: string

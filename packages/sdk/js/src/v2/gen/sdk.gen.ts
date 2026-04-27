@@ -22,6 +22,7 @@ import type {
   EventSubscribeResponses,
   EventTuiCommandExecute,
   EventTuiPromptAppend,
+  EventTuiPromptSynthetic,
   EventTuiSessionSelect,
   EventTuiToastShow,
   ExperimentalConsoleGetResponses,
@@ -4027,7 +4028,12 @@ export class Tui extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
-      body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
+      body?:
+        | EventTuiPromptAppend
+        | EventTuiPromptSynthetic
+        | EventTuiCommandExecute
+        | EventTuiToastShow
+        | EventTuiSessionSelect
     },
     options?: Options<never, ThrowOnError>,
   ) {

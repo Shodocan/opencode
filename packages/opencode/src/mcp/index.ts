@@ -24,6 +24,7 @@ import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
+import { SessionID } from "@/session/schema"
 import open from "open"
 import { Effect, Exit, Layer, Option, Context, Stream } from "effect"
 import { EffectBridge } from "@/effect"
@@ -54,7 +55,14 @@ export const ToolsChanged = BusEvent.define(
 
 const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/prompt/append"),
-  params: TuiEvent.PromptAppend.properties,
+  params: TuiEvent.PromptAppend.properties.extend({
+    sessionID: SessionID.zod,
+  }),
+})
+
+const TuiPromptSyntheticNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/prompt/synthetic"),
+  params: TuiEvent.PromptSynthetic.properties,
 })
 
 const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
@@ -506,17 +514,11 @@ export const layer = Layer.effect(
       })
 
       client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
-        await bridge.promise(
-          bus
-            .publish(TuiEvent.PromptAppend, {
-              submit: true,
-              text: JSON.stringify({
-                opencodeHiddenModelPrompt: true,
-                text: notification.params.text,
-              }),
-            })
-            .pipe(Effect.ignore),
-        )
+        await bridge.promise(bus.publish(TuiEvent.PromptAppend, notification.params).pipe(Effect.ignore))
+      })
+
+      client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
+        await bridge.promise(bus.publish(TuiEvent.PromptSynthetic, notification.params).pipe(Effect.ignore))
       })
 
       client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {

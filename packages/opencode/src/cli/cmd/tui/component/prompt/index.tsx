@@ -42,6 +42,7 @@ import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceCreate, restoreWorkspaceSession } from "../dialog-workspace-create"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "@tui/context/args"
+import { createPromptEventHandlers } from "./events"
 
 export type PromptProps = {
   sessionID?: string
@@ -136,19 +137,6 @@ export function Prompt(props: PromptProps) {
   const hiddenPromptQueue = new Map<string, string[]>()
   const hiddenPromptInFlight = new Set<string>()
 
-  function decodeHiddenModelPrompt(text: string) {
-    try {
-      const parsed = JSON.parse(text) as { opencodeHiddenModelPrompt?: boolean; text?: unknown }
-      if (parsed?.opencodeHiddenModelPrompt === true && typeof parsed.text === "string") {
-        return parsed.text
-      }
-    } catch {
-      // Ignore JSON parse failures; normal prompt text should fall through.
-    }
-
-    return undefined
-  }
-
   const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
     if (!sessionID) return
     if (hiddenPromptInFlight.has(sessionID)) return
@@ -202,40 +190,45 @@ export function Prompt(props: PromptProps) {
     }
   })
 
-  event.on(TuiEvent.PromptAppend.type, (evt) => {
-    const hiddenText = decodeHiddenModelPrompt(evt.properties.text)
-    if (hiddenText) {
-      const sessionID = props.sessionID
-      if (!sessionID) return
-
-      const queue = hiddenPromptQueue.get(sessionID) ?? []
-      queue.push(hiddenText)
-      hiddenPromptQueue.set(sessionID, queue)
-      void drainHiddenPromptQueue(sessionID)
-      return
-    }
-
-    if (!input || input.isDestroyed) return
-    const shouldSubmit = Boolean(evt.properties.submit)
-
-    input.insertText(evt.properties.text)
-    setStore("prompt", "input", input.plainText)
-    autocomplete.onInput(input.plainText)
-
-    setTimeout(() => {
-      // setTimeout is a workaround and needs to be addressed properly
+  const promptEvents = createPromptEventHandlers({
+    sessionID: () => props.sessionID,
+    onAppend(evt) {
       if (!input || input.isDestroyed) return
-      input.focus()
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
+      const shouldSubmit = Boolean(evt.submit)
 
-      if (shouldSubmit) {
-        setTimeout(() => {
-          void submit()
-        }, 100)
-      }
-    })
+      input.insertText(evt.text)
+      setStore("prompt", "input", input.plainText)
+      autocomplete.onInput(input.plainText)
+
+      setTimeout(() => {
+        // setTimeout is a workaround and needs to be addressed properly
+        if (!input || input.isDestroyed) return
+        input.focus()
+        input.getLayoutNode().markDirty()
+        input.gotoBufferEnd()
+        renderer.requestRender()
+
+        if (shouldSubmit) {
+          setTimeout(() => {
+            void submit()
+          }, 100)
+        }
+      })
+    },
+    onSynthetic(evt) {
+      const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
+      queue.push(evt.text)
+      hiddenPromptQueue.set(evt.sessionID, queue)
+      void drainHiddenPromptQueue(evt.sessionID)
+    },
+  })
+
+  event.on(TuiEvent.PromptAppend.type, (evt) => {
+    promptEvents.onAppend(evt.properties)
+  })
+
+  event.on(TuiEvent.PromptSynthetic.type, (evt) => {
+    promptEvents.onSynthetic(evt.properties)
   })
 
   createEffect(() => {

@@ -171,6 +171,9 @@ beforeEach(() => {
 // Import after mocks
 const { MCP } = await import("../../src/mcp/index")
 const { Instance } = await import("../../src/project/instance")
+const { Bus } = await import("../../src/bus")
+const { TuiEvent } = await import("../../src/cli/cmd/tui/event")
+const { SessionID } = await import("../../src/session/schema")
 const { tmpdir } = await import("../fixture/fixture")
 
 // --- Helper ---
@@ -200,6 +203,17 @@ function withInstance(
         await Instance.dispose()
       },
     })
+  }
+}
+
+function notificationHandlers(name: string) {
+  const handlers = Array.from(getOrCreateClientState(name).notificationHandlers.values())
+  return {
+    promptAppend: handlers[1],
+    promptSynthetic: handlers[2],
+    commandExecute: handlers[3],
+    toastShow: handlers[4],
+    sessionSelect: handlers[5],
   }
 }
 
@@ -265,6 +279,57 @@ test(
       expect(Object.keys(after).some((key) => key.includes("next_tool"))).toBe(true)
       expect(Object.keys(after).some((key) => key.includes("test_tool"))).toBe(false)
       expect(serverState.listToolsCalls).toBe(2)
+    }),
+  ),
+)
+
+test(
+  "MCP TUI notifications publish the matching bus events",
+  withInstance({}, (mcp) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "notify-server"
+      getOrCreateClientState("notify-server")
+
+      const bus = yield* Bus.Service
+      const promptAppend: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
+      const promptSynthetic: Array<{ text: string; sessionID: string }> = []
+      const commands: Array<{ command: string }> = []
+      const toasts: Array<{ title?: string; message: string; variant: string; duration?: number }> = []
+      const sessionSelect: Array<{ sessionID: string }> = []
+      const unsubs = [
+        yield* bus.subscribeCallback(TuiEvent.PromptAppend, (evt) => promptAppend.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.PromptSynthetic, (evt) => promptSynthetic.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.CommandExecute, (evt) => commands.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.ToastShow, (evt) => toasts.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.SessionSelect, (evt) => sessionSelect.push(evt.properties)),
+      ]
+
+      try {
+        yield* mcp.add("notify-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        const sessionID = SessionID.make("ses_notify-server")
+        const handlers = notificationHandlers("notify-server")
+
+        yield* Effect.promise(() => handlers.promptAppend?.({ params: { text: "visible", sessionID, submit: true } }))
+        yield* Effect.promise(() => handlers.promptSynthetic?.({ params: { text: "hidden", sessionID } }))
+        yield* Effect.promise(() => handlers.commandExecute?.({ params: { command: "prompt.submit" } }))
+        yield* Effect.promise(() =>
+          handlers.toastShow?.({ params: { title: "Heads up", message: "done", variant: "info", duration: 250 } }),
+        )
+        yield* Effect.promise(() => handlers.sessionSelect?.({ params: { sessionID } }))
+        yield* Effect.promise(() => Bun.sleep(20))
+
+        expect(promptAppend).toEqual([{ text: "visible", sessionID, submit: true }])
+        expect(promptSynthetic).toEqual([{ text: "hidden", sessionID }])
+        expect(commands).toEqual([{ command: "prompt.submit" }])
+        expect(toasts).toEqual([{ title: "Heads up", message: "done", variant: "info", duration: 250 }])
+        expect(sessionSelect).toEqual([{ sessionID }])
+      } finally {
+        unsubs.forEach((unsub) => unsub())
+      }
     }),
   ),
 )

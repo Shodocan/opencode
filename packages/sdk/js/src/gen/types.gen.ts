@@ -615,6 +615,16 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic = {
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
   }
 }
 
@@ -727,6 +737,7 @@ export type Event =
   | EventFileWatcherUpdated
   | EventVcsBranchUpdated
   | EventTuiPromptAppend
+  | EventTuiPromptSynthetic
   | EventTuiCommandExecute
   | EventTuiToastShow
   | EventPtyCreated
@@ -3787,7 +3798,7 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow
+  body?: EventTuiPromptAppend | EventTuiPromptSynthetic | EventTuiCommandExecute | EventTuiToastShow
   path?: never
   query?: {
     directory?: string
