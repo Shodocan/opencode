@@ -26,6 +26,7 @@ import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
+import { SessionStatus } from "@/session/status"
 import open from "open"
 import { Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
@@ -610,8 +611,22 @@ export const layer = Layer.effect(
           { concurrency: "unbounded" },
         )
 
+        // Fan opencode session status changes out to every connected MCP server.
+        // Servers opt in by registering a handler for "notifications/opencode/session/status";
+        // servers that ignore the method get the notification dropped by the MCP SDK.
+        const unsubscribeStatus = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
+          const params = { sessionID: evt.properties.sessionID, status: evt.properties.status }
+          for (const [name, client] of Object.entries(s.clients)) {
+            if (s.status[name]?.status !== "connected") continue
+            client
+              .notification({ method: "notifications/opencode/session/status", params })
+              .catch((cause) => log.warn("session.status notification failed", { server: name, cause }))
+          }
+        })
+
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            unsubscribeStatus()
             yield* Effect.forEach(
               Object.values(s.clients),
               (client) =>
