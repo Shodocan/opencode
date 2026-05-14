@@ -26,14 +26,12 @@ import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
-import { SessionID } from "@/session/schema"
 import open from "open"
 import { Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { zodObject } from "@/util/effect-zod"
 
 const log = Log.create({ service: "mcp" })
 const DEFAULT_TIMEOUT = 30_000
@@ -60,29 +58,43 @@ export const ToolsChanged = BusEvent.define(
 
 const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/prompt/append"),
-  params: zodObject(TuiEvent.PromptAppend.properties).extend({
-    sessionID: SessionID.zod,
+  params: z.object({
+    text: z.string(),
+    submit: z.boolean().optional(),
+    sessionID: z.string().optional(),
   }),
 })
 
 const TuiPromptSyntheticNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/prompt/synthetic"),
-  params: zodObject(TuiEvent.PromptSynthetic.properties),
+  params: z.object({
+    text: z.string(),
+    sessionID: z.string(),
+  }),
 })
 
 const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/command/execute"),
-  params: zodObject(TuiEvent.CommandExecute.properties),
+  params: z.object({
+    command: z.string(),
+  }),
 })
 
 const TuiToastShowNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/toast/show"),
-  params: zodObject(TuiEvent.ToastShow.properties),
+  params: z.object({
+    title: z.string().optional(),
+    message: z.string(),
+    variant: z.enum(["info", "success", "warning", "error"]),
+    duration: z.number().int().positive().optional(),
+  }),
 })
 
 const TuiSessionSelectNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/session/select"),
-  params: zodObject(TuiEvent.SessionSelect.properties),
+  params: z.object({
+    sessionID: z.string(),
+  }),
 })
 
 export const BrowserOpenFailed = BusEvent.define(
