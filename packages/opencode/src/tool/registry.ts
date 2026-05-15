@@ -145,7 +145,14 @@ export const layer: Layer.Layer<
           const entries = Object.entries(def.args)
           const allZod = entries.every((entry) => isZodType(entry[1]))
           const zodParams = allZod ? z.object(def.args) : undefined
-          const jsonSchema = zodParams ? zodJsonSchema(zodParams) : legacyJsonSchema(entries)
+          // Newer @opencode-ai/plugin versions precompute JSON Schema with the
+          // Zod instance that owns arg metadata. Fall back for older/manual
+          // custom tools that only expose raw Zod args.
+          const jsonSchema = zodParams
+            ? isJsonSchemaDefinition(def.jsonSchema)
+              ? (def.jsonSchema as JSONSchema7)
+              : zodJsonSchema(zodParams)
+            : legacyJsonSchema(entries)
           const parameters = zodParams
             ? Schema.declare<unknown>((u): u is unknown => zodParams.safeParse(u).success)
             : Schema.Unknown
@@ -201,7 +208,8 @@ export const layer: Layer.Layer<
           // `match` is an absolute filesystem path from `Glob.scanSync(..., { absolute: true })`.
           // Import it as `file://` so Node on Windows accepts the dynamic import.
           const mod = yield* Effect.promise(() => import(pathToFileURL(match).href))
-          for (const [id, def] of Object.entries<ToolDefinition>(mod)) {
+          for (const [id, def] of Object.entries(mod)) {
+            if (!isPluginTool(def)) continue
             custom.push(fromPlugin(id === "default" ? namespace : `${namespace}_${id}`, def))
           }
         }
@@ -394,6 +402,10 @@ export const defaultLayer = Layer.suspend(() =>
 
 function isZodType(value: unknown): value is z.ZodType {
   return typeof value === "object" && value !== null && "_zod" in value
+}
+
+function isPluginTool(value: unknown): value is ToolDefinition {
+  return typeof value === "object" && value !== null && "args" in value && "description" in value && "execute" in value
 }
 
 function isJsonSchemaDefinition(value: unknown): value is JSONSchema7Definition {
