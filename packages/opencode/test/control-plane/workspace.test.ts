@@ -139,7 +139,18 @@ async function initGitRepo(dir: string) {
   await $`git commit -m "base"`.cwd(dir).quiet()
 }
 
-const runWorkspace = <A, E>(effect: Effect.Effect<A, E, Workspace.Service>) => AppRuntime.runPromise(effect)
+function currentInstance() {
+  try {
+    return context.use()
+  } catch {
+    return undefined
+  }
+}
+
+const runWorkspace = <A, E>(effect: Effect.Effect<A, E, Workspace.Service>) => {
+  const ctx = currentInstance()
+  return AppRuntime.runPromise(ctx ? effect.pipe(Effect.provideService(InstanceRef, ctx)) : effect)
+}
 const createWorkspace = (input: Workspace.CreateInput) =>
   runWorkspace(Workspace.Service.use((workspace) => workspace.create(input)))
 const warpWorkspaceSession = (input: Workspace.SessionWarpInput) =>
@@ -162,8 +173,12 @@ const startWorkspaceSyncingWithFlag = (projectID: ProjectID, experimentalWorkspa
       Effect.provide(workspaceLayer(experimentalWorkspaces)),
     ),
   )
-const waitForWorkspaceSync = (workspaceID: WorkspaceID, state: Record<string, number>, signal?: AbortSignal) =>
-  runWorkspace(Workspace.Service.use((workspace) => workspace.waitForSync(workspaceID, state, signal)))
+const waitForWorkspaceSync = (
+  workspaceID: WorkspaceID,
+  state: Record<string, number>,
+  signal?: AbortSignal,
+  timeout?: number,
+) => runWorkspace(Workspace.Service.use((workspace) => workspace.waitForSync(workspaceID, state, signal, timeout)))
 
 function captureGlobalEvents() {
   const events: GlobalEvent[] = []
@@ -917,7 +932,9 @@ describe("workspace CRUD", () => {
       const previous = workspaceInfo(projectID, previousType)
       insertWorkspace(previous)
       registerAdapter(projectID, previousType, localAdapter(workspaceTmp.path, { createDir: false }).adapter)
-      const session = await AppRuntime.runPromise(SessionNs.Service.use((svc) => svc.create({})))
+      const session = await AppRuntime.runPromise(
+        SessionNs.Service.use((svc) => svc.create({})).pipe(Effect.provideService(InstanceRef, instance)),
+      )
       attachSessionToWorkspace(session.id, previous.id)
 
       const workspaceCtx = await AppRuntime.runPromise(
@@ -1626,9 +1643,9 @@ describe("workspace waitForSync", () => {
     await withInstance(async () => {
       const sessionID = SessionID.descending("ses_wait_timeout")
 
-      await expect(waitForWorkspaceSync(WorkspaceID.ascending("wrk_wait_timeout"), { [sessionID]: 1 })).rejects.toThrow(
-        `Timed out waiting for sync fence: {"${sessionID}":1}`,
-      )
+      await expect(
+        waitForWorkspaceSync(WorkspaceID.ascending("wrk_wait_timeout"), { [sessionID]: 1 }, undefined, 25),
+      ).rejects.toThrow(`Timed out waiting for sync fence: {"${sessionID}":1}`)
     })
   }, 7000)
 })
