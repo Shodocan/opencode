@@ -326,6 +326,7 @@ export function Prompt(props: PromptProps) {
 
         const agent = local.agent.current()
         const model = local.model.current()
+        if (!agent) continue
 
         await sdk.client.session
           .prompt({
@@ -372,7 +373,7 @@ export function Prompt(props: PromptProps) {
 
       input.insertText(evt.text)
       setStore("prompt", "input", input.plainText)
-      autocomplete.onInput(input.plainText)
+      auto()?.onInput(input.plainText)
 
       setTimeout(() => {
         // setTimeout is a workaround and needs to be addressed properly
@@ -398,11 +399,11 @@ export function Prompt(props: PromptProps) {
   })
 
   event.on(TuiEvent.PromptAppend.type, (evt) => {
-    promptEvents.onAppend(evt.properties)
+    promptEvents.onAppend(evt.properties as Parameters<typeof promptEvents.onAppend>[0])
   })
 
   event.on(TuiEvent.PromptSynthetic.type, (evt) => {
-    promptEvents.onSynthetic(evt.properties)
+    promptEvents.onSynthetic(evt.properties as Parameters<typeof promptEvents.onSynthetic>[0])
   })
 
   createEffect(() => {

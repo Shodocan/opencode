@@ -5,7 +5,8 @@ export type ClientOptions = {
 }
 
 export type Event =
-  | EventTuiPromptAppend
+  | EventTuiPromptAppend1
+  | EventTuiPromptSynthetic
   | EventTuiCommandExecute
   | EventTuiToastShow1
   | EventTuiSessionSelect
@@ -124,6 +125,17 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic = {
+  id: string
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
   }
 }
 
@@ -807,6 +819,7 @@ export type GlobalEvent = {
   workspace?: string
   payload:
     | EventTuiPromptAppend
+    | EventTuiPromptSynthetic
     | EventTuiCommandExecute
     | EventTuiToastShow
     | EventTuiSessionSelect
@@ -1902,6 +1915,16 @@ export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic2 = {
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
   }
 }
 
@@ -3708,6 +3731,16 @@ export type ProviderV2Info = {
         [key: string]: unknown
       }
     }
+  }
+}
+
+export type EventTuiPromptAppend1 = {
+  id: string
+  type: "tui.prompt.append"
+  properties: {
+    text: string
+    submit?: boolean
+    sessionID?: string
   }
 }
 
@@ -7580,6 +7613,8 @@ export type V2ProviderGetResponse = V2ProviderGetResponses[keyof V2ProviderGetRe
 export type TuiAppendPromptData = {
   body?: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
   path?: never
   query?: {
@@ -7839,7 +7874,12 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
+  body?:
+    | EventTuiPromptAppend2
+    | EventTuiPromptSynthetic2
+    | EventTuiCommandExecute2
+    | EventTuiToastShow2
+    | EventTuiSessionSelect2
   path?: never
   query?: {
     directory?: string

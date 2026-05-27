@@ -14,6 +14,10 @@ const EventTuiPromptAppend = Schema.Struct({
   type: Schema.Literal(TuiEvent.PromptAppend.type),
   properties: TuiEvent.PromptAppend.properties,
 }).annotate({ identifier: "EventTuiPromptAppend" })
+const EventTuiPromptSynthetic = Schema.Struct({
+  type: Schema.Literal(TuiEvent.PromptSynthetic.type),
+  properties: TuiEvent.PromptSynthetic.properties,
+}).annotate({ identifier: "EventTuiPromptSynthetic" })
 const EventTuiCommandExecute = Schema.Struct({
   type: Schema.Literal(TuiEvent.CommandExecute.type),
   properties: TuiEvent.CommandExecute.properties,
@@ -28,6 +32,7 @@ const EventTuiSessionSelect = Schema.Struct({
 }).annotate({ identifier: "EventTuiSessionSelect" })
 export const TuiPublishPayload = Schema.Union([
   EventTuiPromptAppend,
+  EventTuiPromptSynthetic,
   EventTuiCommandExecute,
   EventTuiToastShow,
   EventTuiSessionSelect,

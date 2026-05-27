@@ -564,23 +564,48 @@ export const layer = Layer.effect(
       })
 
       client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
-        await bridge.promise(bus.publish(TuiEvent.PromptAppend, notification.params).pipe(Effect.ignore))
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptAppend.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.PromptAppend, params)),
+            Effect.ignore,
+          ),
+        )
       })
 
       client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
-        await bridge.promise(bus.publish(TuiEvent.PromptSynthetic, notification.params).pipe(Effect.ignore))
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.PromptSynthetic, params)),
+            Effect.ignore,
+          ),
+        )
       })
 
       client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {
-        await bridge.promise(bus.publish(TuiEvent.CommandExecute, notification.params).pipe(Effect.ignore))
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.CommandExecute.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.CommandExecute, params)),
+            Effect.ignore,
+          ),
+        )
       })
 
       client.setNotificationHandler(TuiToastShowNotificationSchema, async (notification) => {
-        await bridge.promise(bus.publish(TuiEvent.ToastShow, notification.params).pipe(Effect.ignore))
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.ToastShow.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.ToastShow, params)),
+            Effect.ignore,
+          ),
+        )
       })
 
       client.setNotificationHandler(TuiSessionSelectNotificationSchema, async (notification) => {
-        await bridge.promise(bus.publish(TuiEvent.SessionSelect, notification.params).pipe(Effect.ignore))
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.SessionSelect.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.SessionSelect, params)),
+            Effect.ignore,
+          ),
+        )
       })
     }
 

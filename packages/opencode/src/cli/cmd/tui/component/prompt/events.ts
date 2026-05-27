@@ -1,8 +1,8 @@
-import type z from "zod"
+import { Schema } from "effect"
 import { TuiEvent } from "../../event"
 
-type PromptAppendEvent = z.infer<typeof TuiEvent.PromptAppend.properties>
-type PromptSyntheticEvent = z.infer<typeof TuiEvent.PromptSynthetic.properties>
+type PromptAppendEvent = Schema.Schema.Type<typeof TuiEvent.PromptAppend.properties>
+type PromptSyntheticEvent = Schema.Schema.Type<typeof TuiEvent.PromptSynthetic.properties>
 
 export function createPromptEventHandlers(input: {
   sessionID: () => string | undefined

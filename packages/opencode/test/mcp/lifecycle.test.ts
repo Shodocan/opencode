@@ -1,5 +1,5 @@
 import { expect, mock, beforeEach } from "bun:test"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { testEffect } from "../lib/effect"
 
@@ -184,7 +184,7 @@ const { TuiEvent } = await import("../../src/cli/cmd/tui/event")
 const { SessionID } = await import("../../src/session/schema")
 const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
 
-const it = testEffect(MCP.defaultLayer)
+const it = testEffect(Layer.mergeAll(MCP.defaultLayer, Bus.layer))
 
 function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server: string) {
   if ("status" in status) return status.status
@@ -274,9 +274,10 @@ it.instance(
   { config: { mcp: {} } },
 )
 
-test(
+it.instance(
   "MCP TUI notifications publish the matching bus events",
-  withInstance({}, (mcp) =>
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
     Effect.gen(function* () {
       lastCreatedClientName = "notify-server"
       getOrCreateClientState("notify-server")
@@ -323,6 +324,7 @@ test(
       }
     }),
   ),
+  { config: { mcp: {} } },
 )
 
 // ========================================================================
