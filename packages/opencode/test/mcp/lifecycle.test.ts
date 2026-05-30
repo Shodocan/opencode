@@ -290,7 +290,7 @@ it.instance(
 
       const bus = yield* Bus.Service
       const promptAppend: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
-      const promptSynthetic: Array<{ text: string; sessionID: string }> = []
+      const promptSynthetic: Array<{ text: string; sessionID: string; visible?: boolean }> = []
       const commands: Array<{ command: string }> = []
       const toasts: Array<{ title?: string; message: string; variant: string; duration?: number }> = []
       const sessionSelect: Array<{ sessionID: string }> = []
@@ -312,7 +312,9 @@ it.instance(
         const handlers = notificationHandlers("notify-server")
 
         yield* Effect.promise(() => handlers.promptAppend?.({ params: { text: "visible", sessionID, submit: true } }))
-        yield* Effect.promise(() => handlers.promptSynthetic?.({ params: { text: "hidden", sessionID } }))
+        yield* Effect.promise(() =>
+          handlers.promptSynthetic?.({ params: { text: "visible through hidden transport", sessionID, visible: true } }),
+        )
         yield* Effect.promise(() => handlers.commandExecute?.({ params: { command: "prompt.submit" } }))
         yield* Effect.promise(() =>
           handlers.toastShow?.({ params: { title: "Heads up", message: "done", variant: "info", duration: 250 } }),
@@ -321,7 +323,7 @@ it.instance(
         yield* Effect.promise(() => Bun.sleep(20))
 
         expect(promptAppend).toEqual([{ text: "visible", sessionID, submit: true }])
-        expect(promptSynthetic).toEqual([{ text: "hidden", sessionID }])
+        expect(promptSynthetic).toEqual([{ text: "visible through hidden transport", sessionID, visible: true }])
         expect(commands).toEqual([{ command: "prompt.submit" }])
         expect(toasts).toEqual([{ title: "Heads up", message: "done", variant: "info", duration: 250 }])
         expect(sessionSelect).toEqual([{ sessionID }])

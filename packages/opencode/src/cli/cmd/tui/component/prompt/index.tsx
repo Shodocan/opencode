@@ -308,7 +308,7 @@ export function Prompt(props: PromptProps) {
   const event = useEvent()
 
   // Hidden work-tracker messages are delivered as synthetic model prompts.
-  const hiddenPromptQueue = new Map<string, string[]>()
+  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean }>>()
   const hiddenPromptInFlight = new Set<string>()
 
   const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
@@ -321,8 +321,8 @@ export function Prompt(props: PromptProps) {
     hiddenPromptInFlight.add(sessionID)
     try {
       while (queue.length > 0) {
-        const text = queue.shift()
-        if (!text) continue
+        const item = queue.shift()
+        if (!item) continue
 
         const agent = local.agent.current()
         const model = local.model.current()
@@ -337,8 +337,9 @@ export function Prompt(props: PromptProps) {
             parts: [
               {
                 type: "text",
-                text,
+                text: item.text,
                 synthetic: true,
+                ...(item.visible !== false ? { metadata: { opencodeMcpVisible: true } } : {}),
               },
             ],
           })
@@ -392,7 +393,7 @@ export function Prompt(props: PromptProps) {
     },
     onSynthetic(evt) {
       const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
-      queue.push(evt.text)
+      queue.push({ text: evt.text, visible: evt.visible })
       hiddenPromptQueue.set(evt.sessionID, queue)
       void drainHiddenPromptQueue(evt.sessionID)
     },

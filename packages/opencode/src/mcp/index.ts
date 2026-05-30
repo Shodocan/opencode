@@ -72,6 +72,7 @@ const TuiPromptSyntheticNotificationSchema = NotificationSchema.extend({
   params: z.object({
     text: z.string(),
     sessionID: z.string(),
+    visible: z.boolean().optional(),
   }),
 })
 

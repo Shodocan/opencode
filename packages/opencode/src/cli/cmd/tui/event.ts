@@ -19,6 +19,7 @@ export const TuiEvent = {
     Schema.Struct({
       text: Schema.String,
       sessionID: SessionID,
+      visible: Schema.optional(Schema.Boolean),
     }),
   ),
   CommandExecute: BusEvent.define(

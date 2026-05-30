@@ -7,7 +7,7 @@ describe("prompt event handlers", () => {
     const current = SessionID.make("session-current")
     const other = SessionID.make("session-other")
     const visible: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
-    const synthetic: Array<{ text: string; sessionID: string }> = []
+    const synthetic: Array<{ text: string; sessionID: string; visible?: boolean }> = []
     const handlers = createPromptEventHandlers({
       sessionID: () => current,
       onAppend: (event) => visible.push(event),
@@ -26,19 +26,19 @@ describe("prompt event handlers", () => {
     const current = SessionID.make("session-current")
     const other = SessionID.make("session-other")
     const visible: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
-    const synthetic: Array<{ text: string; sessionID: string }> = []
+    const synthetic: Array<{ text: string; sessionID: string; visible?: boolean }> = []
     const handlers = createPromptEventHandlers({
       sessionID: () => current,
       onAppend: (event) => visible.push(event),
       onSynthetic: (event) => synthetic.push(event),
     })
 
-    handlers.onSynthetic({ text: "hidden", sessionID: current })
-    handlers.onSynthetic({ text: "queued", sessionID: other })
+    handlers.onSynthetic({ text: "visible through hidden transport", sessionID: current, visible: true })
+    handlers.onSynthetic({ text: "hidden", sessionID: other, visible: false })
 
     expect(synthetic).toEqual([
-      { text: "hidden", sessionID: current },
-      { text: "queued", sessionID: other },
+      { text: "visible through hidden transport", sessionID: current, visible: true },
+      { text: "hidden", sessionID: other, visible: false },
     ])
     expect(visible).toEqual([])
   })

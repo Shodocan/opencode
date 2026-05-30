@@ -6,7 +6,7 @@ export type ClientOptions = {
 
 export type Event =
   | EventTuiPromptAppend1
-  | EventTuiPromptSynthetic
+  | EventTuiPromptSynthetic1
   | EventTuiCommandExecute
   | EventTuiToastShow1
   | EventTuiSessionSelect
@@ -137,6 +137,7 @@ export type EventTuiPromptSynthetic = {
   properties: {
     text: string
     sessionID: string
+    visible?: boolean
   }
 }
 
@@ -1940,6 +1941,7 @@ export type EventTuiPromptSynthetic2 = {
   properties: {
     text: string
     sessionID: string
+    visible?: boolean
   }
 }
 
@@ -3768,6 +3770,16 @@ export type EventTuiPromptAppend1 = {
     text: string
     submit?: boolean
     sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic1 = {
+  id: string
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
+    visible?: boolean
   }
 }
 
