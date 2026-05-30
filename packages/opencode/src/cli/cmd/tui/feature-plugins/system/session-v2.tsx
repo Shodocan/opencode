@@ -24,12 +24,14 @@ import type {
   SessionMessageCompaction,
   SessionMessageModelSwitched,
   SessionMessageShell,
+  SessionMessageSynthetic,
   SessionMessageUser,
   ToolFileContent,
   ToolTextContent,
 } from "@opencode-ai/sdk/v2"
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
+import { MCP_VISIBLE_METADATA, mcpCallerHeader } from "../../util/mcp-visible-message"
 
 const id = "internal:session-v2-debug"
 const route = "session.v2.messages"
@@ -101,6 +103,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                       start={lastUserCreated(index())}
                     />
                   </Match>
+                  <Match when={message.type === "synthetic" && message.metadata?.[MCP_VISIBLE_METADATA.visible] === true}>
+                    <SyntheticMessage message={message as SessionMessageSynthetic} index={index()} />
+                  </Match>
                   <Match when={message.type === "synthetic"}>
                     <></>
                   </Match>
@@ -151,6 +156,30 @@ function MissingData(props: { label: string; detail: string }) {
         <span style={{ bg: theme.warning, fg: theme.background, bold: true }}> MISSING DATA </span> {props.label}
       </text>
       <text fg={theme.textMuted}>{props.detail}</text>
+    </box>
+  )
+}
+
+function SyntheticMessage(props: { message: SessionMessageSynthetic; index: number }) {
+  const { theme } = useTheme()
+  const header = createMemo(() => mcpCallerHeader(props.message.metadata))
+  return (
+    <box
+      id={props.message.id}
+      border={["left"]}
+      borderColor={theme.textMuted}
+      customBorderChars={SplitBorder.customBorderChars}
+      marginTop={props.index === 0 ? 0 : 1}
+      flexShrink={0}
+      paddingTop={1}
+      paddingBottom={1}
+      paddingLeft={2}
+      backgroundColor={theme.backgroundPanel}
+    >
+      <Show when={header()}>
+        <text fg={theme.textMuted}>{header()}</text>
+      </Show>
+      <text fg={theme.textMuted}>{props.message.text}</text>
     </box>
   )
 }

@@ -25,8 +25,10 @@ import type {
   ConfigUpdateErrors,
   ConfigUpdateResponses,
   EventSubscribeResponses,
+  EventTuiAgentState2,
   EventTuiCommandExecute2,
   EventTuiPromptAppend2,
+  EventTuiPromptSynthetic2,
   EventTuiSessionSelect2,
   EventTuiToastShow2,
   ExperimentalConsoleGetErrors,
@@ -4646,6 +4648,8 @@ export class Tui extends HeyApiClient {
       directory?: string
       workspace?: string
       text?: string
+      submit?: boolean
+      sessionID?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -4657,6 +4661,8 @@ export class Tui extends HeyApiClient {
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
             { in: "body", key: "text" },
+            { in: "body", key: "submit" },
+            { in: "body", key: "sessionID" },
           ],
         },
       ],
@@ -4942,7 +4948,13 @@ export class Tui extends HeyApiClient {
     parameters?: {
       directory?: string
       workspace?: string
-      body?: EventTuiPromptAppend2 | EventTuiCommandExecute2 | EventTuiToastShow2 | EventTuiSessionSelect2
+      body?:
+        | EventTuiPromptAppend2
+        | EventTuiPromptSynthetic2
+        | EventTuiCommandExecute2
+        | EventTuiToastShow2
+        | EventTuiSessionSelect2
+        | EventTuiAgentState2
     },
     options?: Options<never, ThrowOnError>,
   ) {

@@ -1,7 +1,7 @@
 import { expect, mock, beforeEach } from "bun:test"
-import { Cause, Effect, Exit } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 // --- Mock infrastructure ---
 
@@ -18,6 +18,7 @@ interface MockClientState {
   resources: Array<{ name: string; uri: string; description?: string }>
   closed: boolean
   notificationHandlers: Map<unknown, (...args: any[]) => any>
+  sentNotifications: Array<{ method: string; params?: unknown }>
 }
 
 const clientStates = new Map<string, MockClientState>()
@@ -46,6 +47,7 @@ function getOrCreateClientState(name?: string): MockClientState {
       resources: [],
       closed: false,
       notificationHandlers: new Map(),
+      sentNotifications: [],
     }
     clientStates.set(key, state)
   }
@@ -164,6 +166,10 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
     async close() {
       if (this._state) this._state.closed = true
     }
+
+    async notification(notification: { method: string; params?: unknown }) {
+      this._state?.sentNotifications.push(notification)
+    }
   },
 }))
 
@@ -179,13 +185,27 @@ beforeEach(() => {
 
 // Import after mocks
 const { MCP } = await import("../../src/mcp/index")
+const { Bus } = await import("../../src/bus")
+const { TuiEvent } = await import("../../src/cli/cmd/tui/event")
+const { SessionID } = await import("../../src/session/schema")
 const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
 
-const it = testEffect(MCP.defaultLayer)
+const it = testEffect(Layer.mergeAll(MCP.defaultLayer, Bus.layer))
 
 function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server: string) {
   if ("status" in status) return status.status
   return status[server]?.status
+}
+
+function notificationHandlers(name: string) {
+  const handlers = Array.from(getOrCreateClientState(name).notificationHandlers.values())
+  return {
+    promptAppend: handlers[1],
+    promptSynthetic: handlers[2],
+    commandExecute: handlers[3],
+    toastShow: handlers[4],
+    sessionSelect: handlers[5],
+  }
 }
 
 // ========================================================================
@@ -255,6 +275,100 @@ it.instance(
         expect(Object.keys(after).some((key) => key.includes("next_tool"))).toBe(true)
         expect(Object.keys(after).some((key) => key.includes("test_tool"))).toBe(false)
         expect(serverState.listToolsCalls).toBe(2)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "MCP TUI notifications publish the matching bus events",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "notify-server"
+      getOrCreateClientState("notify-server")
+
+      const bus = yield* Bus.Service
+      const promptAppend: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
+      const promptSynthetic: Array<{ text: string; sessionID: string; visible?: boolean; caller?: string }> = []
+      const commands: Array<{ command: string }> = []
+      const toasts: Array<{ title?: string; message: string; variant: string; duration?: number }> = []
+      const sessionSelect: Array<{ sessionID: string }> = []
+      const unsubs = [
+        yield* bus.subscribeCallback(TuiEvent.PromptAppend, (evt) => promptAppend.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.PromptSynthetic, (evt) => promptSynthetic.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.CommandExecute, (evt) => commands.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.ToastShow, (evt) => toasts.push(evt.properties)),
+        yield* bus.subscribeCallback(TuiEvent.SessionSelect, (evt) => sessionSelect.push(evt.properties)),
+      ]
+
+      try {
+        yield* mcp.add("notify-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        const sessionID = SessionID.make("ses_notify-server")
+        const handlers = notificationHandlers("notify-server")
+
+        yield* Effect.promise(() => handlers.promptAppend?.({ params: { text: "visible", sessionID, submit: true } }))
+        yield* Effect.promise(() =>
+          handlers.promptSynthetic?.({ params: { text: "visible through hidden transport", sessionID, visible: true } }),
+        )
+        yield* Effect.promise(() => handlers.commandExecute?.({ params: { command: "prompt.submit" } }))
+        yield* Effect.promise(() =>
+          handlers.toastShow?.({ params: { title: "Heads up", message: "done", variant: "info", duration: 250 } }),
+        )
+        yield* Effect.promise(() => handlers.sessionSelect?.({ params: { sessionID } }))
+        yield* Effect.promise(() => Bun.sleep(20))
+
+        expect(promptAppend).toEqual([{ text: "visible", sessionID, submit: true }])
+        expect(promptSynthetic).toEqual([{ text: "visible through hidden transport", sessionID, visible: true, caller: "notify-server" }])
+        expect(commands).toEqual([{ command: "prompt.submit" }])
+        expect(toasts).toEqual([{ title: "Heads up", message: "done", variant: "info", duration: 250 }])
+        expect(sessionSelect).toEqual([{ sessionID }])
+      } finally {
+        unsubs.forEach((unsub) => unsub())
+      }
+    }),
+  ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "agent state events notify connected MCP servers",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "agent-state-server"
+        const serverState = getOrCreateClientState("agent-state-server")
+
+        yield* mcp.add("agent-state-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        const bus = yield* Bus.Service
+        yield* bus.publish(TuiEvent.AgentState, {
+          agent: "build",
+          model: { providerID: "test", modelID: "model" },
+          variant: "fast",
+        })
+        const notification = yield* pollWithTimeout(
+          Effect.sync(() =>
+            serverState.sentNotifications.find((item) => item.method === "notifications/opencode/agent/state"),
+          ),
+          "agent state notification was not sent",
+        )
+
+        expect(notification).toEqual({
+          method: "notifications/opencode/agent/state",
+          params: {
+            agent: "build",
+            model: { providerID: "test", modelID: "model" },
+            variant: "fast",
+          },
+        })
       }),
     ),
   { config: { mcp: {} } },

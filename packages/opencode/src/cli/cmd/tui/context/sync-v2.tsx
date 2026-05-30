@@ -31,6 +31,10 @@ function activeShell(messages: SessionMessage[], callID: string) {
   return shell?.type === "shell" ? shell : undefined
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 function latestTool(assistant: SessionMessageAssistant | undefined, callID?: string) {
   return assistant?.content.findLast(
     (item): item is SessionMessageAssistantTool => item.type === "tool" && (callID === undefined || item.id === callID),
@@ -90,6 +94,7 @@ export const { use: useSyncV2, provider: SyncProviderV2 } = createSimpleContext(
             draft.unshift({
               id: event.id,
               type: "synthetic",
+              metadata: "metadata" in event && isRecord(event.metadata) ? event.metadata : undefined,
               sessionID: event.properties.sessionID,
               text: event.properties.text,
               time: { created: event.properties.timestamp },

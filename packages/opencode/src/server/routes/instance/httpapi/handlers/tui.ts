@@ -86,11 +86,14 @@ export const tuiHandlers = HttpApiBuilder.group(InstanceHttpApi, "tui", (handler
     const publish = Effect.fn("TuiHttpApi.publish")(function* (ctx: { payload: typeof TuiPublishPayload.Type }) {
       if (ctx.payload.type === TuiEvent.PromptAppend.type)
         yield* bus.publish(TuiEvent.PromptAppend, ctx.payload.properties)
+      if (ctx.payload.type === TuiEvent.PromptSynthetic.type)
+        yield* bus.publish(TuiEvent.PromptSynthetic, ctx.payload.properties)
       if (ctx.payload.type === TuiEvent.CommandExecute.type)
         yield* bus.publish(TuiEvent.CommandExecute, ctx.payload.properties)
       if (ctx.payload.type === TuiEvent.ToastShow.type) yield* bus.publish(TuiEvent.ToastShow, ctx.payload.properties)
       if (ctx.payload.type === TuiEvent.SessionSelect.type)
         yield* bus.publish(TuiEvent.SessionSelect, ctx.payload.properties)
+      if (ctx.payload.type === TuiEvent.AgentState.type) yield* bus.publish(TuiEvent.AgentState, ctx.payload.properties)
       return true
     })
 

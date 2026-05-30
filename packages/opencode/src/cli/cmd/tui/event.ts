@@ -6,7 +6,23 @@ import { Effect, Schema } from "effect"
 const DEFAULT_TOAST_DURATION = 5000
 
 export const TuiEvent = {
-  PromptAppend: BusEvent.define("tui.prompt.append", Schema.Struct({ text: Schema.String })),
+  PromptAppend: BusEvent.define(
+    "tui.prompt.append",
+    Schema.Struct({
+      text: Schema.String,
+      submit: Schema.optional(Schema.Boolean),
+      sessionID: Schema.optional(SessionID),
+    }),
+  ),
+  PromptSynthetic: BusEvent.define(
+    "tui.prompt.synthetic",
+    Schema.Struct({
+      text: Schema.String,
+      sessionID: SessionID,
+      visible: Schema.optional(Schema.Boolean),
+      caller: Schema.optional(Schema.String),
+    }),
+  ),
   CommandExecute: BusEvent.define(
     "tui.command.execute",
     Schema.Struct({
@@ -48,6 +64,19 @@ export const TuiEvent = {
     "tui.session.select",
     Schema.Struct({
       sessionID: SessionID.annotate({ description: "Session ID to navigate to" }),
+    }),
+  ),
+  AgentState: BusEvent.define(
+    "tui.agent.state",
+    Schema.Struct({
+      agent: Schema.String,
+      model: Schema.optional(
+        Schema.Struct({
+          providerID: Schema.String,
+          modelID: Schema.String,
+        }),
+      ),
+      variant: Schema.optional(Schema.String),
     }),
   ),
 }

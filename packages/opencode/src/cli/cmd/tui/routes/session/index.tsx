@@ -91,6 +91,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { PathFormatterProvider, usePathFormatter } from "../../context/path-format"
+import { isVisibleUserTextPart, visibleUserTextParts } from "./visible-user-text"
 
 addDefaultParsers(parsers.parsers)
 
@@ -1330,17 +1331,7 @@ function UserMessage(props: {
 }) {
   const ctx = use()
   const local = useLocal()
-  const text = createMemo(() => {
-    const texts = props.parts
-      .map((x) => {
-        if (x.type === "text" && !x.synthetic) {
-          return x.text
-        }
-        return null
-      })
-      .filter(Boolean)
-    return texts.join("\n\n")
-  })
+  const text = createMemo(() => visibleUserTextParts(props.parts))
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
@@ -1353,7 +1344,7 @@ function UserMessage(props: {
 
   return (
     <>
-      <Show when={text()}>
+      <Show when={text().length > 0}>
         <box
           id={props.message.id}
           border={["left"]}
@@ -1375,7 +1366,16 @@ function UserMessage(props: {
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <text fg={theme.text}>{text()}</text>
+            <For each={text()}>
+              {(part) => (
+                <>
+                  <Show when={part.header}>
+                    <text fg={theme.textMuted}>{part.header}</text>
+                  </Show>
+                  <text fg={part.muted ? theme.textMuted : theme.text}>{part.text}</text>
+                </>
+              )}
+            </For>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>

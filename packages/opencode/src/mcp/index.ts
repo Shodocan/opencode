@@ -11,11 +11,13 @@ import {
   ToolSchema,
   type Tool as MCPToolDef,
   ToolListChangedNotificationSchema,
+  NotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
 import { Config } from "@/config/config"
 import { ConfigMCP } from "../config/mcp"
 import * as Log from "@opencode-ai/core/util/log"
 import { NamedError } from "@opencode-ai/core/util/error"
+import z from "zod/v4"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
 import { AppFileSystem } from "@opencode-ai/core/filesystem"
@@ -25,6 +27,7 @@ import { McpAuth } from "./auth"
 import { BusEvent } from "../bus/bus-event"
 import { Bus } from "@/bus"
 import { TuiEvent } from "@/cli/cmd/tui/event"
+import { SessionStatus } from "@/session/status"
 import open from "open"
 import { Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
@@ -54,6 +57,48 @@ export const ToolsChanged = BusEvent.define(
     server: Schema.String,
   }),
 )
+
+const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/prompt/append"),
+  params: z.object({
+    text: z.string(),
+    submit: z.boolean().optional(),
+    sessionID: z.string().optional(),
+  }),
+})
+
+const TuiPromptSyntheticNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/prompt/synthetic"),
+  params: z.object({
+    text: z.string(),
+    sessionID: z.string(),
+    visible: z.boolean().optional(),
+  }),
+})
+
+const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/command/execute"),
+  params: z.object({
+    command: z.string(),
+  }),
+})
+
+const TuiToastShowNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/toast/show"),
+  params: z.object({
+    title: z.string().optional(),
+    message: z.string(),
+    variant: z.enum(["info", "success", "warning", "error"]),
+    duration: z.number().int().positive().optional(),
+  }),
+})
+
+const TuiSessionSelectNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/session/select"),
+  params: z.object({
+    sessionID: z.string(),
+  }),
+})
 
 export const BrowserOpenFailed = BusEvent.define(
   "mcp.browser.open.failed",
@@ -518,6 +563,51 @@ export const layer = Layer.effect(
         s.defs[name] = listed
         await bridge.promise(bus.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
+
+      client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptAppend.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.PromptAppend, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.PromptSynthetic, { ...params, caller: name })),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.CommandExecute.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.CommandExecute, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiToastShowNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.ToastShow.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.ToastShow, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiSessionSelectNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.SessionSelect.properties)(notification.params).pipe(
+            Effect.flatMap((params) => bus.publish(TuiEvent.SessionSelect, params)),
+            Effect.ignore,
+          ),
+        )
+      })
     }
 
     const state = yield* InstanceState.make<State>(
@@ -559,8 +649,32 @@ export const layer = Layer.effect(
           { concurrency: "unbounded" },
         )
 
+        // Fan opencode session status changes out to every connected MCP server.
+        // Servers opt in by registering a handler for "notifications/opencode/session/status";
+        // servers that ignore the method get the notification dropped by the MCP SDK.
+        const unsubscribeStatus = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
+          const params = { sessionID: evt.properties.sessionID, status: evt.properties.status }
+          for (const [name, client] of Object.entries(s.clients)) {
+            if (s.status[name]?.status !== "connected") continue
+            client
+              .notification({ method: "notifications/opencode/session/status", params })
+              .catch((cause) => log.warn("session.status notification failed", { server: name, cause }))
+          }
+        })
+
+        const unsubscribeAgentState = yield* bus.subscribeCallback(TuiEvent.AgentState, (evt) => {
+          for (const [name, client] of Object.entries(s.clients)) {
+            if (s.status[name]?.status !== "connected") continue
+            client
+              .notification({ method: "notifications/opencode/agent/state", params: evt.properties })
+              .catch((cause) => log.warn("agent.state notification failed", { server: name, cause }))
+          }
+        })
+
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            unsubscribeStatus()
+            unsubscribeAgentState()
             yield* Effect.forEach(
               Object.values(s.clients),
               (client) =>

@@ -1122,7 +1122,7 @@ export const layer = Layer.effect(
       const nextPrompt = parts.reduce(
         (result, part) => {
           if (part.type === "text") {
-            if (part.synthetic) result.synthetic.push(part.text)
+            if (part.synthetic) result.synthetic.push({ text: part.text, metadata: part.metadata })
             else result.text.push(part.text)
             const reference = referencePromptMetadata(part.metadata?.reference)
             if (reference) {
@@ -1182,7 +1182,7 @@ export const layer = Layer.effect(
           files: [] as FileAttachment[],
           agents: [] as AgentAttachment[],
           references: [] as ReferenceAttachment[],
-          synthetic: [] as string[],
+          synthetic: [] as Array<{ text: string; metadata?: Record<string, unknown> }>,
         },
       )
       // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
@@ -1198,14 +1198,18 @@ export const layer = Layer.effect(
           },
         })
       }
-      for (const text of nextPrompt.synthetic) {
+      for (const synthetic of nextPrompt.synthetic) {
         // TODO(v2): Temporary dual-write while migrating session messages to v2 events.
         if (flags.experimentalEventSystem) {
-          yield* events.publish(SessionEvent.Synthetic, {
-            sessionID: input.sessionID,
-            timestamp: DateTime.makeUnsafe(info.time.created),
-            text,
-          })
+          yield* events.publish(
+            SessionEvent.Synthetic,
+            {
+              sessionID: input.sessionID,
+              timestamp: DateTime.makeUnsafe(info.time.created),
+              text: synthetic.text,
+            },
+            { metadata: synthetic.metadata },
+          )
         }
       }
 

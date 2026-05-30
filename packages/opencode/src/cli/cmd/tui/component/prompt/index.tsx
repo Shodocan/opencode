@@ -58,10 +58,12 @@ import {
 } from "../dialog-workspace-create"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "@tui/context/args"
+import { createPromptEventHandlers } from "./events"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { type WorkspaceStatus } from "../workspace-label"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../context/tui-config"
+import { MCP_VISIBLE_METADATA } from "@tui/util/mcp-visible-message"
 
 export type PromptProps = {
   sessionID?: string
@@ -318,16 +320,111 @@ export function Prompt(props: PromptProps) {
   let promptPartTypeId = 0
   const event = useEvent()
 
-  event.on(TuiEvent.PromptAppend.type, (evt) => {
-    if (!input || input.isDestroyed) return
-    input.insertText(evt.properties.text)
-    setTimeout(() => {
-      // setTimeout is a workaround and needs to be addressed properly
+  // Hidden work-tracker messages are delivered as synthetic model prompts.
+  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean; caller?: string }>>()
+  const hiddenPromptInFlight = new Set<string>()
+
+  const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
+    if (!sessionID) return
+    if (hiddenPromptInFlight.has(sessionID)) return
+
+    const queue = hiddenPromptQueue.get(sessionID)
+    if (!queue || queue.length === 0) return
+
+    hiddenPromptInFlight.add(sessionID)
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()
+        if (!item) continue
+
+        const agent = local.agent.current()
+        const model = local.model.current()
+        if (!agent) continue
+
+        await sdk.client.session
+          .prompt({
+            sessionID,
+            agent: agent.name,
+            ...(model ? { model } : {}),
+            variant: local.model.variant.current(),
+            parts: [
+              {
+                type: "text",
+                text: item.text,
+                synthetic: true,
+                ...(item.visible !== false
+                  ? {
+                      metadata: {
+                        [MCP_VISIBLE_METADATA.visible]: true,
+                        ...(item.caller ? { [MCP_VISIBLE_METADATA.caller]: item.caller } : {}),
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          })
+          .catch((error) => {
+            console.error("failed to deliver hidden model prompt", error)
+          })
+      }
+    } finally {
+      hiddenPromptInFlight.delete(sessionID)
+
+      if (queue.length === 0) {
+        hiddenPromptQueue.delete(sessionID)
+      }
+
+      if (queue.length > 0) {
+        void drainHiddenPromptQueue(sessionID)
+      }
+    }
+  }
+
+  createEffect(() => {
+    if (props.sessionID) {
+      void drainHiddenPromptQueue(props.sessionID)
+    }
+  })
+
+  const promptEvents = createPromptEventHandlers({
+    sessionID: () => props.sessionID,
+    onAppend(evt) {
       if (!input || input.isDestroyed) return
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
-    }, 0)
+      const shouldSubmit = Boolean(evt.submit)
+
+      input.insertText(evt.text)
+      setStore("prompt", "input", input.plainText)
+      auto()?.onInput(input.plainText)
+
+      setTimeout(() => {
+        // setTimeout is a workaround and needs to be addressed properly
+        if (!input || input.isDestroyed) return
+        input.focus()
+        input.getLayoutNode().markDirty()
+        input.gotoBufferEnd()
+        renderer.requestRender()
+
+        if (shouldSubmit) {
+          setTimeout(() => {
+            void submit()
+          }, 100)
+        }
+      })
+    },
+    onSynthetic(evt) {
+      const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
+      queue.push({ text: evt.text, visible: evt.visible, caller: evt.caller })
+      hiddenPromptQueue.set(evt.sessionID, queue)
+      void drainHiddenPromptQueue(evt.sessionID)
+    },
+  })
+
+  event.on(TuiEvent.PromptAppend.type, (evt) => {
+    promptEvents.onAppend(evt.properties as Parameters<typeof promptEvents.onAppend>[0])
+  })
+
+  event.on(TuiEvent.PromptSynthetic.type, (evt) => {
+    promptEvents.onSynthetic(evt.properties as Parameters<typeof promptEvents.onSynthetic>[0])
   })
 
   createEffect(() => {
