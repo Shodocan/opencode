@@ -101,7 +101,7 @@ test("synthetic messages preserve visibility metadata", () => {
   SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
     id: EventV2.ID.create(),
     type: "session.next.synthetic",
-    metadata: { opencodeMcpVisible: true },
+    metadata: { opencodeMcpVisible: true, opencodeMcpCaller: "whisperer" },
     data: {
       sessionID,
       timestamp: DateTime.makeUnsafe(1),
@@ -111,7 +111,7 @@ test("synthetic messages preserve visibility metadata", () => {
 
   expect(state.messages[0]).toMatchObject({
     type: "synthetic",
-    metadata: { opencodeMcpVisible: true },
+    metadata: { opencodeMcpVisible: true, opencodeMcpCaller: "whisperer" },
     text: "visible integration text",
   })
 })

@@ -138,6 +138,7 @@ export type EventTuiPromptSynthetic = {
     text: string
     sessionID: string
     visible?: boolean
+    caller?: string
   }
 }
 
@@ -1942,6 +1943,7 @@ export type EventTuiPromptSynthetic2 = {
     text: string
     sessionID: string
     visible?: boolean
+    caller?: string
   }
 }
 
@@ -3780,6 +3782,7 @@ export type EventTuiPromptSynthetic1 = {
     text: string
     sessionID: string
     visible?: boolean
+    caller?: string
   }
 }
 

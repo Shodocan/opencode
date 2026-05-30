@@ -576,7 +576,7 @@ export const layer = Layer.effect(
       client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
         await bridge.promise(
           Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.PromptSynthetic, params)),
+            Effect.flatMap((params) => bus.publish(TuiEvent.PromptSynthetic, { ...params, caller: name })),
             Effect.ignore,
           ),
         )

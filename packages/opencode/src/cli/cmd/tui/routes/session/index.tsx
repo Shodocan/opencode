@@ -1364,7 +1364,16 @@ function UserMessage(props: {
             backgroundColor={hover() ? theme.backgroundElement : theme.backgroundPanel}
             flexShrink={0}
           >
-            <For each={text()}>{(part) => <text fg={part.muted ? theme.textMuted : theme.text}>{part.text}</text>}</For>
+            <For each={text()}>
+              {(part) => (
+                <>
+                  <Show when={part.header}>
+                    <text fg={theme.textMuted}>{part.header}</text>
+                  </Show>
+                  <text fg={part.muted ? theme.textMuted : theme.text}>{part.text}</text>
+                </>
+              )}
+            </For>
             <Show when={files().length}>
               <box flexDirection="row" paddingBottom={metadataVisible() ? 1 : 0} paddingTop={1} gap={1} flexWrap="wrap">
                 <For each={files()}>

@@ -16,7 +16,7 @@ describe("visible user text parts", () => {
           type: "text",
           text: "visible integration text",
           synthetic: true,
-          metadata: { opencodeMcpVisible: true },
+          metadata: { opencodeMcpVisible: true, opencodeMcpCaller: "whisperer" },
         },
         {
           id: "prt_user",
@@ -25,7 +25,7 @@ describe("visible user text parts", () => {
         },
       ] as never),
     ).toEqual([
-      { text: "visible integration text", muted: true },
+      { text: "visible integration text", muted: true, header: "◇ MCP · whisperer" },
       { text: "normal user text", muted: false },
     ])
   })

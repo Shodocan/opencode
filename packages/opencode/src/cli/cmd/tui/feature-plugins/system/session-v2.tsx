@@ -31,6 +31,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
+import { MCP_VISIBLE_METADATA, mcpCallerHeader } from "../../util/mcp-visible-message"
 
 const id = "internal:session-v2-debug"
 const route = "session.v2.messages"
@@ -102,7 +103,7 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                       start={lastUserCreated(index())}
                     />
                   </Match>
-                  <Match when={message.type === "synthetic" && message.metadata?.opencodeMcpVisible === true}>
+                  <Match when={message.type === "synthetic" && message.metadata?.[MCP_VISIBLE_METADATA.visible] === true}>
                     <SyntheticMessage message={message as SessionMessageSynthetic} index={index()} />
                   </Match>
                   <Match when={message.type === "synthetic"}>
@@ -161,6 +162,7 @@ function MissingData(props: { label: string; detail: string }) {
 
 function SyntheticMessage(props: { message: SessionMessageSynthetic; index: number }) {
   const { theme } = useTheme()
+  const header = createMemo(() => mcpCallerHeader(props.message.metadata))
   return (
     <box
       id={props.message.id}
@@ -174,6 +176,9 @@ function SyntheticMessage(props: { message: SessionMessageSynthetic; index: numb
       paddingLeft={2}
       backgroundColor={theme.backgroundPanel}
     >
+      <Show when={header()}>
+        <text fg={theme.textMuted}>{header()}</text>
+      </Show>
       <text fg={theme.textMuted}>{props.message.text}</text>
     </box>
   )

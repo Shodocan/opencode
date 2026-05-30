@@ -62,6 +62,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { type WorkspaceStatus } from "../workspace-label"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../context/tui-config"
+import { MCP_VISIBLE_METADATA } from "@tui/util/mcp-visible-message"
 
 export type PromptProps = {
   sessionID?: string
@@ -308,7 +309,7 @@ export function Prompt(props: PromptProps) {
   const event = useEvent()
 
   // Hidden work-tracker messages are delivered as synthetic model prompts.
-  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean }>>()
+  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean; caller?: string }>>()
   const hiddenPromptInFlight = new Set<string>()
 
   const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
@@ -339,7 +340,14 @@ export function Prompt(props: PromptProps) {
                 type: "text",
                 text: item.text,
                 synthetic: true,
-                ...(item.visible !== false ? { metadata: { opencodeMcpVisible: true } } : {}),
+                ...(item.visible !== false
+                  ? {
+                      metadata: {
+                        [MCP_VISIBLE_METADATA.visible]: true,
+                        ...(item.caller ? { [MCP_VISIBLE_METADATA.caller]: item.caller } : {}),
+                      },
+                    }
+                  : {}),
               },
             ],
           })
@@ -393,7 +401,7 @@ export function Prompt(props: PromptProps) {
     },
     onSynthetic(evt) {
       const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
-      queue.push({ text: evt.text, visible: evt.visible })
+      queue.push({ text: evt.text, visible: evt.visible, caller: evt.caller })
       hiddenPromptQueue.set(evt.sessionID, queue)
       void drainHiddenPromptQueue(evt.sessionID)
     },

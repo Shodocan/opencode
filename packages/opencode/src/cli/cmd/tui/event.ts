@@ -20,6 +20,7 @@ export const TuiEvent = {
       text: Schema.String,
       sessionID: SessionID,
       visible: Schema.optional(Schema.Boolean),
+      caller: Schema.optional(Schema.String),
     }),
   ),
   CommandExecute: BusEvent.define(
