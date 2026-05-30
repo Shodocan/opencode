@@ -25,6 +25,7 @@ import type {
   ConfigUpdateErrors,
   ConfigUpdateResponses,
   EventSubscribeResponses,
+  EventTuiAgentState2,
   EventTuiCommandExecute2,
   EventTuiPromptAppend2,
   EventTuiPromptSynthetic2,
@@ -4953,6 +4954,7 @@ export class Tui extends HeyApiClient {
         | EventTuiCommandExecute2
         | EventTuiToastShow2
         | EventTuiSessionSelect2
+        | EventTuiAgentState2
     },
     options?: Options<never, ThrowOnError>,
   ) {

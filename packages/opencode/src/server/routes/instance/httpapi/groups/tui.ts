@@ -30,12 +30,17 @@ const EventTuiSessionSelect = Schema.Struct({
   type: Schema.Literal(TuiEvent.SessionSelect.type),
   properties: TuiEvent.SessionSelect.properties,
 }).annotate({ identifier: "EventTuiSessionSelect" })
+const EventTuiAgentState = Schema.Struct({
+  type: Schema.Literal(TuiEvent.AgentState.type),
+  properties: TuiEvent.AgentState.properties,
+}).annotate({ identifier: "EventTuiAgentState" })
 export const TuiPublishPayload = Schema.Union([
   EventTuiPromptAppend,
   EventTuiPromptSynthetic,
   EventTuiCommandExecute,
   EventTuiToastShow,
   EventTuiSessionSelect,
+  EventTuiAgentState,
 ])
 
 export const TuiPaths = {

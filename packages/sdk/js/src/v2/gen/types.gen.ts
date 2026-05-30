@@ -10,6 +10,7 @@ export type Event =
   | EventTuiCommandExecute
   | EventTuiToastShow1
   | EventTuiSessionSelect
+  | EventTuiAgentState1
   | EventServerConnected
   | EventGlobalDisposed
   | EventServerInstanceDisposed
@@ -183,6 +184,19 @@ export type EventTuiSessionSelect = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type EventTuiAgentState = {
+  id: string
+  type: "tui.agent.state"
+  properties: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -823,6 +837,7 @@ export type GlobalEvent = {
     | EventTuiCommandExecute
     | EventTuiToastShow
     | EventTuiSessionSelect
+    | EventTuiAgentState
     | EventServerConnected
     | EventGlobalDisposed
     | EventServerInstanceDisposed
@@ -1969,6 +1984,18 @@ export type EventTuiSessionSelect2 = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type EventTuiAgentState2 = {
+  type: "tui.agent.state"
+  properties: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -3752,6 +3779,19 @@ export type EventTuiToastShow1 = {
     message: string
     variant: "info" | "success" | "warning" | "error"
     duration?: number
+  }
+}
+
+export type EventTuiAgentState1 = {
+  id: string
+  type: "tui.agent.state"
+  properties: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -7880,6 +7920,7 @@ export type TuiPublishData = {
     | EventTuiCommandExecute2
     | EventTuiToastShow2
     | EventTuiSessionSelect2
+    | EventTuiAgentState2
   path?: never
   query?: {
     directory?: string

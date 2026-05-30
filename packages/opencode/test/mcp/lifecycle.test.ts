@@ -1,7 +1,7 @@
 import { expect, mock, beforeEach } from "bun:test"
 import { Cause, Effect, Exit, Layer } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 
 // --- Mock infrastructure ---
 
@@ -18,6 +18,7 @@ interface MockClientState {
   resources: Array<{ name: string; uri: string; description?: string }>
   closed: boolean
   notificationHandlers: Map<unknown, (...args: any[]) => any>
+  sentNotifications: Array<{ method: string; params?: unknown }>
 }
 
 const clientStates = new Map<string, MockClientState>()
@@ -46,6 +47,7 @@ function getOrCreateClientState(name?: string): MockClientState {
       resources: [],
       closed: false,
       notificationHandlers: new Map(),
+      sentNotifications: [],
     }
     clientStates.set(key, state)
   }
@@ -163,6 +165,10 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     async close() {
       if (this._state) this._state.closed = true
+    }
+
+    async notification(notification: { method: string; params?: unknown }) {
+      this._state?.sentNotifications.push(notification)
     }
   },
 }))
@@ -324,6 +330,45 @@ it.instance(
       }
     }),
   ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
+  "agent state events notify connected MCP servers",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "agent-state-server"
+        const serverState = getOrCreateClientState("agent-state-server")
+
+        yield* mcp.add("agent-state-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        const bus = yield* Bus.Service
+        yield* bus.publish(TuiEvent.AgentState, {
+          agent: "build",
+          model: { providerID: "test", modelID: "model" },
+          variant: "fast",
+        })
+        const notification = yield* pollWithTimeout(
+          Effect.sync(() =>
+            serverState.sentNotifications.find((item) => item.method === "notifications/opencode/agent/state"),
+          ),
+          "agent state notification was not sent",
+        )
+
+        expect(notification).toEqual({
+          method: "notifications/opencode/agent/state",
+          params: {
+            agent: "build",
+            model: { providerID: "test", modelID: "model" },
+            variant: "fast",
+          },
+        })
+      }),
+    ),
   { config: { mcp: {} } },
 )
 

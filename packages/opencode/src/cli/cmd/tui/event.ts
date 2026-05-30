@@ -64,4 +64,17 @@ export const TuiEvent = {
       sessionID: SessionID.annotate({ description: "Session ID to navigate to" }),
     }),
   ),
+  AgentState: BusEvent.define(
+    "tui.agent.state",
+    Schema.Struct({
+      agent: Schema.String,
+      model: Schema.optional(
+        Schema.Struct({
+          providerID: Schema.String,
+          modelID: Schema.String,
+        }),
+      ),
+      variant: Schema.optional(Schema.String),
+    }),
+  ),
 }

@@ -661,9 +661,19 @@ export const layer = Layer.effect(
           }
         })
 
+        const unsubscribeAgentState = yield* bus.subscribeCallback(TuiEvent.AgentState, (evt) => {
+          for (const [name, client] of Object.entries(s.clients)) {
+            if (s.status[name]?.status !== "connected") continue
+            client
+              .notification({ method: "notifications/opencode/agent/state", params: evt.properties })
+              .catch((cause) => log.warn("agent.state notification failed", { server: name, cause }))
+          }
+        })
+
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
             unsubscribeStatus()
+            unsubscribeAgentState()
             yield* Effect.forEach(
               Object.values(s.clients),
               (client) =>

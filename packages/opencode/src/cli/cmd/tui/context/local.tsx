@@ -14,6 +14,7 @@ import { useArgs } from "./args"
 import { useSDK } from "./sdk"
 import { RGBA } from "@opentui/core"
 import { Filesystem } from "@/util/filesystem"
+import { TuiEvent } from "../event"
 
 export function parseModel(model: string) {
   const [providerID, ...rest] = model.split("/")
@@ -497,6 +498,23 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         message: `Agent ${value.name}'s configured model ${value.model.providerID}/${value.model.modelID} is not valid`,
         duration: 3000,
       })
+    })
+
+    let lastPublishedAgentState = ""
+    createEffect(() => {
+      const value = agent.current()
+      if (!value) return
+      const selected = model.current()
+      const variant = model.variant.current()
+      const properties = {
+        agent: value.name,
+        ...(selected ? { model: selected } : {}),
+        ...(variant ? { variant } : {}),
+      }
+      const key = JSON.stringify(properties)
+      if (key === lastPublishedAgentState) return
+      lastPublishedAgentState = key
+      void sdk.client.tui.publish({ body: { type: TuiEvent.AgentState.type, properties } }).catch(() => {})
     })
 
     const result = {
