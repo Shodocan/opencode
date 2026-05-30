@@ -132,6 +132,7 @@ export function update<Result>(adapter: Adapter<Result>, event: SessionEvent.Eve
       adapter.appendMessage(
         new SessionMessage.Synthetic({
           sessionID: event.data.sessionID,
+          metadata: event.metadata,
           text: event.data.text,
           id: event.id,
           type: "synthetic",

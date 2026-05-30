@@ -94,6 +94,28 @@ test("text ended populates assistant text content", () => {
   expect(state.messages[0].content).toEqual([{ type: "text", text: "hello assistant" }])
 })
 
+test("synthetic messages preserve visibility metadata", () => {
+  const state: SessionMessageUpdater.MemoryState = { messages: [] }
+  const sessionID = SessionID.make("session")
+
+  SessionMessageUpdater.update(SessionMessageUpdater.memory(state), {
+    id: EventV2.ID.create(),
+    type: "session.next.synthetic",
+    metadata: { opencodeMcpVisible: true },
+    data: {
+      sessionID,
+      timestamp: DateTime.makeUnsafe(1),
+      text: "visible integration text",
+    },
+  } satisfies SessionEvent.Event)
+
+  expect(state.messages[0]).toMatchObject({
+    type: "synthetic",
+    metadata: { opencodeMcpVisible: true },
+    text: "visible integration text",
+  })
+})
+
 test("tool completion stores completed timestamp", () => {
   const state: SessionMessageUpdater.MemoryState = { messages: [] }
   const sessionID = SessionID.make("session")

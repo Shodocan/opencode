@@ -24,6 +24,7 @@ import type {
   SessionMessageCompaction,
   SessionMessageModelSwitched,
   SessionMessageShell,
+  SessionMessageSynthetic,
   SessionMessageUser,
   ToolFileContent,
   ToolTextContent,
@@ -101,6 +102,9 @@ function View(props: { api: TuiPluginApi; sessionID: string }) {
                       start={lastUserCreated(index())}
                     />
                   </Match>
+                  <Match when={message.type === "synthetic" && message.metadata?.opencodeMcpVisible === true}>
+                    <SyntheticMessage message={message as SessionMessageSynthetic} index={index()} />
+                  </Match>
                   <Match when={message.type === "synthetic"}>
                     <></>
                   </Match>
@@ -151,6 +155,26 @@ function MissingData(props: { label: string; detail: string }) {
         <span style={{ bg: theme.warning, fg: theme.background, bold: true }}> MISSING DATA </span> {props.label}
       </text>
       <text fg={theme.textMuted}>{props.detail}</text>
+    </box>
+  )
+}
+
+function SyntheticMessage(props: { message: SessionMessageSynthetic; index: number }) {
+  const { theme } = useTheme()
+  return (
+    <box
+      id={props.message.id}
+      border={["left"]}
+      borderColor={theme.textMuted}
+      customBorderChars={SplitBorder.customBorderChars}
+      marginTop={props.index === 0 ? 0 : 1}
+      flexShrink={0}
+      paddingTop={1}
+      paddingBottom={1}
+      paddingLeft={2}
+      backgroundColor={theme.backgroundPanel}
+    >
+      <text fg={theme.textMuted}>{props.message.text}</text>
     </box>
   )
 }
