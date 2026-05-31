@@ -23,7 +23,7 @@ function event(payload: Event, input: { directory: string; project?: string; wor
     directory: input.directory,
     project: input.project,
     workspace: input.workspace,
-    payload,
+    payload: payload as GlobalEvent["payload"],
   }
 }
 

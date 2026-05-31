@@ -24,8 +24,8 @@ import { AppFileSystem } from "@opencode-ai/core/filesystem"
 import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
-import { BusEvent } from "../bus/bus-event"
-import { Bus } from "@/bus"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/cli/cmd/tui/event"
 import { SessionStatus } from "@/session/status"
 import open from "open"
@@ -51,12 +51,12 @@ export const Resource = Schema.Struct({
 }).annotate({ identifier: "McpResource" })
 export type Resource = Schema.Schema.Type<typeof Resource>
 
-export const ToolsChanged = BusEvent.define(
-  "mcp.tools.changed",
-  Schema.Struct({
+export const ToolsChanged = EventV2.define({
+  type: "mcp.tools.changed",
+  schema: {
     server: Schema.String,
-  }),
-)
+  },
+})
 
 const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
   method: z.literal("notifications/opencode/prompt/append"),
@@ -100,13 +100,13 @@ const TuiSessionSelectNotificationSchema = NotificationSchema.extend({
   }),
 })
 
-export const BrowserOpenFailed = BusEvent.define(
-  "mcp.browser.open.failed",
-  Schema.Struct({
+export const BrowserOpenFailed = EventV2.define({
+  type: "mcp.browser.open.failed",
+  schema: {
     mcpName: Schema.String,
     url: Schema.String,
-  }),
-)
+  },
+})
 
 export const Failed = NamedError.create("MCPFailed", {
   name: Schema.String,
@@ -323,7 +323,7 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner
     const auth = yield* McpAuth.Service
-    const bus = yield* Bus.Service
+    const events = yield* EventV2Bridge.Service
 
     type Transport = StdioClientTransport | StreamableHTTPClientTransport | SSEClientTransport
 
@@ -418,7 +418,7 @@ export const layer = Layer.effect(
                   status: "needs_client_registration" as const,
                   error: "Server does not support dynamic client registration. Please provide clientId in config.",
                 }
-                return bus
+                return events
                   .publish(TuiEvent.ToastShow, {
                     title: "MCP Authentication Required",
                     message: `Server "${key}" requires a pre-registered client ID. Add clientId to your config.`,
@@ -429,7 +429,7 @@ export const layer = Layer.effect(
               } else {
                 pendingOAuthTransports.set(key, transport)
                 lastStatus = { status: "needs_auth" as const }
-                return bus
+                return events
                   .publish(TuiEvent.ToastShow, {
                     title: "MCP Authentication Required",
                     message: `Server "${key}" requires authentication. Run: opencode mcp auth ${key}`,
@@ -561,13 +561,13 @@ export const layer = Layer.effect(
         if (s.clients[name] !== client || s.status[name]?.status !== "connected") return
 
         s.defs[name] = listed
-        await bridge.promise(bus.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
+        await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
 
       client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
         await bridge.promise(
-          Schema.decodeUnknownEffect(TuiEvent.PromptAppend.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.PromptAppend, params)),
+          Schema.decodeUnknownEffect(TuiEvent.PromptAppend.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.PromptAppend, params)),
             Effect.ignore,
           ),
         )
@@ -575,8 +575,8 @@ export const layer = Layer.effect(
 
       client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
         await bridge.promise(
-          Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.PromptSynthetic, { ...params, caller: name })),
+          Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.PromptSynthetic, { ...params, caller: name })),
             Effect.ignore,
           ),
         )
@@ -584,8 +584,8 @@ export const layer = Layer.effect(
 
       client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {
         await bridge.promise(
-          Schema.decodeUnknownEffect(TuiEvent.CommandExecute.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.CommandExecute, params)),
+          Schema.decodeUnknownEffect(TuiEvent.CommandExecute.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.CommandExecute, params)),
             Effect.ignore,
           ),
         )
@@ -593,8 +593,8 @@ export const layer = Layer.effect(
 
       client.setNotificationHandler(TuiToastShowNotificationSchema, async (notification) => {
         await bridge.promise(
-          Schema.decodeUnknownEffect(TuiEvent.ToastShow.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.ToastShow, params)),
+          Schema.decodeUnknownEffect(TuiEvent.ToastShow.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.ToastShow, params)),
             Effect.ignore,
           ),
         )
@@ -602,8 +602,8 @@ export const layer = Layer.effect(
 
       client.setNotificationHandler(TuiSessionSelectNotificationSchema, async (notification) => {
         await bridge.promise(
-          Schema.decodeUnknownEffect(TuiEvent.SessionSelect.properties)(notification.params).pipe(
-            Effect.flatMap((params) => bus.publish(TuiEvent.SessionSelect, params)),
+          Schema.decodeUnknownEffect(TuiEvent.SessionSelect.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.SessionSelect, params)),
             Effect.ignore,
           ),
         )
@@ -652,29 +652,37 @@ export const layer = Layer.effect(
         // Fan opencode session status changes out to every connected MCP server.
         // Servers opt in by registering a handler for "notifications/opencode/session/status";
         // servers that ignore the method get the notification dropped by the MCP SDK.
-        const unsubscribeStatus = yield* bus.subscribeCallback(SessionStatus.Event.Status, (evt) => {
-          const params = { sessionID: evt.properties.sessionID, status: evt.properties.status }
-          for (const [name, client] of Object.entries(s.clients)) {
-            if (s.status[name]?.status !== "connected") continue
-            client
-              .notification({ method: "notifications/opencode/session/status", params })
-              .catch((cause) => log.warn("session.status notification failed", { server: name, cause }))
-          }
-        })
+        const unsubscribeStatus = yield* events.listen((evt) =>
+          Effect.sync(() => {
+            if (evt.type !== SessionStatus.Event.Status.type) return
+            const data = evt.data as typeof SessionStatus.Event.Status.data.Type
+            const params = { sessionID: data.sessionID, status: data.status }
+            for (const [name, client] of Object.entries(s.clients)) {
+              if (s.status[name]?.status !== "connected") continue
+              client
+                .notification({ method: "notifications/opencode/session/status", params })
+                .catch((cause) => log.warn("session.status notification failed", { server: name, cause }))
+            }
+          }),
+        )
 
-        const unsubscribeAgentState = yield* bus.subscribeCallback(TuiEvent.AgentState, (evt) => {
-          for (const [name, client] of Object.entries(s.clients)) {
-            if (s.status[name]?.status !== "connected") continue
-            client
-              .notification({ method: "notifications/opencode/agent/state", params: evt.properties })
-              .catch((cause) => log.warn("agent.state notification failed", { server: name, cause }))
-          }
-        })
+        const unsubscribeAgentState = yield* events.listen((evt) =>
+          Effect.sync(() => {
+            if (evt.type !== TuiEvent.AgentState.type) return
+            const data = evt.data as typeof TuiEvent.AgentState.data.Type
+            for (const [name, client] of Object.entries(s.clients)) {
+              if (s.status[name]?.status !== "connected") continue
+              client
+                .notification({ method: "notifications/opencode/agent/state", params: data })
+                .catch((cause) => log.warn("agent.state notification failed", { server: name, cause }))
+            }
+          }),
+        )
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
-            unsubscribeStatus()
-            unsubscribeAgentState()
+            yield* unsubscribeStatus
+            yield* unsubscribeAgentState
             yield* Effect.forEach(
               Object.values(s.clients),
               (client) =>
@@ -994,7 +1002,7 @@ export const layer = Layer.effect(
         ),
         Effect.catch(() => {
           log.warn("failed to open browser, user must open URL manually", { mcpName })
-          return bus.publish(BrowserOpenFailed, { mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)
+          return events.publish(BrowserOpenFailed, { mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)
         }),
       )
 
@@ -1086,7 +1094,7 @@ export type AuthStatus = "authenticated" | "expired" | "not_authenticated"
 
 export const defaultLayer = layer.pipe(
   Layer.provide(McpAuth.defaultLayer),
-  Layer.provide(Bus.layer),
+  Layer.provide(EventV2Bridge.defaultLayer),
   Layer.provide(Config.defaultLayer),
   Layer.provide(CrossSpawnSpawner.defaultLayer),
   Layer.provide(AppFileSystem.defaultLayer),

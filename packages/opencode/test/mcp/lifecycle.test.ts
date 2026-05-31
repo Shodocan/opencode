@@ -185,12 +185,12 @@ beforeEach(() => {
 
 // Import after mocks
 const { MCP } = await import("../../src/mcp/index")
-const { Bus } = await import("../../src/bus")
 const { TuiEvent } = await import("../../src/cli/cmd/tui/event")
 const { SessionID } = await import("../../src/session/schema")
 const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
+const { EventV2Bridge } = await import("../../src/event-v2-bridge")
 
-const it = testEffect(Layer.mergeAll(MCP.defaultLayer, Bus.layer))
+const it = testEffect(Layer.mergeAll(MCP.defaultLayer, EventV2Bridge.defaultLayer))
 
 function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server: string) {
   if ("status" in status) return status.status
@@ -288,19 +288,25 @@ it.instance(
       lastCreatedClientName = "notify-server"
       getOrCreateClientState("notify-server")
 
-      const bus = yield* Bus.Service
+      const events = yield* EventV2Bridge.Service
       const promptAppend: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
       const promptSynthetic: Array<{ text: string; sessionID: string; visible?: boolean; caller?: string }> = []
       const commands: Array<{ command: string }> = []
       const toasts: Array<{ title?: string; message: string; variant: string; duration?: number }> = []
       const sessionSelect: Array<{ sessionID: string }> = []
-      const unsubs = [
-        yield* bus.subscribeCallback(TuiEvent.PromptAppend, (evt) => promptAppend.push(evt.properties)),
-        yield* bus.subscribeCallback(TuiEvent.PromptSynthetic, (evt) => promptSynthetic.push(evt.properties)),
-        yield* bus.subscribeCallback(TuiEvent.CommandExecute, (evt) => commands.push(evt.properties)),
-        yield* bus.subscribeCallback(TuiEvent.ToastShow, (evt) => toasts.push(evt.properties)),
-        yield* bus.subscribeCallback(TuiEvent.SessionSelect, (evt) => sessionSelect.push(evt.properties)),
-      ]
+      const unsubscribe = yield* events.listen((evt) =>
+        Effect.sync(() => {
+          if (evt.type === TuiEvent.PromptAppend.type)
+            promptAppend.push(evt.data as typeof TuiEvent.PromptAppend.data.Type)
+          if (evt.type === TuiEvent.PromptSynthetic.type)
+            promptSynthetic.push(evt.data as typeof TuiEvent.PromptSynthetic.data.Type)
+          if (evt.type === TuiEvent.CommandExecute.type)
+            commands.push(evt.data as typeof TuiEvent.CommandExecute.data.Type)
+          if (evt.type === TuiEvent.ToastShow.type) toasts.push(evt.data as typeof TuiEvent.ToastShow.data.Type)
+          if (evt.type === TuiEvent.SessionSelect.type)
+            sessionSelect.push(evt.data as typeof TuiEvent.SessionSelect.data.Type)
+        }),
+      )
 
       try {
         yield* mcp.add("notify-server", {
@@ -328,7 +334,7 @@ it.instance(
         expect(toasts).toEqual([{ title: "Heads up", message: "done", variant: "info", duration: 250 }])
         expect(sessionSelect).toEqual([{ sessionID }])
       } finally {
-        unsubs.forEach((unsub) => unsub())
+        yield* unsubscribe
       }
     }),
   ),
@@ -348,8 +354,8 @@ it.instance(
           command: ["echo", "test"],
         })
 
-        const bus = yield* Bus.Service
-        yield* bus.publish(TuiEvent.AgentState, {
+        const events = yield* EventV2Bridge.Service
+        yield* events.publish(TuiEvent.AgentState, {
           agent: "build",
           model: { providerID: "test", modelID: "model" },
           variant: "fast",

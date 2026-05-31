@@ -175,7 +175,8 @@ function globalPayloadEvent(value: unknown): Event | undefined {
   }
 
   const payload = value.payload
-  if (payload.type === "sync") {
+  const payloadType = Reflect.get(payload as Record<string, unknown>, "type")
+  if (payloadType === "sync") {
     return undefined
   }
 
@@ -191,7 +192,7 @@ function isMatchingDisposeEvent(value: unknown, directory: string | undefined): 
     return false
   }
 
-  return value.payload.type === "server.instance.disposed"
+  return Reflect.get(value.payload as Record<string, unknown>, "type") === "server.instance.disposed"
 }
 
 function active(event: Event, sessionID: string): boolean {

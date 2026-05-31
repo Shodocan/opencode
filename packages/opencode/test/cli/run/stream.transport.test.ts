@@ -11,6 +11,7 @@ type SessionChild = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["ch
 type SessionToolPart = Extract<SessionMessage["parts"][number], { type: "tool" }>
 type SessionStatusMap = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["status"]>>["data"]>
 type TextPart = Extract<SessionMessage["parts"][number], { type: "text" }>
+type TestGlobalPayload = GlobalEvent["payload"] | SdkEvent | { id: string; type: string; properties: Record<string, unknown> }
 
 afterEach(() => {
   mock.restore()
@@ -339,11 +340,11 @@ function child(id: string): SessionChild {
   }
 }
 
-function globalEvent(payload: GlobalEvent["payload"]): GlobalEvent {
+function globalEvent(payload: TestGlobalPayload): GlobalEvent {
   return {
     directory: "/tmp",
     project: "project-1",
-    payload,
+    payload: payload as GlobalEvent["payload"],
   }
 }
 

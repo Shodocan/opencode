@@ -12,7 +12,7 @@ export function useEvent() {
 
   function subscribe(handler: (event: Event, metadata: EventMetadata) => void) {
     return sdk.event.on("event", (event) => {
-      if (event.payload.type === "sync") {
+      if (Reflect.get(event.payload as Record<string, unknown>, "type") === "sync") {
         return
       }
 

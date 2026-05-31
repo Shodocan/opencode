@@ -131,10 +131,12 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     }
 
     event.subscribe((event, { workspace }) => {
+      if (Reflect.get(event as Record<string, unknown>, "type") === "server.instance.disposed") {
+        void bootstrap()
+        return
+      }
+
       switch (event.type) {
-        case "server.instance.disposed":
-          void bootstrap()
-          break
         case "permission.replied": {
           const requests = store.permission[event.properties.sessionID]
           if (!requests) break

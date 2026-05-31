@@ -1,8 +1,7 @@
-import { Schema } from "effect"
 import { TuiEvent } from "../../event"
 
-type PromptAppendEvent = Schema.Schema.Type<typeof TuiEvent.PromptAppend.properties>
-type PromptSyntheticEvent = Schema.Schema.Type<typeof TuiEvent.PromptSynthetic.properties>
+type PromptAppendEvent = typeof TuiEvent.PromptAppend.data.Type
+type PromptSyntheticEvent = typeof TuiEvent.PromptSynthetic.data.Type
 
 export function createPromptEventHandlers(input: {
   sessionID: () => string | undefined
