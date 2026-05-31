@@ -148,7 +148,7 @@ function createServerSdkContext(server: ServerConnection.Any) {
             resetHeartbeat()
             streamErrorLogged = false
             const directory = event.directory ?? "global"
-            if (event.payload.type === "sync") {
+            if (Reflect.get(event.payload as Record<string, unknown>, "type") === "sync") {
               continue
             }
 
