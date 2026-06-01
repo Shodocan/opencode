@@ -79,6 +79,7 @@ export type Event =
   | EventSessionNextCompactionStarted
   | EventSessionNextCompactionDelta
   | EventSessionNextCompactionEnded
+  | EventPluginAdded
   | EventCatalogModelUpdated
   | EventModelsDevRefreshed
   | EventAccountAdded
@@ -807,6 +808,9 @@ export type Session = {
     variant?: string
   }
   version: string
+  metadata?: {
+    [key: string]: unknown
+  }
   time: {
     created: number
     updated: number
@@ -908,6 +912,7 @@ export type GlobalEvent = {
     | EventSessionNextCompactionStarted
     | EventSessionNextCompactionDelta
     | EventSessionNextCompactionEnded
+    | EventPluginAdded
     | EventCatalogModelUpdated
     | EventModelsDevRefreshed
     | EventAccountAdded
@@ -1346,6 +1351,7 @@ export type Config = {
     primary_tools?: Array<string>
     continue_loop_on_deny?: boolean
     mcp_timeout?: number
+    policies?: Array<ConfigV2ExperimentalPolicy>
   }
 }
 
@@ -1543,6 +1549,9 @@ export type GlobalSession = {
     variant?: string
   }
   version: string
+  metadata?: {
+    [key: string]: unknown
+  }
   time: {
     created: number
     updated: number
@@ -2014,6 +2023,13 @@ export type Workspace = {
   timeUsed: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
 }
 
+export type WorkspaceCreateError = {
+  name: "WorkspaceCreateError"
+  data: {
+    message: string
+  }
+}
+
 export type WorkspaceWarpError = {
   name: "WorkspaceWarpError"
   data: {
@@ -2130,6 +2146,9 @@ export type SyncEventSessionUpdated = {
         variant?: string
       } | null
       version?: string | null
+      metadata?: {
+        [key: string]: unknown
+      } | null
       time?: {
         created?: number | null
         updated?: number | null
@@ -2184,7 +2203,7 @@ export type SyncEventSessionNextModelSwitched = {
     model: {
       id: string
       providerID: string
-      variant: string
+      variant?: string
     }
   }
 }
@@ -2256,7 +2275,7 @@ export type SyncEventSessionNextStepStarted = {
     model: {
       id: string
       providerID: string
-      variant: string
+      variant?: string
     }
     snapshot?: string
   }
@@ -2937,7 +2956,7 @@ export type EventSessionNextModelSwitched = {
     model: {
       id: string
       providerID: string
-      variant: string
+      variant?: string
     }
   }
 }
@@ -3025,7 +3044,7 @@ export type EventSessionNextStepStarted = {
     model: {
       id: string
       providerID: string
-      variant: string
+      variant?: string
     }
     snapshot?: string
   }
@@ -3299,6 +3318,14 @@ export type EventSessionNextCompactionEnded = {
   }
 }
 
+export type EventPluginAdded = {
+  id: string
+  type: "plugin.added"
+  properties: {
+    id: string
+  }
+}
+
 export type ModelV2Info = {
   id: string
   apiID: string
@@ -3463,6 +3490,14 @@ export type EventAccountSwitched = {
   }
 }
 
+export type PolicyEffect = "allow" | "deny"
+
+export type ConfigV2ExperimentalPolicy = {
+  action: "provider.use"
+  effect: PolicyEffect
+  resource: string
+}
+
 export type SessionInfo = {
   id: string
   parentID?: string
@@ -3473,7 +3508,7 @@ export type SessionInfo = {
   model?: {
     id: string
     providerID: string
-    variant: string
+    variant?: string
   }
   cost: number
   tokens: {
@@ -3519,7 +3554,7 @@ export type SessionMessageModelSwitched = {
   model: {
     id: string
     providerID: string
-    variant: string
+    variant?: string
   }
 }
 
@@ -3654,7 +3689,7 @@ export type SessionMessageAssistant = {
   model: {
     id: string
     providerID: string
-    variant: string
+    variant?: string
   }
   content: Array<SessionMessageAssistantText | SessionMessageAssistantReasoning | SessionMessageAssistantTool>
   snapshot?: {
@@ -6155,6 +6190,9 @@ export type SessionCreateData = {
       providerID: string
       variant?: string
     }
+    metadata?: {
+      [key: string]: unknown
+    }
     permission?: PermissionRuleset
     workspaceID?: string
   }
@@ -6285,6 +6323,9 @@ export type SessionGetResponse = SessionGetResponses[keyof SessionGetResponses]
 export type SessionUpdateData = {
   body?: {
     title?: string
+    metadata?: {
+      [key: string]: unknown
+    }
     permission?: PermissionRuleset
     time?: {
       archived?: number
@@ -8138,9 +8179,9 @@ export type ExperimentalWorkspaceCreateData = {
 
 export type ExperimentalWorkspaceCreateErrors = {
   /**
-   * BadRequest | InvalidRequestError
+   * WorkspaceCreateError | BadRequest | InvalidRequestError
    */
-  400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  400: WorkspaceCreateError | EffectHttpApiErrorBadRequest | InvalidRequestError
 }
 
 export type ExperimentalWorkspaceCreateError =
