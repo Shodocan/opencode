@@ -623,6 +623,16 @@ export type Prompt = {
   references?: Array<PromptReferenceAttachment>
 }
 
+export type Pty = {
+  id: string
+  title: string
+  command: string
+  args: Array<string>
+  cwd: string
+  status: "running" | "exited"
+  pid: number
+}
+
 export type SessionStatus =
   | {
       type: "idle"
@@ -644,16 +654,6 @@ export type SessionStatus =
   | {
       type: "busy"
     }
-
-export type Pty = {
-  id: string
-  title: string
-  command: string
-  args: Array<string>
-  cwd: string
-  status: "running" | "exited"
-  pid: number
-}
 
 export type QuestionOption = {
   /**
