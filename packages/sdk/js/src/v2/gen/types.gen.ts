@@ -62,6 +62,8 @@ export type Event =
   | EventTuiToastShow2
   | EventTuiSessionSelect2
   | EventTuiAgentState2
+  | EventSessionStatus
+  | EventSessionIdle
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -73,8 +75,6 @@ export type Event =
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
-  | EventSessionStatus
-  | EventSessionIdle
   | EventSessionCompacted
   | EventTodoUpdated
   | EventVcsBranchUpdated
@@ -622,6 +622,28 @@ export type Prompt = {
   references?: Array<PromptReferenceAttachment>
 }
 
+export type SessionStatus =
+  | {
+      type: "idle"
+    }
+  | {
+      type: "retry"
+      attempt: number
+      message: string
+      action?: {
+        reason: string
+        provider: string
+        title: string
+        message: string
+        label: string
+        link?: string
+      }
+      next: number
+    }
+  | {
+      type: "busy"
+    }
+
 export type Pty = {
   id: string
   title: string
@@ -666,28 +688,6 @@ export type QuestionTool = {
 }
 
 export type QuestionAnswer = Array<string>
-
-export type SessionStatus =
-  | {
-      type: "idle"
-    }
-  | {
-      type: "retry"
-      attempt: number
-      message: string
-      action?: {
-        reason: string
-        provider: string
-        title: string
-        message: string
-        label: string
-        link?: string
-      }
-      next: number
-    }
-  | {
-      type: "busy"
-    }
 
 export type Todo = {
   /**
@@ -1303,6 +1303,21 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.status"
+        properties: {
+          sessionID: string
+          status: SessionStatus
+        }
+      }
+    | {
+        id: string
+        type: "session.idle"
+        properties: {
+          sessionID: string
+        }
+      }
+    | {
+        id: string
         type: "mcp.tools.changed"
         properties: {
           server: string
@@ -1410,21 +1425,6 @@ export type GlobalEvent = {
         properties: {
           sessionID: string
           requestID: string
-        }
-      }
-    | {
-        id: string
-        type: "session.status"
-        properties: {
-          sessionID: string
-          status: SessionStatus
-        }
-      }
-    | {
-        id: string
-        type: "session.idle"
-        properties: {
-          sessionID: string
         }
       }
     | {
@@ -4454,6 +4454,23 @@ export type EventPermissionReplied = {
   }
 }
 
+export type EventSessionStatus = {
+  id: string
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  id: string
+  type: "session.idle"
+  properties: {
+    sessionID: string
+  }
+}
+
 export type EventMcpToolsChanged = {
   id: string
   type: "mcp.tools.changed"
@@ -4573,23 +4590,6 @@ export type EventQuestionRejected = {
   properties: {
     sessionID: string
     requestID: string
-  }
-}
-
-export type EventSessionStatus = {
-  id: string
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  id: string
-  type: "session.idle"
-  properties: {
-    sessionID: string
   }
 }
 
