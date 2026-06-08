@@ -36,6 +36,8 @@ import type {
   ExperimentalConsoleListOrgsErrors,
   ExperimentalConsoleListOrgsResponses,
   ExperimentalConsoleSwitchOrgResponses,
+  ExperimentalControlPlaneMoveSessionErrors,
+  ExperimentalControlPlaneMoveSessionResponses,
   ExperimentalProjectCopyCreateErrors,
   ExperimentalProjectCopyCreateResponses,
   ExperimentalProjectCopyRefreshErrors,
@@ -44,6 +46,8 @@ import type {
   ExperimentalProjectCopyRemoveResponses,
   ExperimentalResourceListErrors,
   ExperimentalResourceListResponses,
+  ExperimentalSessionBackgroundErrors,
+  ExperimentalSessionBackgroundResponses,
   ExperimentalSessionListErrors,
   ExperimentalSessionListResponses,
   ExperimentalWorkspaceAdapterListErrors,
@@ -110,6 +114,7 @@ import type {
   McpRemoteConfig,
   McpStatusErrors,
   McpStatusResponses,
+  MoveSessionDestination,
   OutputFormat,
   Part as Part2,
   PartDeleteErrors,
@@ -169,6 +174,8 @@ import type {
   QuestionReplyErrors,
   QuestionReplyResponses,
   QuestionV2Reply,
+  ReferenceListErrors,
+  ReferenceListResponses,
   SessionAbortErrors,
   SessionAbortResponses,
   SessionChildrenErrors,
@@ -534,33 +541,38 @@ export class App extends HeyApiClient {
   }
 }
 
-export class Config extends HeyApiClient {
+export class ControlPlane extends HeyApiClient {
   /**
-   * Get global configuration
+   * Move session
    *
-   * Retrieve the current global OpenCode configuration settings and preferences.
+   * Move a session to another project directory, optionally transferring local changes.
    */
-  public get<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
-    return (options?.client ?? this.client).get<GlobalConfigGetResponses, GlobalConfigGetErrors, ThrowOnError>({
-      url: "/global/config",
-      ...options,
-    })
-  }
-
-  /**
-   * Update global configuration
-   *
-   * Update global OpenCode configuration settings and preferences.
-   */
-  public update<ThrowOnError extends boolean = false>(
+  public moveSession<ThrowOnError extends boolean = false>(
     parameters?: {
-      config?: Config3
+      sessionID?: string
+      destination?: MoveSessionDestination
+      moveChanges?: boolean
     },
     options?: Options<never, ThrowOnError>,
   ) {
-    const params = buildClientParams([parameters], [{ args: [{ key: "config", map: "body" }] }])
-    return (options?.client ?? this.client).patch<GlobalConfigUpdateResponses, GlobalConfigUpdateErrors, ThrowOnError>({
-      url: "/global/config",
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "body", key: "sessionID" },
+            { in: "body", key: "destination" },
+            { in: "body", key: "moveChanges" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      ExperimentalControlPlaneMoveSessionResponses,
+      ExperimentalControlPlaneMoveSessionErrors,
+      ThrowOnError
+    >({
+      url: "/experimental/control-plane/move-session",
       ...options,
       ...params,
       headers: {
@@ -568,204 +580,6 @@ export class Config extends HeyApiClient {
         ...options?.headers,
         ...params.headers,
       },
-    })
-  }
-}
-
-export class Global extends HeyApiClient {
-  /**
-   * Get health
-   *
-   * Get health information about the OpenCode server.
-   */
-  public health<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
-    return (options?.client ?? this.client).get<GlobalHealthResponses, GlobalHealthErrors, ThrowOnError>({
-      url: "/global/health",
-      ...options,
-    })
-  }
-
-  /**
-   * Get global events
-   *
-   * Subscribe to global events from the OpenCode system using server-sent events.
-   */
-  public event<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
-    return (options?.client ?? this.client).sse.get<GlobalEventResponses, GlobalEventErrors, ThrowOnError>({
-      url: "/global/event",
-      ...options,
-    })
-  }
-
-  /**
-   * Dispose instance
-   *
-   * Clean up and dispose all OpenCode instances, releasing all resources.
-   */
-  public dispose<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
-    return (options?.client ?? this.client).post<GlobalDisposeResponses, GlobalDisposeErrors, ThrowOnError>({
-      url: "/global/dispose",
-      ...options,
-    })
-  }
-
-  /**
-   * Upgrade opencode
-   *
-   * Upgrade opencode to the specified version or latest if not specified.
-   */
-  public upgrade<ThrowOnError extends boolean = false>(
-    parameters?: {
-      target?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams([parameters], [{ args: [{ in: "body", key: "target" }] }])
-    return (options?.client ?? this.client).post<GlobalUpgradeResponses, GlobalUpgradeErrors, ThrowOnError>({
-      url: "/global/upgrade",
-      ...options,
-      ...params,
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-        ...params.headers,
-      },
-    })
-  }
-
-  private _config?: Config
-  get config(): Config {
-    return (this._config ??= new Config({ client: this.client }))
-  }
-}
-
-export class Event extends HeyApiClient {
-  /**
-   * Subscribe to events
-   *
-   * Get events
-   */
-  public subscribe<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).sse.get<EventSubscribeResponses, unknown, ThrowOnError>({
-      url: "/event",
-      ...options,
-      ...params,
-    })
-  }
-}
-
-export class Config2 extends HeyApiClient {
-  /**
-   * Get configuration
-   *
-   * Retrieve the current OpenCode configuration settings and preferences.
-   */
-  public get<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<ConfigGetResponses, ConfigGetErrors, ThrowOnError>({
-      url: "/config",
-      ...options,
-      ...params,
-    })
-  }
-
-  /**
-   * Update configuration
-   *
-   * Update OpenCode configuration settings and preferences.
-   */
-  public update<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-      config?: Config3
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-            { key: "config", map: "body" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).patch<ConfigUpdateResponses, ConfigUpdateErrors, ThrowOnError>({
-      url: "/config",
-      ...options,
-      ...params,
-      headers: {
-        "Content-Type": "application/json",
-        ...options?.headers,
-        ...params.headers,
-      },
-    })
-  }
-
-  /**
-   * List config providers
-   *
-   * Get a list of all configured AI providers and their default models.
-   */
-  public providers<ThrowOnError extends boolean = false>(
-    parameters?: {
-      directory?: string
-      workspace?: string
-    },
-    options?: Options<never, ThrowOnError>,
-  ) {
-    const params = buildClientParams(
-      [parameters],
-      [
-        {
-          args: [
-            { in: "query", key: "directory" },
-            { in: "query", key: "workspace" },
-          ],
-        },
-      ],
-    )
-    return (options?.client ?? this.client).get<ConfigProvidersResponses, ConfigProvidersErrors, ThrowOnError>({
-      url: "/config/providers",
-      ...options,
-      ...params,
     })
   }
 }
@@ -925,6 +739,42 @@ export class Session extends HeyApiClient {
       ...params,
     })
   }
+
+  /**
+   * Background subagents
+   *
+   * Detach any synchronous subagents currently blocking the session and continue them in the background.
+   */
+  public background<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).post<
+      ExperimentalSessionBackgroundResponses,
+      ExperimentalSessionBackgroundErrors,
+      ThrowOnError
+    >({
+      url: "/experimental/session/{sessionID}/background",
+      ...options,
+      ...params,
+    })
+  }
 }
 
 export class Resource extends HeyApiClient {
@@ -972,9 +822,9 @@ export class ProjectCopy extends HeyApiClient {
   public remove<ThrowOnError extends boolean = false>(
     parameters: {
       projectID: string
-      query_directory?: string
       workspace?: string
-      body_directory?: string
+      directory?: string
+      force?: boolean
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -984,17 +834,9 @@ export class ProjectCopy extends HeyApiClient {
         {
           args: [
             { in: "path", key: "projectID" },
-            {
-              in: "query",
-              key: "query_directory",
-              map: "directory",
-            },
             { in: "query", key: "workspace" },
-            {
-              in: "body",
-              key: "body_directory",
-              map: "directory",
-            },
+            { in: "body", key: "directory" },
+            { in: "body", key: "force" },
           ],
         },
       ],
@@ -1023,10 +865,11 @@ export class ProjectCopy extends HeyApiClient {
   public create<ThrowOnError extends boolean = false>(
     parameters: {
       projectID: string
-      query_directory?: string
       workspace?: string
       strategy?: "git_worktree"
-      body_directory?: string
+      directory?: string
+      name?: string
+      context?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1036,18 +879,11 @@ export class ProjectCopy extends HeyApiClient {
         {
           args: [
             { in: "path", key: "projectID" },
-            {
-              in: "query",
-              key: "query_directory",
-              map: "directory",
-            },
             { in: "query", key: "workspace" },
             { in: "body", key: "strategy" },
-            {
-              in: "body",
-              key: "body_directory",
-              map: "directory",
-            },
+            { in: "body", key: "directory" },
+            { in: "body", key: "name" },
+            { in: "body", key: "context" },
           ],
         },
       ],
@@ -1379,6 +1215,11 @@ export class Workspace extends HeyApiClient {
 }
 
 export class Experimental extends HeyApiClient {
+  private _controlPlane?: ControlPlane
+  get controlPlane(): ControlPlane {
+    return (this._controlPlane ??= new ControlPlane({ client: this.client }))
+  }
+
   private _console?: Console
   get console(): Console {
     return (this._console ??= new Console({ client: this.client }))
@@ -1402,6 +1243,242 @@ export class Experimental extends HeyApiClient {
   private _workspace?: Workspace
   get workspace(): Workspace {
     return (this._workspace ??= new Workspace({ client: this.client }))
+  }
+}
+
+export class Config extends HeyApiClient {
+  /**
+   * Get global configuration
+   *
+   * Retrieve the current global OpenCode configuration settings and preferences.
+   */
+  public get<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<GlobalConfigGetResponses, GlobalConfigGetErrors, ThrowOnError>({
+      url: "/global/config",
+      ...options,
+    })
+  }
+
+  /**
+   * Update global configuration
+   *
+   * Update global OpenCode configuration settings and preferences.
+   */
+  public update<ThrowOnError extends boolean = false>(
+    parameters?: {
+      config?: Config3
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ key: "config", map: "body" }] }])
+    return (options?.client ?? this.client).patch<GlobalConfigUpdateResponses, GlobalConfigUpdateErrors, ThrowOnError>({
+      url: "/global/config",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+}
+
+export class Global extends HeyApiClient {
+  /**
+   * Get health
+   *
+   * Get health information about the OpenCode server.
+   */
+  public health<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).get<GlobalHealthResponses, GlobalHealthErrors, ThrowOnError>({
+      url: "/global/health",
+      ...options,
+    })
+  }
+
+  /**
+   * Get global events
+   *
+   * Subscribe to global events from the OpenCode system using server-sent events.
+   */
+  public event<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).sse.get<GlobalEventResponses, GlobalEventErrors, ThrowOnError>({
+      url: "/global/event",
+      ...options,
+    })
+  }
+
+  /**
+   * Dispose instance
+   *
+   * Clean up and dispose all OpenCode instances, releasing all resources.
+   */
+  public dispose<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
+    return (options?.client ?? this.client).post<GlobalDisposeResponses, GlobalDisposeErrors, ThrowOnError>({
+      url: "/global/dispose",
+      ...options,
+    })
+  }
+
+  /**
+   * Upgrade opencode
+   *
+   * Upgrade opencode to the specified version or latest if not specified.
+   */
+  public upgrade<ThrowOnError extends boolean = false>(
+    parameters?: {
+      target?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams([parameters], [{ args: [{ in: "body", key: "target" }] }])
+    return (options?.client ?? this.client).post<GlobalUpgradeResponses, GlobalUpgradeErrors, ThrowOnError>({
+      url: "/global/upgrade",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  private _config?: Config
+  get config(): Config {
+    return (this._config ??= new Config({ client: this.client }))
+  }
+}
+
+export class Event extends HeyApiClient {
+  /**
+   * Subscribe to events
+   *
+   * Get events
+   */
+  public subscribe<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).sse.get<EventSubscribeResponses, unknown, ThrowOnError>({
+      url: "/event",
+      ...options,
+      ...params,
+    })
+  }
+}
+
+export class Config2 extends HeyApiClient {
+  /**
+   * Get configuration
+   *
+   * Retrieve the current OpenCode configuration settings and preferences.
+   */
+  public get<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ConfigGetResponses, ConfigGetErrors, ThrowOnError>({
+      url: "/config",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Update configuration
+   *
+   * Update OpenCode configuration settings and preferences.
+   */
+  public update<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+      config?: Config3
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+            { key: "config", map: "body" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).patch<ConfigUpdateResponses, ConfigUpdateErrors, ThrowOnError>({
+      url: "/config",
+      ...options,
+      ...params,
+      headers: {
+        "Content-Type": "application/json",
+        ...options?.headers,
+        ...params.headers,
+      },
+    })
+  }
+
+  /**
+   * List config providers
+   *
+   * Get a list of all configured AI providers and their default models.
+   */
+  public providers<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ConfigProvidersResponses, ConfigProvidersErrors, ThrowOnError>({
+      url: "/config/providers",
+      ...options,
+      ...params,
+    })
   }
 }
 
@@ -3260,6 +3337,38 @@ export class Provider extends HeyApiClient {
   }
 }
 
+export class Reference extends HeyApiClient {
+  /**
+   * List configured references
+   *
+   * List configured references resolved in the current workspace.
+   */
+  public list<ThrowOnError extends boolean = false>(
+    parameters?: {
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<ReferenceListResponses, ReferenceListErrors, ThrowOnError>({
+      url: "/reference",
+      ...options,
+      ...params,
+    })
+  }
+}
+
 export class Session2 extends HeyApiClient {
   /**
    * List sessions
@@ -4934,9 +5043,9 @@ export class Tui extends HeyApiClient {
 
 export class Health extends HeyApiClient {
   /**
-   * Check v2 server health
+   * Check server health
    *
-   * Check whether the v2 API server is ready to accept requests.
+   * Check whether the API server is ready to accept requests.
    */
   public get<ThrowOnError extends boolean = false>(options?: Options<never, ThrowOnError>) {
     return (options?.client ?? this.client).get<V2HealthGetResponses, V2HealthGetErrors, ThrowOnError>({
@@ -4948,9 +5057,9 @@ export class Health extends HeyApiClient {
 
 export class Agent extends HeyApiClient {
   /**
-   * List v2 agents
+   * List agents
    *
-   * Retrieve currently registered v2 agents.
+   * Retrieve currently registered agents.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -4988,7 +5097,7 @@ export class Permission2 extends HeyApiClient {
       V2SessionPermissionListErrors,
       ThrowOnError
     >({
-      url: "/api/session/{sessionID}/permission/request",
+      url: "/api/session/{sessionID}/permission",
       ...options,
       ...params,
     })
@@ -5026,7 +5135,7 @@ export class Permission2 extends HeyApiClient {
       V2SessionPermissionReplyErrors,
       ThrowOnError
     >({
-      url: "/api/session/{sessionID}/permission/request/{requestID}/reply",
+      url: "/api/session/{sessionID}/permission/{requestID}/reply",
       ...options,
       ...params,
       headers: {
@@ -5069,7 +5178,7 @@ export class Question2 extends HeyApiClient {
       V2SessionQuestionReplyErrors,
       ThrowOnError
     >({
-      url: "/api/session/{sessionID}/question/request/{requestID}/reply",
+      url: "/api/session/{sessionID}/question/{requestID}/reply",
       ...options,
       ...params,
       headers: {
@@ -5108,7 +5217,7 @@ export class Question2 extends HeyApiClient {
       V2SessionQuestionRejectErrors,
       ThrowOnError
     >({
-      url: "/api/session/{sessionID}/question/request/{requestID}/reject",
+      url: "/api/session/{sessionID}/question/{requestID}/reject",
       ...options,
       ...params,
     })
@@ -5117,7 +5226,7 @@ export class Question2 extends HeyApiClient {
 
 export class Session3 extends HeyApiClient {
   /**
-   * List v2 sessions
+   * List sessions
    *
    * Retrieve sessions in the requested order. Items keep that order across pages; use cursor.next or cursor.previous to move through the ordered list.
    */
@@ -5159,9 +5268,9 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
-   * Send v2 message
+   * Send message
    *
-   * Durably admit one v2 session input and schedule agent-loop execution unless resume is false.
+   * Durably admit one session input and schedule agent-loop execution unless resume is false.
    */
   public prompt<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5200,9 +5309,9 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
-   * Compact v2 session
+   * Compact session
    *
-   * Compact a v2 session conversation.
+   * Compact a session conversation.
    */
   public compact<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5219,9 +5328,9 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
-   * Wait for v2 session
+   * Wait for session
    *
-   * Wait for a v2 session agent loop to become idle.
+   * Wait for a session agent loop to become idle.
    */
   public wait<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5238,9 +5347,9 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
-   * Get v2 session context
+   * Get session context
    *
-   * Retrieve the active context messages for a v2 session (all messages after the last compaction).
+   * Retrieve the active context messages for a session (all messages after the last compaction).
    */
   public context<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5257,9 +5366,9 @@ export class Session3 extends HeyApiClient {
   }
 
   /**
-   * Get v2 session messages
+   * Get session messages
    *
-   * Retrieve projected v2 messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.
+   * Retrieve projected messages for a session. Items keep the requested order across pages; use cursor.next or cursor.previous to move through the ordered timeline.
    */
   public messages<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5303,9 +5412,9 @@ export class Session3 extends HeyApiClient {
 
 export class Model extends HeyApiClient {
   /**
-   * List v2 models
+   * List models
    *
-   * Retrieve available v2 models ordered by release date.
+   * Retrieve available models ordered by release date.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -5327,9 +5436,9 @@ export class Model extends HeyApiClient {
 
 export class Provider2 extends HeyApiClient {
   /**
-   * List v2 providers
+   * List providers
    *
-   * Retrieve active v2 AI providers so clients can show provider availability and configuration.
+   * Retrieve active AI providers so clients can show provider availability and configuration.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -5349,9 +5458,9 @@ export class Provider2 extends HeyApiClient {
   }
 
   /**
-   * Get v2 provider
+   * Get provider
    *
-   * Retrieve a single v2 AI provider so clients can inspect its availability and endpoint settings.
+   * Retrieve a single AI provider so clients can inspect its availability and endpoint settings.
    */
   public get<ThrowOnError extends boolean = false>(
     parameters: {
@@ -5544,9 +5653,9 @@ export class Fs extends HeyApiClient {
 
 export class Command2 extends HeyApiClient {
   /**
-   * List v2 commands
+   * List commands
    *
-   * Retrieve currently registered v2 commands.
+   * Retrieve currently registered commands.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -5568,9 +5677,9 @@ export class Command2 extends HeyApiClient {
 
 export class Skill extends HeyApiClient {
   /**
-   * List v2 skills
+   * List skills
    *
-   * Retrieve currently registered v2 skills.
+   * Retrieve currently registered skills.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -5592,9 +5701,9 @@ export class Skill extends HeyApiClient {
 
 export class Event2 extends HeyApiClient {
   /**
-   * Subscribe to v2 events
+   * Subscribe to events
    *
-   * Subscribe to native EventV2 payloads for a location.
+   * Subscribe to native event payloads for a location.
    */
   public subscribe<ThrowOnError extends boolean = false>(
     parameters?: {
@@ -5724,6 +5833,11 @@ export class OpencodeClient extends HeyApiClient {
     return (this._app ??= new App({ client: this.client }))
   }
 
+  private _experimental?: Experimental
+  get experimental(): Experimental {
+    return (this._experimental ??= new Experimental({ client: this.client }))
+  }
+
   private _global?: Global
   get global(): Global {
     return (this._global ??= new Global({ client: this.client }))
@@ -5737,11 +5851,6 @@ export class OpencodeClient extends HeyApiClient {
   private _config?: Config2
   get config(): Config2 {
     return (this._config ??= new Config2({ client: this.client }))
-  }
-
-  private _experimental?: Experimental
-  get experimental(): Experimental {
-    return (this._experimental ??= new Experimental({ client: this.client }))
   }
 
   private _tool?: Tool
@@ -5822,6 +5931,11 @@ export class OpencodeClient extends HeyApiClient {
   private _provider?: Provider
   get provider(): Provider {
     return (this._provider ??= new Provider({ client: this.client }))
+  }
+
+  private _reference?: Reference
+  get reference(): Reference {
+    return (this._reference ??= new Reference({ client: this.client }))
   }
 
   private _session?: Session2
