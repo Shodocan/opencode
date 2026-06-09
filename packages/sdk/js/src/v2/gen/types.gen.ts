@@ -57,6 +57,7 @@ export type Event =
   | EventAccountSwitched
   | EventPermissionV2Asked
   | EventPermissionV2Replied
+  | EventReferenceUpdated
   | EventFileWatcherUpdated
   | EventPtyCreated
   | EventPtyUpdated
@@ -635,7 +636,6 @@ export type Prompt = {
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
-  references?: Array<PromptReferenceAttachment>
 }
 
 export type Pty = {
@@ -1300,6 +1300,13 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "reference.updated"
+        properties: {
+          [key: string]: unknown
+        }
+      }
+    | {
+        id: string
         type: "file.watcher.updated"
         properties: {
           file: string
@@ -1840,7 +1847,7 @@ export type ProviderConfig = {
       interleaved?:
         | true
         | {
-            field: "reasoning_content" | "reasoning_details"
+            field: "reasoning" | "reasoning_content" | "reasoning_details"
           }
       cost?: {
         input: number
@@ -2120,7 +2127,7 @@ export type Model = {
     interleaved:
       | boolean
       | {
-          field: "reasoning_content" | "reasoning_details"
+          field: "reasoning" | "reasoning_content" | "reasoning_details"
         }
   }
   cost: {
@@ -2616,26 +2623,6 @@ export type ProviderAuthError1 = {
   }
 }
 
-export type ReferenceDescriptor =
-  | {
-      name: string
-      kind: "local"
-      path: string
-    }
-  | {
-      name: string
-      kind: "git"
-      repository: string
-      path: string
-      branch?: string
-    }
-  | {
-      name: string
-      kind: "invalid"
-      repository?: string
-      message: string
-    }
-
 export type NotFoundError = {
   name: "NotFoundError"
   data: {
@@ -3062,18 +3049,6 @@ export type PromptAgentAttachment = {
   source?: PromptSource
 }
 
-export type PromptReferenceAttachment = {
-  name: string
-  kind: "local" | "git" | "invalid"
-  uri?: string
-  repository?: string
-  branch?: string
-  target?: string
-  targetUri?: string
-  problem?: string
-  source?: PromptSource
-}
-
 export type SessionErrorUnknown = {
   type: "unknown"
   message: string
@@ -3086,19 +3061,7 @@ export type ToolTextContent = {
 
 export type ToolFileContent = {
   type: "file"
-  source:
-    | {
-        type: "data"
-        data: string
-      }
-    | {
-        type: "url"
-        url: string
-      }
-    | {
-        type: "file"
-        uri: string
-      }
+  uri: string
   mime: string
   name?: string
 }
@@ -3844,7 +3807,10 @@ export type ConfigV2ExperimentalPolicy = {
   resource: string
 }
 
-export type ProjectDirectories = Array<string>
+export type ProjectDirectories = Array<{
+  directory: string
+  type: "main" | "root" | "git_worktree"
+}>
 
 export type ProjectCopyCopy = {
   directory: string
@@ -3972,7 +3938,6 @@ export type SessionMessageUser = {
   text: string
   files?: Array<PromptFileAttachment>
   agents?: Array<PromptAgentAttachment>
-  references?: Array<PromptReferenceAttachment>
   type: "user"
 }
 
@@ -4230,16 +4195,11 @@ export type PermissionSavedInfo = {
   resource: string
 }
 
-export type FileSystemTextContent = {
-  type: "text"
+export type FileSystemContent = {
+  uri: string
+  name?: string
   content: string
-  mime: string
-}
-
-export type FileSystemBinaryContent = {
-  type: "binary"
-  content: string
-  encoding: "base64"
+  encoding: "utf8" | "base64"
   mime: string
 }
 
@@ -4286,6 +4246,23 @@ export type QuestionV2Reply = {
    * User answers in order of questions (each answer is an array of selected labels)
    */
   answers: Array<QuestionV2Answer>
+}
+
+export type ReferenceLocalSource = {
+  type: "local"
+  path: string
+}
+
+export type ReferenceGitSource = {
+  type: "git"
+  repository: string
+  branch?: string
+}
+
+export type ReferenceInfo = {
+  name: string
+  path: string
+  source: ReferenceLocalSource | ReferenceGitSource
 }
 
 export type EventModelsDevRefreshed = {
@@ -5006,6 +4983,14 @@ export type EventPermissionV2Replied = {
     sessionID: string
     requestID: string
     reply: PermissionV2Reply
+  }
+}
+
+export type EventReferenceUpdated = {
+  id: string
+  type: "reference.updated"
+  properties: {
+    [key: string]: unknown
   }
 }
 
@@ -7716,34 +7701,6 @@ export type ProviderOauthCallbackResponses = {
 
 export type ProviderOauthCallbackResponse = ProviderOauthCallbackResponses[keyof ProviderOauthCallbackResponses]
 
-export type ReferenceListData = {
-  body?: never
-  path?: never
-  query?: {
-    directory?: string
-    workspace?: string
-  }
-  url: "/reference"
-}
-
-export type ReferenceListErrors = {
-  /**
-   * Bad request
-   */
-  400: BadRequestError
-}
-
-export type ReferenceListError = ReferenceListErrors[keyof ReferenceListErrors]
-
-export type ReferenceListResponses = {
-  /**
-   * Resolved configured references
-   */
-  200: Array<ReferenceDescriptor>
-}
-
-export type ReferenceListResponse = ReferenceListResponses[keyof ReferenceListResponses]
-
 export type SessionListData = {
   body?: never
   path?: never
@@ -10182,7 +10139,6 @@ export type V2FsReadData = {
       workspace?: string
     }
     path: string
-    reference?: string
   }
   url: "/api/fs/read"
 }
@@ -10206,7 +10162,7 @@ export type V2FsReadResponses = {
    */
   200: {
     location: LocationInfo
-    data: FileSystemTextContent | FileSystemBinaryContent
+    data: FileSystemContent
   }
 }
 
@@ -10221,7 +10177,6 @@ export type V2FsListData = {
       workspace?: string
     }
     path?: string
-    reference?: string
   }
   url: "/api/fs/list"
 }
@@ -10250,6 +10205,46 @@ export type V2FsListResponses = {
 }
 
 export type V2FsListResponse = V2FsListResponses[keyof V2FsListResponses]
+
+export type V2FsFindData = {
+  body?: never
+  path?: never
+  query: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+    query: string
+    type?: "file" | "directory"
+    limit?: string
+  }
+  url: "/api/fs/find"
+}
+
+export type V2FsFindErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2FsFindError = V2FsFindErrors[keyof V2FsFindErrors]
+
+export type V2FsFindResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: Array<FileSystemEntry>
+  }
+}
+
+export type V2FsFindResponse = V2FsFindResponses[keyof V2FsFindResponses]
 
 export type V2CommandListData = {
   body?: never
@@ -10467,6 +10462,43 @@ export type V2SessionQuestionRejectResponses = {
 }
 
 export type V2SessionQuestionRejectResponse = V2SessionQuestionRejectResponses[keyof V2SessionQuestionRejectResponses]
+
+export type V2ReferenceListData = {
+  body?: never
+  path?: never
+  query?: {
+    location?: {
+      directory?: string
+      workspace?: string
+    }
+  }
+  url: "/api/reference"
+}
+
+export type V2ReferenceListErrors = {
+  /**
+   * InvalidRequestError
+   */
+  400: InvalidRequestError
+  /**
+   * UnauthorizedError
+   */
+  401: UnauthorizedError
+}
+
+export type V2ReferenceListError = V2ReferenceListErrors[keyof V2ReferenceListErrors]
+
+export type V2ReferenceListResponses = {
+  /**
+   * Success
+   */
+  200: {
+    location: LocationInfo
+    data: Array<ReferenceInfo>
+  }
+}
+
+export type V2ReferenceListResponse = V2ReferenceListResponses[keyof V2ReferenceListResponses]
 
 export type PtyConnectData = {
   body?: never
