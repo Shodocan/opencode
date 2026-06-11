@@ -1,17 +1,23 @@
+import path from "node:path"
 import { expect, mock, beforeEach } from "bun:test"
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, Exit, Layer } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { pollWithTimeout, testEffect } from "../lib/effect"
+import { TestInstance } from "../fixture/fixture"
 
 // --- Mock infrastructure ---
 
 // Per-client state for controlling mock behavior
 interface MockClientState {
   capabilities: { tools?: object; prompts?: object; resources?: object }
+  capabilitiesShouldThrow: boolean
   tools: Array<{ name: string; description?: string; inputSchema: object; outputSchema?: object }>
   listToolsCalls: number
   listPromptsCalls: number
   listResourcesCalls: number
+  getPromptTimeout?: number
+  readResourceTimeout?: number
   requestCalls: number
   listToolsShouldFail: boolean
   listToolsError: string
@@ -45,6 +51,8 @@ let connectError = "Mock transport cannot connect"
 let clientCreateCount = 0
 // Tracks how many times transport.close() is called across all mock transports
 let transportCloseCount = 0
+// Captures the opts passed to each MockStdioTransport, keyed by lastCreatedClientName
+const stdioOptsByName = new Map<string, any>()
 
 function getOrCreateClientState(name?: string): MockClientState {
   const key = name ?? "default"
@@ -52,6 +60,7 @@ function getOrCreateClientState(name?: string): MockClientState {
   if (!state) {
     state = {
       capabilities: { tools: {}, prompts: {}, resources: {} },
+      capabilitiesShouldThrow: false,
       tools: [{ name: "test_tool", description: "A test tool", inputSchema: { type: "object", properties: {} } }],
       listToolsCalls: 0,
       listPromptsCalls: 0,
@@ -79,8 +88,9 @@ function getOrCreateClientState(name?: string): MockClientState {
 class MockStdioTransport {
   stderr: null = null
   pid = 12345
-  // oxlint-disable-next-line no-useless-constructor
-  constructor(_opts: any) {}
+  constructor(opts: any) {
+    if (lastCreatedClientName) stdioOptsByName.set(lastCreatedClientName, opts)
+  }
   async start() {
     if (connectShouldHang) return new Promise<void>(() => {}) // never resolves
     if (connectShouldFail) throw new Error(connectError)
@@ -157,6 +167,7 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
     }
 
     getServerCapabilities() {
+      if (this._state?.capabilitiesShouldThrow) throw new Error("capability discovery failed")
       return this._state?.capabilities
     }
 
@@ -205,6 +216,16 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
       return { resources: this._state?.resources ?? [] }
     }
 
+    async getPrompt(_params: unknown, options?: { timeout?: number }) {
+      if (this._state) this._state.getPromptTimeout = options?.timeout
+      return { messages: [] }
+    }
+
+    async readResource(params: { uri: string }, options?: { timeout?: number }) {
+      if (this._state) this._state.readResourceTimeout = options?.timeout
+      return { contents: [{ uri: params.uri, text: "test" }] }
+    }
+
     async close() {
       if (this._state) this._state.closed = true
     }
@@ -242,13 +263,27 @@ function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server:
 function notificationHandlers(name: string) {
   const handlers = Array.from(getOrCreateClientState(name).notificationHandlers.values())
   return {
-    promptAppend: handlers[1],
-    promptSynthetic: handlers[2],
-    commandExecute: handlers[3],
-    toastShow: handlers[4],
-    sessionSelect: handlers[5],
+    promptAppend: handlers[2],
+    promptSynthetic: handlers[3],
+    commandExecute: handlers[4],
+    toastShow: handlers[5],
+    sessionSelect: handlers[6],
   }
 }
+
+it.instance(
+  "local mcp cwd resolves relative paths against instance directory",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        const { directory } = yield* TestInstance
+        lastCreatedClientName = "rel-cwd"
+        yield* mcp.add("rel-cwd", { type: "local", command: ["echo", "test"], cwd: "plugins/sub" })
+        expect(stdioOptsByName.get("rel-cwd")?.cwd).toBe(path.resolve(directory, "plugins/sub"))
+      }),
+    ),
+  { config: { mcp: {} } },
+)
 
 // ========================================================================
 // Test: tools() are cached after connect
@@ -399,7 +434,7 @@ it.instance(
           { name: "next_tool", description: "next", inputSchema: { type: "object", properties: {} } },
         ]
 
-        const handler = Array.from(serverState.notificationHandlers.values())[0]
+        const handler = serverState.notificationHandlers.get(ToolListChangedNotificationSchema)
         expect(handler).toBeDefined()
         yield* Effect.promise(() => handler?.())
 
@@ -687,6 +722,31 @@ it.instance(
 )
 
 it.instance(
+  "returns failed and closes the client when SDK initialization throws",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "defective-server"
+        const serverState = getOrCreateClientState("defective-server")
+        serverState.capabilitiesShouldThrow = true
+
+        const result = yield* mcp.add("defective-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        expect(statusName(result.status, "defective-server")).toBe("failed")
+        expect((yield* mcp.status())["defective-server"]).toEqual({
+          status: "failed",
+          error: "capability discovery failed",
+        })
+        expect(serverState.closed).toBe(true)
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
+it.instance(
   "falls back when MCP output schema refs fail SDK tool discovery",
   () =>
     MCP.Service.use((mcp: MCPNS.Interface) =>
@@ -848,6 +908,29 @@ it.instance(
       },
     },
   },
+)
+
+it.instance(
+  "uses per-server timeouts for prompt and resource requests",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "timeout-server"
+        const serverState = getOrCreateClientState("timeout-server")
+
+        yield* mcp.add("timeout-server", {
+          type: "local",
+          command: ["echo", "test"],
+          timeout: 2500,
+        })
+        yield* mcp.getPrompt("timeout-server", "test")
+        yield* mcp.readResource("timeout-server", "test://resource")
+
+        expect(serverState.getPromptTimeout).toBe(2500)
+        expect(serverState.readResourceTimeout).toBe(2500)
+      }),
+    ),
+  { config: { mcp: {}, experimental: { mcp_timeout: 5000 } } },
 )
 
 it.instance(

@@ -1,3 +1,4 @@
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import path from "path"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
@@ -1358,6 +1359,18 @@ export const layer = Layer.effect(
 
             const finished = handle.message.finish && !["tool-calls", "unknown"].includes(handle.message.finish)
             if (finished && !handle.message.error) {
+              // Surface any content-filter finish (e.g. Anthropic stop_reason:
+              // refusal) as an error. These turns may have produced no visible
+              // output at all — previously the session went idle silently — or
+              // partial text that was cut off by the provider's filter.
+              if (handle.message.finish === "content-filter") {
+                handle.message.error = new SessionV1.ContentFilterError({
+                  message: "The response was blocked by the provider's content filter",
+                }).toObject()
+                yield* sessions.updateMessage(handle.message)
+                yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+                return "break" as const
+              }
               if (format.type === "json_schema") {
                 handle.message.error = new SessionV1.StructuredOutputError({
                   message: "Model did not produce structured output",
@@ -1674,5 +1687,34 @@ const bashRegex = /!`([^`]+)`/g
 const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
 const placeholderRegex = /\$(\d+)/g
 const quoteTrimRegex = /^["']|["']$/g
+
+export const node = LayerNode.make(layer, [
+  SessionStatus.node,
+  Session.node,
+  Agent.node,
+  Provider.node,
+  SessionProcessor.node,
+  SessionCompaction.node,
+  Plugin.node,
+  Command.node,
+  Config.node,
+  Permission.node,
+  FSUtil.node,
+  MCP.node,
+  LSP.node,
+  ToolRegistry.node,
+  Truncate.node,
+  Image.node,
+  CrossSpawnSpawner.node,
+  Instruction.node,
+  SessionRunState.node,
+  SessionRevert.node,
+  SessionSummary.node,
+  SystemPrompt.node,
+  LLM.node,
+  EventV2Bridge.node,
+  RuntimeFlags.node,
+  Database.node,
+])
 
 export * as SessionPrompt from "./prompt"
