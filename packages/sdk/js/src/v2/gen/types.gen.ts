@@ -2880,15 +2880,17 @@ export type V2Event =
   | V2EventPermissionAsked
   | V2EventPermissionReplied
   | V2EventTuiPromptAppend
+  | V2EventTuiPromptSynthetic
   | V2EventTuiCommandExecute
   | V2EventTuiToastShow
   | V2EventTuiSessionSelect
+  | V2EventTuiAgentState
+  | V2EventSessionStatus
+  | V2EventSessionIdle
   | V2EventMcpToolsChanged
   | V2EventMcpBrowserOpenFailed
   | V2EventCommandExecuted
   | V2EventProjectUpdated
-  | V2EventSessionStatus
-  | V2EventSessionIdle
   | V2EventQuestionAsked
   | V2EventQuestionReplied
   | V2EventQuestionRejected
@@ -5675,6 +5677,28 @@ export type V2EventTuiPromptAppend = {
   type: "tui.prompt.append"
   data: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type V2EventTuiPromptSynthetic = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "tui.prompt.synthetic"
+  data: {
+    text: string
+    sessionID: string
+    visible?: boolean
+    caller?: string
   }
 }
 
@@ -5748,6 +5772,63 @@ export type V2EventTuiSessionSelect = {
     /**
      * Session ID to navigate to
      */
+    sessionID: string
+  }
+}
+
+export type V2EventTuiAgentState = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "tui.agent.state"
+  data: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
+  }
+}
+
+export type V2EventSessionStatus = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.status"
+  data: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type V2EventSessionIdle = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.idle"
+  data: {
     sessionID: string
   }
 }
@@ -5841,41 +5922,6 @@ export type V2EventProjectUpdated = {
       initialized?: number
     }
     sandboxes: Array<string>
-  }
-}
-
-export type V2EventSessionStatus = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.status"
-  data: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type V2EventSessionIdle = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.idle"
-  data: {
-    sessionID: string
   }
 }
 
