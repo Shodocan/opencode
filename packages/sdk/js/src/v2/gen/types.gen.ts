@@ -21,7 +21,6 @@ export type Event =
   | EventSessionNextPrompted
   | EventSessionNextPromptAdmitted
   | EventSessionNextPromptPromoted
-  | EventSessionNextInterruptRequested
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
   | EventSessionNextShellStarted
@@ -880,14 +879,6 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "session.next.interrupt.requested"
-        properties: {
-          timestamp: number
-          sessionID: string
-        }
-      }
-    | {
-        id: string
         type: "session.next.context.updated"
         properties: {
           timestamp: number
@@ -1664,7 +1655,6 @@ export type GlobalEvent = {
     | SyncEventSessionNextPrompted
     | SyncEventSessionNextPromptAdmitted
     | SyncEventSessionNextPromptPromoted
-    | SyncEventSessionNextInterruptRequested
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
     | SyncEventSessionNextShellStarted
@@ -2831,7 +2821,6 @@ export type V2Event =
   | V2EventSessionNextPrompted
   | V2EventSessionNextPromptAdmitted
   | V2EventSessionNextPromptPromoted
-  | V2EventSessionNextInterruptRequested
   | V2EventSessionNextContextUpdated
   | V2EventSessionNextSynthetic
   | V2EventSessionNextShellStarted
@@ -3323,21 +3312,6 @@ export type SyncEventSessionNextPromptPromoted = {
       messageID: string
       prompt: Prompt
       timeCreated: number
-    }
-  }
-}
-
-export type SyncEventSessionNextInterruptRequested = {
-  type: "sync"
-  id: string
-  syncEvent: {
-    type: "session.next.interrupt.requested.1"
-    id: string
-    seq: number
-    aggregateID: string
-    data: {
-      timestamp: number
-      sessionID: string
     }
   }
 }
@@ -4645,24 +4619,6 @@ export type V2EventSessionNextPromptPromoted = {
     messageID: string
     prompt: Prompt
     timeCreated: number
-  }
-}
-
-export type V2EventSessionNextInterruptRequested = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.next.interrupt.requested"
-  data: {
-    timestamp: number
-    sessionID: string
   }
 }
 
@@ -6343,15 +6299,6 @@ export type EventSessionNextPromptPromoted = {
     messageID: string
     prompt: Prompt
     timeCreated: number
-  }
-}
-
-export type EventSessionNextInterruptRequested = {
-  id: string
-  type: "session.next.interrupt.requested"
-  properties: {
-    timestamp: number
-    sessionID: string
   }
 }
 
