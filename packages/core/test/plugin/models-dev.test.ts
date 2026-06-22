@@ -1,6 +1,6 @@
 import path from "path"
 import { describe, expect } from "bun:test"
-import { Effect, Layer } from "effect"
+import { Effect, Layer, Stream } from "effect"
 import { Catalog } from "@opencode-ai/core/catalog"
 import { Integration } from "@opencode-ai/core/integration"
 import { Credential } from "@opencode-ai/core/credential"
@@ -15,6 +15,7 @@ import { Policy } from "@opencode-ai/core/policy"
 import { AbsolutePath } from "@opencode-ai/core/schema"
 import { location } from "../fixture/location"
 import { testEffect } from "../lib/effect"
+import { catalogHost, host, integrationHost } from "./host"
 
 const events = EventV2.defaultLayer
 const locationLayer = Layer.succeed(
@@ -28,8 +29,10 @@ const connections = Credential.layer.pipe(
   Layer.provide(Database.layerFromPath(":memory:").pipe(Layer.fresh)),
   Layer.provide(events),
 )
-const catalog = Catalog.layer.pipe(Layer.provide(Layer.mergeAll(events, locationLayer, plugins, policy, connections)))
 const integrations = Integration.locationLayer.pipe(Layer.provide(events), Layer.provide(connections))
+const catalog = Catalog.layer.pipe(
+  Layer.provide(Layer.mergeAll(events, locationLayer, plugins, policy, connections, integrations)),
+)
 const layer = Layer.mergeAll(
   catalog.pipe(Layer.provide(connections)),
   integrations,
@@ -54,18 +57,25 @@ describe("ModelsDevPlugin", () => {
       }),
       () =>
         Effect.gen(function* () {
-          yield* ModelsDevPlugin.effect
           const integrations = yield* Integration.Service
+          const catalog = yield* Catalog.Service
+          yield* ModelsDevPlugin.effect(
+            host({
+              catalog: catalogHost(catalog),
+              event: { subscribe: () => Stream.never },
+              integration: integrationHost(integrations),
+            }),
+          )
           expect(yield* integrations.list()).toEqual([
             new Integration.Info({
               id: Integration.ID.make("acme"),
               name: "Acme",
               methods: [
-                new Integration.KeyMethod({ type: "key" }),
-                new Integration.EnvMethod({
+                { type: "key" },
+                {
                   type: "env",
                   names: ["ACME_API_KEY"],
-                }),
+                },
               ],
               connections: [],
             }),
