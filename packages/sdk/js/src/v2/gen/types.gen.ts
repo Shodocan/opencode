@@ -50,10 +50,10 @@ export type Event =
   | EventInstallationUpdated
   | EventInstallationUpdateAvailable
   | EventFileEdited
-  | EventPluginAdded
+  | EventReferenceUpdated
   | EventPermissionV2Asked
   | EventPermissionV2Replied
-  | EventReferenceUpdated
+  | EventPluginAdded
   | EventProjectDirectoriesUpdated
   | EventFileWatcherUpdated
   | EventPtyCreated
@@ -1240,9 +1240,9 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "plugin.added"
+        type: "reference.updated"
         properties: {
-          id: string
+          [key: string]: unknown
         }
       }
     | {
@@ -1271,9 +1271,9 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "reference.updated"
+        type: "plugin.added"
         properties: {
-          [key: string]: unknown
+          id: string
         }
       }
     | {
@@ -2837,10 +2837,10 @@ export type V2Event =
   | V2EventInstallationUpdated
   | V2EventInstallationUpdateAvailable
   | V2EventFileEdited
-  | V2EventPluginAdded
+  | V2EventReferenceUpdated
   | V2EventPermissionV2Asked
   | V2EventPermissionV2Replied
-  | V2EventReferenceUpdated
+  | V2EventPluginAdded
   | V2EventProjectDirectoriesUpdated
   | V2EventFileWatcherUpdated
   | V2EventPtyCreated
@@ -5242,7 +5242,7 @@ export type V2EventFileEdited = {
   }
 }
 
-export type V2EventPluginAdded = {
+export type V2EventReferenceUpdated = {
   id: string
   metadata?: {
     [key: string]: unknown
@@ -5253,9 +5253,9 @@ export type V2EventPluginAdded = {
     version: number
   }
   location?: LocationRef
-  type: "plugin.added"
+  type: "reference.updated"
   data: {
-    id: string
+    [key: string]: unknown
   }
 }
 
@@ -5303,7 +5303,7 @@ export type V2EventPermissionV2Replied = {
   }
 }
 
-export type V2EventReferenceUpdated = {
+export type V2EventPluginAdded = {
   id: string
   metadata?: {
     [key: string]: unknown
@@ -5314,9 +5314,9 @@ export type V2EventReferenceUpdated = {
     version: number
   }
   location?: LocationRef
-  type: "reference.updated"
+  type: "plugin.added"
   data: {
-    [key: string]: unknown
+    id: string
   }
 }
 
@@ -6640,11 +6640,11 @@ export type EventFileEdited = {
   }
 }
 
-export type EventPluginAdded = {
+export type EventReferenceUpdated = {
   id: string
-  type: "plugin.added"
+  type: "reference.updated"
   properties: {
-    id: string
+    [key: string]: unknown
   }
 }
 
@@ -6674,11 +6674,11 @@ export type EventPermissionV2Replied = {
   }
 }
 
-export type EventReferenceUpdated = {
+export type EventPluginAdded = {
   id: string
-  type: "reference.updated"
+  type: "plugin.added"
   properties: {
-    [key: string]: unknown
+    id: string
   }
 }
 
