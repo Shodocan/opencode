@@ -10,7 +10,7 @@ type HostRegistration = { readonly dispose: Effect.Effect<void> }
 
 /**
  * Adapts a Promise plugin into an Effect plugin so the existing Effect-only
- * loader (`PluginV2` / `PluginBoot`) can run it unchanged.
+ * loader (`PluginV2` / `PluginInternal`) can run it unchanged.
  *
  * Hook registrations created during the async `setup` attach to the plugin's
  * scope, so unloading the plugin disposes them. The captured fiber context
@@ -67,8 +67,11 @@ export function fromPromise(plugin: Plugin) {
             reload: () => run(host.integration.reload()),
           },
           plugin: {
-            transform: transform(host.plugin),
-            reload: () => run(host.plugin.reload()),
+            add: (input) => {
+              const child = fromPromise(input)
+              return run(host.plugin.add(child))
+            },
+            remove: (id) => run(host.plugin.remove(id)),
           },
           reference: {
             transform: transform(host.reference),
