@@ -7,6 +7,7 @@ export type ClientOptions = {
 export type Event =
   | EventModelsDevRefreshed
   | EventIntegrationUpdated
+  | EventIntegrationConnectionUpdated
   | EventCatalogUpdated
   | EventSessionCreated
   | EventSessionUpdated
@@ -68,17 +69,15 @@ export type Event =
   | EventPermissionAsked
   | EventPermissionReplied
   | EventTuiPromptAppend2
-  | EventTuiPromptSynthetic2
   | EventTuiCommandExecute2
   | EventTuiToastShow2
   | EventTuiSessionSelect2
-  | EventTuiAgentState2
-  | EventSessionStatus
-  | EventSessionIdle
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
   | EventProjectUpdated
+  | EventSessionStatus
+  | EventSessionIdle
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
@@ -746,6 +745,13 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "integration.connection.updated"
+        properties: {
+          integrationID: string
+        }
+      }
+    | {
+        id: string
         type: "catalog.updated"
         properties: {
           [key: string]: unknown
@@ -1397,18 +1403,6 @@ export type GlobalEvent = {
         type: "tui.prompt.append"
         properties: {
           text: string
-          submit?: boolean
-          sessionID?: string
-        }
-      }
-    | {
-        id: string
-        type: "tui.prompt.synthetic"
-        properties: {
-          text: string
-          sessionID: string
-          visible?: boolean
-          caller?: string
         }
       }
     | {
@@ -1452,33 +1446,6 @@ export type GlobalEvent = {
           /**
            * Session ID to navigate to
            */
-          sessionID: string
-        }
-      }
-    | {
-        id: string
-        type: "tui.agent.state"
-        properties: {
-          agent: string
-          model?: {
-            providerID: string
-            modelID: string
-          }
-          variant?: string
-        }
-      }
-    | {
-        id: string
-        type: "session.status"
-        properties: {
-          sessionID: string
-          status: SessionStatus
-        }
-      }
-    | {
-        id: string
-        type: "session.idle"
-        properties: {
           sessionID: string
         }
       }
@@ -1532,6 +1499,21 @@ export type GlobalEvent = {
             initialized?: number
           }
           sandboxes: Array<string>
+        }
+      }
+    | {
+        id: string
+        type: "session.status"
+        properties: {
+          sessionID: string
+          status: SessionStatus
+        }
+      }
+    | {
+        id: string
+        type: "session.idle"
+        properties: {
+          sessionID: string
         }
       }
     | {
@@ -2639,18 +2621,6 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
-    submit?: boolean
-    sessionID?: string
-  }
-}
-
-export type EventTuiPromptSynthetic = {
-  type: "tui.prompt.synthetic"
-  properties: {
-    text: string
-    sessionID: string
-    visible?: boolean
-    caller?: string
   }
 }
 
@@ -2695,18 +2665,6 @@ export type EventTuiSessionSelect = {
      * Session ID to navigate to
      */
     sessionID: string
-  }
-}
-
-export type EventTuiAgentState = {
-  type: "tui.agent.state"
-  properties: {
-    agent: string
-    model?: {
-      providerID: string
-      modelID: string
-    }
-    variant?: string
   }
 }
 
@@ -2794,6 +2752,7 @@ export type ProviderNotFoundError = {
 export type V2Event =
   | V2EventModelsDevRefreshed
   | V2EventIntegrationUpdated
+  | V2EventIntegrationConnectionUpdated
   | V2EventCatalogUpdated
   | V2EventSessionCreated
   | V2EventSessionUpdated
@@ -2855,17 +2814,15 @@ export type V2Event =
   | V2EventPermissionAsked
   | V2EventPermissionReplied
   | V2EventTuiPromptAppend
-  | V2EventTuiPromptSynthetic
   | V2EventTuiCommandExecute
   | V2EventTuiToastShow
   | V2EventTuiSessionSelect
-  | V2EventTuiAgentState
-  | V2EventSessionStatus
-  | V2EventSessionIdle
   | V2EventMcpToolsChanged
   | V2EventMcpBrowserOpenFailed
   | V2EventCommandExecuted
   | V2EventProjectUpdated
+  | V2EventSessionStatus
+  | V2EventSessionIdle
   | V2EventQuestionAsked
   | V2EventQuestionReplied
   | V2EventQuestionRejected
@@ -2901,19 +2858,6 @@ export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
-    submit?: boolean
-    sessionID?: string
-  }
-}
-
-export type EventTuiPromptSynthetic2 = {
-  id: string
-  type: "tui.prompt.synthetic"
-  properties: {
-    text: string
-    sessionID: string
-    visible?: boolean
-    caller?: string
   }
 }
 
@@ -2964,18 +2908,20 @@ export type EventTuiSessionSelect2 = {
   }
 }
 
-export type EventTuiAgentState2 = {
-  id: string
-  type: "tui.agent.state"
-  properties: {
-    agent: string
-    model?: {
-      providerID: string
-      modelID: string
-    }
-    variant?: string
-  }
+export type CredentialValue = CredentialOAuth | CredentialKey
+
+export type IntegrationInputs = {
+  [key: string]: string
 }
+
+export type IntegrationMethod = IntegrationOAuthMethod | IntegrationKeyMethod | IntegrationEnvMethod
+
+export type IntegrationRef = {
+  id: string
+  name: string
+}
+
+export type SkillV2Source = SkillV2DirectorySource | SkillV2UrlSource | SkillV2EmbeddedSource
 
 export type MoveSessionDestination = {
   directory: string
@@ -4136,6 +4082,7 @@ export type ModelV2Info = {
 
 export type ProviderV2Info = {
   id: string
+  integrationID?: string
   name: string
   disabled?: boolean
   api:
@@ -4223,7 +4170,7 @@ export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
 export type IntegrationInfo = {
   id: string
   name: string
-  methods: Array<IntegrationOAuthMethod | IntegrationKeyMethod | IntegrationEnvMethod>
+  methods: Array<IntegrationMethod>
   connections: Array<ConnectionInfo>
 }
 
@@ -4260,7 +4207,6 @@ export type PermissionSavedInfo = {
 export type FileSystemEntry = {
   path: string
   type: "file" | "directory"
-  mime: string
 }
 
 export type CommandV2Info = {
@@ -4315,6 +4261,23 @@ export type V2EventIntegrationUpdated = {
   type: "integration.updated"
   data: {
     [key: string]: unknown
+  }
+}
+
+export type V2EventIntegrationConnectionUpdated = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "integration.connection.updated"
+  data: {
+    integrationID: string
   }
 }
 
@@ -5580,28 +5543,6 @@ export type V2EventTuiPromptAppend = {
   type: "tui.prompt.append"
   data: {
     text: string
-    submit?: boolean
-    sessionID?: string
-  }
-}
-
-export type V2EventTuiPromptSynthetic = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "tui.prompt.synthetic"
-  data: {
-    text: string
-    sessionID: string
-    visible?: boolean
-    caller?: string
   }
 }
 
@@ -5675,63 +5616,6 @@ export type V2EventTuiSessionSelect = {
     /**
      * Session ID to navigate to
      */
-    sessionID: string
-  }
-}
-
-export type V2EventTuiAgentState = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "tui.agent.state"
-  data: {
-    agent: string
-    model?: {
-      providerID: string
-      modelID: string
-    }
-    variant?: string
-  }
-}
-
-export type V2EventSessionStatus = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.status"
-  data: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type V2EventSessionIdle = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.idle"
-  data: {
     sessionID: string
   }
 }
@@ -5825,6 +5709,41 @@ export type V2EventProjectUpdated = {
       initialized?: number
     }
     sandboxes: Array<string>
+  }
+}
+
+export type V2EventSessionStatus = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.status"
+  data: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type V2EventSessionIdle = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.idle"
+  data: {
+    sessionID: string
   }
 }
 
@@ -6100,6 +6019,14 @@ export type EventIntegrationUpdated = {
   type: "integration.updated"
   properties: {
     [key: string]: unknown
+  }
+}
+
+export type EventIntegrationConnectionUpdated = {
+  id: string
+  type: "integration.connection.updated"
+  properties: {
+    integrationID: string
   }
 }
 
@@ -6811,23 +6738,6 @@ export type EventPermissionReplied = {
   }
 }
 
-export type EventSessionStatus = {
-  id: string
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  id: string
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
 export type EventMcpToolsChanged = {
   id: string
   type: "mcp.tools.changed"
@@ -6881,6 +6791,23 @@ export type EventProjectUpdated = {
       initialized?: number
     }
     sandboxes: Array<string>
+  }
+}
+
+export type EventSessionStatus = {
+  id: string
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  id: string
+  type: "session.idle"
+  properties: {
+    sessionID: string
   }
 }
 
@@ -6989,6 +6916,40 @@ export type EventGlobalDisposed = {
   properties: {
     [key: string]: unknown
   }
+}
+
+export type CredentialOAuth = {
+  type: "oauth"
+  methodID: string
+  refresh: string
+  access: string
+  expires: number
+  metadata?: {
+    [key: string]: unknown
+  }
+}
+
+export type CredentialKey = {
+  type: "key"
+  key: string
+  metadata?: {
+    [key: string]: unknown
+  }
+}
+
+export type SkillV2DirectorySource = {
+  type: "directory"
+  path: string
+}
+
+export type SkillV2UrlSource = {
+  type: "url"
+  url: string
+}
+
+export type SkillV2EmbeddedSource = {
+  type: "embedded"
+  skill: SkillV2Info
 }
 
 export type BadRequestError = {
@@ -10535,8 +10496,6 @@ export type SyncHistoryListResponse = SyncHistoryListResponses[keyof SyncHistory
 export type TuiAppendPromptData = {
   body?: {
     text: string
-    submit?: boolean
-    sessionID?: string
   }
   path?: never
   query?: {
@@ -10796,13 +10755,7 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?:
-    | EventTuiPromptAppend
-    | EventTuiPromptSynthetic
-    | EventTuiCommandExecute
-    | EventTuiToastShow
-    | EventTuiSessionSelect
-    | EventTuiAgentState
+  body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
   path?: never
   query?: {
     directory?: string
