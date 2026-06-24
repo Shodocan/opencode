@@ -2,6 +2,7 @@ import {
   createEffect,
   createMemo,
   createResource,
+  createRoot,
   createSignal,
   For,
   Match,
@@ -100,10 +101,6 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
   const counterZoom = () => (windows() && titlebarZoom() < 1 ? 1 / titlebarZoom() : 1)
   const minHeight = () => {
     const height = useV2Titlebar() ? v2TitlebarHeight : legacyTitlebarHeight
-    if (useV2Titlebar() && mobile()) {
-      const inset = bottom() ? "env(safe-area-inset-bottom, 0px)" : "env(safe-area-inset-top, 0px)"
-      return `calc(${height}px + ${inset})`
-    }
     if (mac()) return `${height / zoom()}px`
     if (windows()) return `${height / Math.min(titlebarZoom(), 1)}px`
     return undefined
@@ -245,8 +242,6 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
       }}
       style={{
         "min-height": minHeight(),
-        "padding-top": useV2Titlebar() && mobile() && !bottom() ? "env(safe-area-inset-top, 0px)" : undefined,
-        "padding-bottom": bottom() ? "env(safe-area-inset-bottom, 0px)" : undefined,
         "padding-left": mac() && !mobile() ? `${84 / zoom()}px` : 0,
         width: electronWindows() ? `env(titlebar-area-width, calc(100vw - ${windowsControlsWidth()}))` : undefined,
         "max-width": electronWindows()
@@ -275,7 +270,7 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
                 const conn = global.servers
                   .list()
                   .find((item) => ServerConnection.key(item) === (route.server ?? server.key))
-                return conn ? { route, sdk: global.createServerCtx(conn).sdk } : undefined
+                return conn ? { route, sdk: global.ensureServerCtx(conn).sdk } : undefined
               },
               ({ route, sdk }) =>
                 sdk.client.session
@@ -347,7 +342,7 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
               }
 
               const fallback = global.servers.list().flatMap((conn) => {
-                const project = global.createServerCtx(conn).projects.list()[0]
+                const project = global.ensureServerCtx(conn).projects.list()[0]
                 return project ? [{ server: ServerConnection.key(conn), project }] : []
               })[0]
               if (!fallback) return
@@ -512,25 +507,64 @@ export function Titlebar(props: { update?: TitlebarUpdate }) {
                             )
                           }
 
-                          const sdk = createMemo(() => {
-                            const conn = server.list.find((s) => ServerConnection.key(s) === tab.server)
-                            if (!conn) return null
-                            const { sdk } = global.createServerCtx(conn)
-                            return sdk
+                          const serverCtx = createMemo(() => {
+                            const conn = server.list.find((item) => ServerConnection.key(item) === tab.server)
+                            return conn ? global.ensureServerCtx(conn) : undefined
                           })
-                          const [session] = createResource(
+                          const sdk = createMemo(() => serverCtx()?.sdk ?? null)
+                          const cachedSession = createMemo(() => {
+                            const placement = global.sessionPlacement.get(tab.server, tab.sessionId)
+                            const ctx = serverCtx()
+                            if (!placement || !ctx) return
+                            return ctx.sync
+                              .child(placement.directory, { bootstrap: false })[0]
+                              .session.find((session) => session.id === tab.sessionId)
+                          })
+
+                          const [loadedSession] = createResource(
                             () => {
+                              if (cachedSession()) return null
                               const id = tab.sessionId
-                              const _sdk = sdk()
-                              if (!_sdk) return null
-                              return { id, sdk: _sdk }
+                              const ctx = serverCtx()
+                              return ctx ? { id, ctx } : null
                             },
-                            ({ id, sdk }) =>
-                              sdk.client.session
+                            ({ id, ctx }) =>
+                              ctx.sdk.client.session
                                 .get({ sessionID: id })
-                                .then((x) => x.data)
+                                .then((x) => {
+                                  const session = x.data
+                                  if (!session) return
+                                  if (!session.parentID)
+                                    global.sessionPlacement.set({
+                                      server: tab.server,
+                                      leafID: session.id,
+                                      rootID: session.id,
+                                      directory: session.directory,
+                                    })
+                                  return session
+                                })
                                 .catch(() => undefined),
                           )
+                          const session = createMemo(() => cachedSession() ?? loadedSession())
+                          let prefetched = false
+
+                          createEffect(() => {
+                            const ctx = serverCtx()
+                            const sess = session()
+                            if (!ctx || !sess || prefetched) return
+                            prefetched = true
+                            createRoot((dispose) => {
+                              try {
+                                void ctx.sync
+                                  .ensureDirSyncContext(sess.directory)
+                                  .session.sync(sess.id)
+                                  .catch(() => {})
+                                  .finally(dispose)
+                              } catch {
+                                dispose()
+                              }
+                            })
+                          })
 
                           createEffect(() => {
                             if (tab.type !== "session") return
@@ -883,7 +917,7 @@ function TabNavItem(props: {
   const global = useGlobal()
   const serverCtx = createMemo(() => {
     const conn = global.servers.list().find((item) => ServerConnection.key(item) === props.server)
-    if (conn) return global.createServerCtx(conn)
+    if (conn) return global.ensureServerCtx(conn)
   })
 
   return (
