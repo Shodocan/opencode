@@ -77,12 +77,12 @@ export type Event =
   | EventTuiToastShow2
   | EventTuiSessionSelect2
   | EventTuiAgentState2
-  | EventSessionStatus
-  | EventSessionIdle
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
   | EventProjectUpdated
+  | EventSessionStatus
+  | EventSessionIdle
   | EventQuestionAsked
   | EventQuestionReplied
   | EventQuestionRejected
@@ -1407,8 +1407,6 @@ export type GlobalEvent = {
         type: "tui.prompt.append"
         properties: {
           text: string
-          submit?: boolean
-          sessionID?: string
         }
       }
     | {
@@ -1479,21 +1477,6 @@ export type GlobalEvent = {
       }
     | {
         id: string
-        type: "session.status"
-        properties: {
-          sessionID: string
-          status: SessionStatus
-        }
-      }
-    | {
-        id: string
-        type: "session.idle"
-        properties: {
-          sessionID: string
-        }
-      }
-    | {
-        id: string
         type: "mcp.tools.changed"
         properties: {
           server: string
@@ -1529,6 +1512,21 @@ export type GlobalEvent = {
           commands?: ProjectCommands
           time: ProjectTime
           sandboxes: Array<string>
+        }
+      }
+    | {
+        id: string
+        type: "session.status"
+        properties: {
+          sessionID: string
+          status: SessionStatus
+        }
+      }
+    | {
+        id: string
+        type: "session.idle"
+        properties: {
+          sessionID: string
         }
       }
     | {
@@ -2626,8 +2624,6 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
-    submit?: boolean
-    sessionID?: string
   }
 }
 
@@ -2858,12 +2854,12 @@ export type V2Event =
   | V2EventTuiToastShow
   | V2EventTuiSessionSelect
   | V2EventTuiAgentState
-  | V2EventSessionStatus
-  | V2EventSessionIdle
   | V2EventMcpToolsChanged
   | V2EventMcpBrowserOpenFailed
   | V2EventCommandExecuted
   | V2EventProjectUpdated
+  | V2EventSessionStatus
+  | V2EventSessionIdle
   | V2EventQuestionAsked
   | V2EventQuestionReplied
   | V2EventQuestionRejected
@@ -2899,8 +2895,6 @@ export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
-    submit?: boolean
-    sessionID?: string
   }
 }
 
@@ -6311,8 +6305,6 @@ export type V2EventTuiPromptAppend = {
   type: "tui.prompt.append"
   data: {
     text: string
-    submit?: boolean
-    sessionID?: string
   }
 }
 
@@ -6432,41 +6424,6 @@ export type V2EventTuiAgentState = {
   }
 }
 
-export type V2EventSessionStatus = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.status"
-  data: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type V2EventSessionIdle = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  type: "session.idle"
-  data: {
-    sessionID: string
-  }
-}
-
 export type V2EventMcpToolsChanged = {
   id: string
   metadata?: {
@@ -6543,6 +6500,41 @@ export type V2EventProjectUpdated = {
     commands?: ProjectCommands
     time: ProjectTime
     sandboxes: Array<string>
+  }
+}
+
+export type V2EventSessionStatus = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.status"
+  data: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type V2EventSessionIdle = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  type: "session.idle"
+  data: {
+    sessionID: string
   }
 }
 
@@ -7541,23 +7533,6 @@ export type EventPermissionReplied = {
   }
 }
 
-export type EventSessionStatus = {
-  id: string
-  type: "session.status"
-  properties: {
-    sessionID: string
-    status: SessionStatus
-  }
-}
-
-export type EventSessionIdle = {
-  id: string
-  type: "session.idle"
-  properties: {
-    sessionID: string
-  }
-}
-
 export type EventMcpToolsChanged = {
   id: string
   type: "mcp.tools.changed"
@@ -7598,6 +7573,23 @@ export type EventProjectUpdated = {
     commands?: ProjectCommands
     time: ProjectTime
     sandboxes: Array<string>
+  }
+}
+
+export type EventSessionStatus = {
+  id: string
+  type: "session.status"
+  properties: {
+    sessionID: string
+    status: SessionStatus
+  }
+}
+
+export type EventSessionIdle = {
+  id: string
+  type: "session.idle"
+  properties: {
+    sessionID: string
   }
 }
 
@@ -11274,8 +11266,6 @@ export type SyncHistoryListResponse = SyncHistoryListResponses[keyof SyncHistory
 export type TuiAppendPromptData = {
   body?: {
     text: string
-    submit?: boolean
-    sessionID?: string
   }
   path?: never
   query?: {
