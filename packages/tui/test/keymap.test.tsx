@@ -5,7 +5,7 @@ import { createBindingLookup } from "@opentui/keymap/extras"
 import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
 import { onCleanup, onMount } from "solid-js"
-import { createTuiResolvedConfig } from "../../fixture/tui-runtime"
+import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 import { TuiKeybind } from "../src/config/keybind"
 import { getOpencodeModeStack, OPENCODE_BASE_MODE, OpencodeKeymapProvider, registerOpencodeKeymap } from "../src/keymap"
 

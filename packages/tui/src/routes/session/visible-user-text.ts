@@ -1,5 +1,5 @@
 import type { Part, TextPart } from "@opencode-ai/sdk/v2"
-import { MCP_VISIBLE_METADATA, mcpCallerHeader } from "@tui/util/mcp-visible-message"
+import { MCP_VISIBLE_METADATA, mcpCallerHeader } from "../../util/mcp-visible-message"
 
 export function isVisibleUserTextPart(part: Part): part is TextPart {
   if (part.type !== "text") return false

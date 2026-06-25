@@ -1,11 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { createPromptEventHandlers } from "../../src/component/prompt/events"
-import { SessionID } from "@opencode-ai/schema/session-id"
 
 describe("prompt event handlers", () => {
   test("routes session-scoped prompt appends to the matching prompt", () => {
-    const current = SessionID.make("session-current")
-    const other = SessionID.make("session-other")
+    const current = "ses_current"
+    const other = "ses_other"
     const visible: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
     const synthetic: Array<{ text: string; sessionID: string; visible?: boolean }> = []
     const handlers = createPromptEventHandlers({
@@ -23,8 +22,8 @@ describe("prompt event handlers", () => {
   })
 
   test("routes synthetic prompts without touching the visible append path", () => {
-    const current = SessionID.make("session-current")
-    const other = SessionID.make("session-other")
+    const current = "ses_current"
+    const other = "ses_other"
     const visible: Array<{ text: string; sessionID?: string; submit?: boolean }> = []
     const synthetic: Array<{ text: string; sessionID: string; visible?: boolean }> = []
     const handlers = createPromptEventHandlers({

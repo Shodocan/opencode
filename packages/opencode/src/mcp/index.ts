@@ -13,9 +13,11 @@ import {
   ListRootsRequestSchema,
   type LoggingMessageNotification,
   LoggingMessageNotificationSchema,
+  NotificationSchema,
   type Tool as MCPToolDef,
   ToolListChangedNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
+import z from "zod/v4"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -26,7 +28,9 @@ import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/server/tui-event"
+import { SessionStatus } from "@/session/status"
 import open from "open"
 import { Cause, Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 import { EffectBridge } from "@/effect/bridge"
@@ -62,6 +66,48 @@ export type Resource = Schema.Schema.Type<typeof Resource>
 export const ToolsChanged = McpEvent.ToolsChanged
 
 export const BrowserOpenFailed = McpEvent.BrowserOpenFailed
+
+const TuiPromptAppendNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/prompt/append"),
+  params: z.object({
+    text: z.string(),
+    submit: z.boolean().optional(),
+    sessionID: z.string().optional(),
+  }),
+})
+
+const TuiPromptSyntheticNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/prompt/synthetic"),
+  params: z.object({
+    text: z.string(),
+    sessionID: z.string(),
+    visible: z.boolean().optional(),
+  }),
+})
+
+const TuiCommandExecuteNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/command/execute"),
+  params: z.object({
+    command: z.string(),
+  }),
+})
+
+const TuiToastShowNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/toast/show"),
+  params: z.object({
+    title: z.string().optional(),
+    message: z.string(),
+    variant: z.enum(["info", "success", "warning", "error"]),
+    duration: z.number().int().positive().optional(),
+  }),
+})
+
+const TuiSessionSelectNotificationSchema = NotificationSchema.extend({
+  method: z.literal("notifications/opencode/session/select"),
+  params: z.object({
+    sessionID: z.string(),
+  }),
+})
 
 export const Failed = NamedError.create("MCPFailed", {
   name: Schema.String,
@@ -461,6 +507,51 @@ export const layer = Layer.effect(
         s.defs[name] = listed
         await bridge.promise(events.publish(ToolsChanged, { server: name }).pipe(Effect.ignore))
       })
+
+      client.setNotificationHandler(TuiPromptAppendNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptAppend.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.PromptAppend, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiPromptSyntheticNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.PromptSynthetic.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.PromptSynthetic, { ...params, caller: name })),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiCommandExecuteNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.CommandExecute.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.CommandExecute, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiToastShowNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.ToastShow.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.ToastShow, params)),
+            Effect.ignore,
+          ),
+        )
+      })
+
+      client.setNotificationHandler(TuiSessionSelectNotificationSchema, async (notification) => {
+        await bridge.promise(
+          Schema.decodeUnknownEffect(TuiEvent.SessionSelect.data)(notification.params).pipe(
+            Effect.flatMap((params) => events.publish(TuiEvent.SessionSelect, params)),
+            Effect.ignore,
+          ),
+        )
+      })
     }
 
     function serverLog(name: string, params: LoggingMessageNotification["params"]) {
@@ -520,8 +611,41 @@ export const layer = Layer.effect(
           { concurrency: "unbounded" },
         )
 
+        // Fan opencode session status changes out to every connected MCP server.
+        // Servers opt in by registering a handler for "notifications/opencode/session/status";
+        // servers that ignore the method get the notification dropped by the MCP SDK.
+        const unsubscribeStatus = yield* events.listen((event) =>
+          Effect.sync(() => {
+            if (event.type !== SessionStatus.Event.Status.type) return
+            const evt = event as EventV2.Payload<typeof SessionStatus.Event.Status>
+            const params = { sessionID: evt.data.sessionID, status: evt.data.status }
+            for (const [name, client] of Object.entries(s.clients)) {
+              if (s.status[name]?.status !== "connected") continue
+              client
+                .notification({ method: "notifications/opencode/session/status", params })
+                .catch((cause) => console.error("session.status notification failed", { server: name, cause }))
+            }
+          }),
+        )
+
+        // Fan opencode agent state changes out to every connected MCP server.
+        const unsubscribeAgentState = yield* events.listen((event) =>
+          Effect.sync(() => {
+            if (event.type !== TuiEvent.AgentState.type) return
+            const evt = event as EventV2.Payload<typeof TuiEvent.AgentState>
+            for (const [name, client] of Object.entries(s.clients)) {
+              if (s.status[name]?.status !== "connected") continue
+              client
+                .notification({ method: "notifications/opencode/agent/state", params: evt.data })
+                .catch((cause) => console.error("agent.state notification failed", { server: name, cause }))
+            }
+          }),
+        )
+
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            yield* unsubscribeStatus
+            yield* unsubscribeAgentState
             const clients = Object.values(s.clients)
             s.clients = {}
             s.defs = {}
