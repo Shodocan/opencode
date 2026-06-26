@@ -36,6 +36,14 @@ const AgentSchema = Schema.StructWithRest(
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),
+    can_spawn_subagents: Schema.optional(Schema.Boolean).annotate({
+      description:
+        "Allow this subagent to dispatch its own subagents via the task tool (default: false). When true, grants task-tool permission unless `permission.task` is already set (in which case your scoping wins). Primary agents can always spawn; this field is meaningful for `mode: subagent`.",
+    }),
+    subagents: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+      description:
+        "Allow-list of subagent_types this agent may dispatch via the task tool. If set, dispatching a subagent_type not in this list is rejected at runtime. If unset, any known agent is allowed (subject to `can_spawn_subagents` / `permission.task`).",
+    }),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
 )
@@ -57,6 +65,8 @@ const KNOWN_KEYS = new Set([
   "permission",
   "disable",
   "tools",
+  "can_spawn_subagents",
+  "subagents",
 ])
 
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {

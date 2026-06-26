@@ -590,14 +590,8 @@ export const RunCommand = effectCmd({
           )
           return undefined
         }
-        if (entry.mode === "subagent") {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
-          )
-          return undefined
-        }
+        // Subagents may be launched directly as the root agent via --agent.
+        // (Previously refused with "is a subagent, not a primary agent".)
         return name
       }
 
@@ -629,15 +623,7 @@ export const RunCommand = effectCmd({
           return undefined
         }
 
-        if (agent.mode === "subagent") {
-          UI.println(
-            UI.Style.TEXT_WARNING_BOLD + "!",
-            UI.Style.TEXT_NORMAL,
-            `agent "${name}" is a subagent, not a primary agent. Falling back to default agent`,
-          )
-          return undefined
-        }
-
+        // Subagents may be launched directly as the root agent via --agent.
         return name
       }
 

@@ -118,6 +118,16 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
+      // Enforce the parent agent's `subagents` allow-list, if set.
+      const parentAgent = yield* agent.get(ctx.agent)
+      if (parentAgent?.subagents && !parentAgent.subagents.includes(params.subagent_type)) {
+        return yield* Effect.fail(
+          new Error(
+            `Agent "${ctx.agent}" is not allowed to dispatch subagent type "${params.subagent_type}". Allowed: ${parentAgent.subagents.join(", ")}`,
+          ),
+        )
+      }
+
       const session = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined

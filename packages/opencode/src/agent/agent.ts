@@ -42,6 +42,8 @@ export const Info = Schema.Struct({
   temperature: Schema.optional(Schema.Finite),
   color: Schema.optional(Schema.String),
   permission: PermissionV1.Ruleset,
+  canSpawnSubagents: Schema.optional(Schema.Boolean),
+  subagents: Schema.optional(Schema.Array(Schema.String)),
   model: Schema.optional(
     Schema.Struct({
       modelID: ModelV2.ID,
@@ -291,6 +293,20 @@ export const layer = Layer.effect(
           item.steps = value.steps ?? item.steps
           item.options = mergeDeep(item.options, value.options ?? {})
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
+          item.canSpawnSubagents = value.can_spawn_subagents ?? item.canSpawnSubagents
+          item.subagents = value.subagents ?? item.subagents
+          if (value.can_spawn_subagents) {
+            // Grant task-tool permission unless the subagent already scopes it.
+            // If the user also set permission.task, their scoping wins (those
+            // rules were merged above; only add a blanket allow when none present).
+            const hasTaskRule = item.permission.some((rule) => rule.permission === "task")
+            if (!hasTaskRule) {
+              item.permission = Permission.merge(
+                item.permission,
+                Permission.fromConfig({ task: { "*": "allow" } }),
+              )
+            }
+          }
         }
 
         // Ensure Truncate.GLOB is allowed unless explicitly configured

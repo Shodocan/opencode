@@ -2,6 +2,36 @@
   "$schema": "https://opencode.ai/config.json",
   "provider": {},
   "permission": {},
+  "agent": {
+    "operator": {
+      "mode": "primary",
+      "can_spawn_subagents": true,
+      "description": "Operator agent — executes ops and dispatches worker subagents."
+    },
+    "architect": {
+      "mode": "primary",
+      "can_spawn_subagents": true,
+      "description": "Architect agent — plans and delegates to specialized subagents."
+    },
+    "autonomous-implementer-driver": {
+      "mode": "primary",
+      "can_spawn_subagents": true,
+      "subagents": ["implementer", "explore", "general"],
+      "description": "Drives autonomous implementation via implementer subagents."
+    },
+    "adversarial-plan-review-driver": {
+      "mode": "primary",
+      "can_spawn_subagents": true,
+      "subagents": ["plan-reviewer", "explore"],
+      "description": "Drives adversarial plan review via reviewer subagents."
+    },
+    "adversarial-pr-review-driver": {
+      "mode": "primary",
+      "can_spawn_subagents": true,
+      "subagents": ["pr-reviewer", "explore"],
+      "description": "Drives adversarial PR review via reviewer subagents."
+    }
+  },
   "references": {
     "effect": {
       "repository": "github.com/Effect-TS/effect-smol",
