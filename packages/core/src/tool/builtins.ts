@@ -9,6 +9,7 @@ import { GrepTool } from "./grep"
 import { QuestionTool } from "./question"
 import { ReadTool } from "./read"
 import { ReadToolFileSystem } from "./read-filesystem"
+import { SessionRecallTool } from "./session-recall" // FORK FEATURE (5) compaction-enhardening
 import { SkillTool } from "./skill"
 import { TodoWriteTool } from "./todowrite"
 import { WebFetchTool } from "./webfetch"
@@ -36,6 +37,7 @@ export const locationLayer = Layer.mergeAll(
   GrepTool.layer,
   QuestionTool.layer,
   ReadTool.layer.pipe(Layer.provide(ReadToolFileSystem.layer)),
+  SessionRecallTool.layer, // FORK FEATURE (5) — F3 recovery tool
   SkillTool.layer,
   TodoWriteTool.layer,
   WebFetchTool.layer,
