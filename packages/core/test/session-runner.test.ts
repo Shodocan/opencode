@@ -6,6 +6,8 @@ import {
   Model,
   TransportReason,
   InvalidRequestReason,
+  RateLimitReason,
+  AuthenticationReason,
   type LLMClientShape,
   type LLMRequest,
 } from "@opencode-ai/llm"
@@ -3212,6 +3214,92 @@ describe("SessionRunnerLLM", () => {
       expect(yield* session.resume(sessionID).pipe(Effect.catchDefect(Effect.succeed))).toBe(
         "Tool input delta before start: call-1",
       )
+    }),
+  )
+
+  // FORK FEATURE (6) fallback-model — integration tests (H7 trigger + arms).
+  const rateLimited = () =>
+    new LLMError({ module: "test", method: "stream", reason: new RateLimitReason({ message: "rate limited" }) })
+  const authFailed = () =>
+    new LLMError({ module: "test", method: "stream", reason: new AuthenticationReason({ message: "bad key", kind: "invalid" }) })
+  const configureFallback = Effect.gen(function* () {
+    const agents = yield* AgentV2.Service
+    yield* agents.transform((editor) =>
+      editor.update(AgentV2.ID.make("build"), (agent) => {
+        agent.fallback = [{ id: ModelV2.ID.make("replacement"), providerID: ProviderV2.ID.make("fake") }]
+      }),
+    )
+  })
+  const successResponse = [
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+    LLMEvent.finish({ reason: "stop" }),
+  ]
+
+  it.effect("FORK fallback-model: retries a rate-limited turn on the next fallback model", () =>
+    Effect.gen(function* () {
+      yield* setup
+      yield* configureFallback
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Try with fallback" }), resume: false })
+
+      requests.length = 0
+      responses = undefined
+      response = successResponse
+      responseStream = Stream.fail(rateLimited()) // primary fails once; replacement then succeeds
+
+      yield* session.resume(sessionID)
+
+      expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
+      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    }),
+  )
+
+  it.effect("FORK fallback-model: does not fall back on a fatal (auth) error", () =>
+    Effect.gen(function* () {
+      yield* setup
+      yield* configureFallback
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Auth fails" }), resume: false })
+
+      requests.length = 0
+      const failure = authFailed()
+      responseStream = Stream.fail(failure)
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests.map((request) => request.model)).toEqual([model]) // no retry on replacement
+    }),
+  )
+
+  it.effect("FORK fallback-model: no fallback configured -> byte-identical (no retry)", () =>
+    Effect.gen(function* () {
+      yield* setup
+      const session = yield* SessionV2.Service
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "No fallback" }), resume: false })
+
+      requests.length = 0
+      const failure = rateLimited()
+      responseStream = Stream.fail(failure)
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests.map((request) => request.model)).toEqual([model])
+    }),
+  )
+
+  it.effect("FORK fallback-model: does not fall back once assistant output started", () =>
+    Effect.gen(function* () {
+      yield* setup
+      yield* configureFallback
+      const session = yield* SessionV2.Service
+      const fixture = fragmentFixture("text", "frag-started", ["Partial"])
+      const failure = rateLimited()
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Started then fail" }), resume: false })
+
+      requests.length = 0
+      responseStream = Stream.concat(Stream.fromIterable(fixture.partialEvents), Stream.fail(failure))
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests.map((request) => request.model)).toEqual([model]) // started -> no fallback
     }),
   )
 })

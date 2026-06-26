@@ -305,6 +305,29 @@ export const layer = Layer.effect(
             (yield* restore(recoverOverflow({ sessionID: session.id, entries, model, request })))
           )
             return yield* Effect.die(continueAfterOverflowCompaction(currentStep))
+          // FORK FEATURE (6) fallback-model (H7): before surfacing the failure, try the
+          // next model in the agent's fallback chain. Skip on user-abort (composite
+          // interrupt cause), once output has started, when a provider error was already
+          // published mid-stream (e.g. non-overflow overload), or past the combined
+          // transition budget. shouldFallback (inside nextFallbackModel) gates eligibility.
+          const fallbackFailure = overflowFailure ?? failure
+          const interrupted = stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)
+          if (
+            fallbackFailure &&
+            !interrupted &&
+            !publisher.hasAssistantStarted() &&
+            !publisher.hasProviderError() &&
+            transitions < SessionRunnerFallback.MAX_TURN_TRANSITIONS
+          ) {
+            const currentRef = modelOverride ?? session.model
+            const triedNext = new Set<string>([
+              ...(tried ?? []),
+              ...(currentRef ? [SessionRunnerFallback.keyOfRef(currentRef)] : []),
+            ])
+            const nextModel = SessionRunnerFallback.nextFallbackModel(agent.info, fallbackFailure, triedNext)
+            if (nextModel)
+              return yield* Effect.die(continueWithFallbackModel(currentStep, nextModel, triedNext, transitions + 1))
+          }
           if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
           if (llmFailure && !publisher.hasProviderError()) {
