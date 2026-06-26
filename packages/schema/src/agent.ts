@@ -20,6 +20,9 @@ export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
   model: Model.Ref.pipe(optional),
+  // FORK FEATURE (6) fallback-model — ordered chain of models to retry the turn
+  // on when the active model fails with a retriable error. See FORK_CHANGES.md.
+  fallback: Schema.mutable(Schema.Array(Model.Ref)).pipe(optional),
   request: Provider.Request,
   system: Schema.String.pipe(optional),
   description: Schema.String.pipe(optional),

@@ -31,6 +31,8 @@ const agentKeys = new Set([
   "steps",
   "disabled",
   "permissions",
+  "fallback", // FORK FEATURE (6) — must be a known key so a markdown agent with
+  //             `fallback:` frontmatter routes to the v2 decoder, not legacy v1.
 ])
 
 export const Plugin = define({
@@ -80,6 +82,14 @@ export const Plugin = define({
               }
               if (item.variant !== undefined && agent.model !== undefined) {
                 agent.model.variant = ModelV2.VariantID.make(item.variant)
+              }
+              // FORK FEATURE (6) fallback-model — parse the chain of model
+              // strings into Model.Refs (mirrors the item.model parse above).
+              if (item.fallback !== undefined) {
+                agent.fallback = item.fallback.map((entry) => {
+                  const model = ModelV2.parse(entry)
+                  return { id: model.modelID, providerID: model.providerID, variant: undefined }
+                })
               }
               if (item.request !== undefined) {
                 Object.assign(agent.request.headers, item.request.headers ?? {})

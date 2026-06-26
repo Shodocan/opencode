@@ -13,6 +13,11 @@ export const Color = Schema.Union([
 export class Info extends Schema.Class<Info>("ConfigV2.Agent")({
   model: Schema.String.pipe(Schema.optional),
   variant: Schema.String.pipe(Schema.optional),
+  // FORK FEATURE (6) fallback-model — ordered chain of model strings
+  // ("provider/model") to retry the turn on when the active model fails with a
+  // retriable error (rate-limit / 5xx / overload) or a context-overflow that
+  // survives compaction. See FORK_CHANGES.md.
+  fallback: Schema.mutable(Schema.Array(Schema.String)).pipe(Schema.optional),
   request: ConfigProvider.Request.pipe(Schema.optional),
   system: Schema.String.pipe(Schema.optional),
   description: Schema.String.pipe(Schema.optional),

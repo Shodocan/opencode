@@ -3854,6 +3854,7 @@ export type PermissionV2Ruleset = Array<PermissionV2Rule>
 export type AgentV2Info = {
   id: string
   model?: ModelRef
+  fallback?: Array<ModelRef>
   request: ProviderRequest
   system?: string
   description?: string
