@@ -22,8 +22,8 @@ branch, no longer a clean single-feature PR.
 | **(2) subagent-spawning + `--agent`** | `cb044d2052` |
 | **(3) getLegacyPlugins fix** | `95e18ef489` |
 | **(4) app stream tolerance** | `4777f4f0fb` |
-| **(5) compaction-enhardening** | _(pending — Phase C)_ |
-| **(6) fallback-model** | _(pending — Phase D)_ |
+| **(5) compaction-enhardening** | `44661eec44` (tiering), `6f3cf62db9` (recall) |
+| **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -126,14 +126,32 @@ and this file. Planning/spec notes with no upstream counterpart — keep as-is.
 
 ---
 
-## Pending features (will add rows here as landed)
+### Feature (5) — compaction-enhardening
 
-- **(5) compaction-enhardening** — new fork-owned files under `packages/core/src/session/enharden/`
-  + `packages/core/src/tool/session-recall.ts`; hot touches: head-only tiering in
-  `packages/core/src/session/compaction.ts` + a `session_recall` append in
-  `packages/core/src/tool/builtins.ts`. Guarded by `OPENCODE_COMPACTION_ENHARDEN`.
-- **(6) fallback-model** — new `packages/core/src/session/runner/fallback.ts`; hot touches:
-  ~5 additive hooks in `packages/core/src/session/runner/llm.ts` (the `H7` trigger before the
-  overflow-publish + the two `catchDefect` arms are the **mandatory merge-review focus** —
-  gate semantics can drift silently with no compile error). Config: `fallback` chain on the
-  agent schema. See `docs/superpowers/fork-features-plan.md`.
+New fork-owned files (zero-conflict): `packages/core/src/session/enharden/tiering.ts`,
+`packages/core/src/session/enharden/recall.ts`, `packages/core/src/tool/session-recall.ts`,
+and their tests. Hot touches:
+
+| File | Risk | What the fork changed | Future-merge recipe |
+|---|---|---|---|
+| `packages/core/src/session/compaction.ts` | med | `serialize(msg, tier?)` param + `select(entries, tokens, tier?)` re-tiers the HEAD only (recent stays byte-identical legacy `truncate`); call site passes `CompactionTiering.tierToolOutput` when `ENHARDEN_ENABLED`. | Re-apply the `tier?` param on `serialize`/`select`, the head-only re-serialize + `CompactionTiering.capHead`, and the tier arg at the `select(...)` call. `compaction-tiering.test.ts` tripwire red-fails if dropped. Never tier `recent`. |
+| `packages/core/src/tool/builtins.ts` | low | `SessionRecallTool.layer` appended to `locationLayer` (the reachable v2 tool path). | Keep the import + the `locationLayer` append (append-only). |
+
+Kill-switch: `OPENCODE_COMPACTION_ENHARDEN=0` ⇒ pure legacy pass-through.
+
+### Feature (6) — fallback-model
+
+New fork-owned file (zero-conflict): `packages/core/src/session/runner/fallback.ts` + its tests.
+Config (additive): `fallback` on `packages/schema/src/agent.ts` (AgentV2.Info) +
+`packages/core/src/config/agent.ts` (ConfigV2.Agent) + `packages/core/src/config/plugin/agent.ts`
+(**`agentKeys` MUST include `"fallback"`** — load-bearing v2-routing gate — plus the parse block).
+
+| File | Risk | What the fork changed | Future-merge recipe |
+|---|---|---|---|
+| `packages/core/src/session/runner/llm.ts` | **med-high** | H1 import; H2 `ContinueWithFallbackModel` transition variant; H3 ctor; H4 `runTurnAttempt` gains `modelOverride/tried/transitions`; H5 model-resolve honors override; H6 publisher reports active variant; **H7 trigger before the overflow-publish**; H8 `RunTurn` type; H9/H10 `runAfterOverflowCompaction`+`runTurn` thread params, add the fallback arm, re-thread ambient override across compaction, increment the transition budget. | **MANDATORY merge-review focus.** The post-stream block was reworked by upstream `3cbd31fe`; re-insert H7 between the overflow-recovery `return` and `if (overflowFailure) yield* publish(overflowFailure)`. Preserve all 4 gate predicates (interrupt / assistant-started / provider-error / transition-budget). Mirror the existing `ContinueAfterOverflowCompaction` arm shape for H9/H10. Gate semantics drift silently with NO compile error — the `session-runner.test.ts` FORK tests are the safety net. |
+| `packages/core/src/config/plugin/agent.ts` | med | `"fallback"` added to `agentKeys` + a parse block (mirrors `item.model`). | Keep both. Without the `agentKeys` entry a markdown agent with `fallback:` frontmatter mis-routes to the legacy v1 decoder. |
+| `packages/schema/src/agent.ts`, `packages/core/src/config/agent.ts` | low | additive `fallback` field. | Re-add alongside upstream agent fields; regen SDK after. |
+
+Triggers only on retriable HTTP failures (rate-limit/5xx/overload) or a context-overflow that
+survives compaction. Does NOT cover mid-stream in-band SSE provider-errors (documented limitation).
+See `docs/superpowers/fork-features-plan.md`.
