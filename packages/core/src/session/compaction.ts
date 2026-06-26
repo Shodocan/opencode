@@ -8,6 +8,7 @@ import { SessionEvent } from "./event"
 import { SessionMessage } from "./message"
 import { SessionSchema } from "./schema"
 import { Token } from "../util/token"
+import { CompactionTiering } from "./enharden/tiering"
 
 const DEFAULT_BUFFER = 20_000
 const DEFAULT_KEEP_TOKENS = 8_000
@@ -88,7 +89,12 @@ export const serializeToolContent = (content: SessionMessage.ToolStateCompleted[
     )
     .join("\n")
 
-const serialize = (message: SessionMessage.Message) => {
+// FORK FEATURE (5): `tier`, when provided, re-tiers completed tool-result content
+// for the compaction HEAD only. Absent (recent window / kill-switch off) => the
+// branch below is byte-for-byte identical to legacy `truncate`. See tiering.ts.
+type TierFn = (name: string, content: string, fallback: (value: string) => string) => string
+
+const serialize = (message: SessionMessage.Message, tier?: TierFn) => {
   if (message.type === "user") {
     const files = message.files?.map((file) => `[Attached ${file.mime}: ${file.name ?? file.uri}]`) ?? []
     return [`[User]: ${message.text}`, ...files].join("\n")
@@ -99,11 +105,13 @@ const serialize = (message: SessionMessage.Message) => {
         if (part.type === "text") return [`[Assistant]: ${part.text}`]
         if (part.type === "reasoning") return part.text ? [`[Assistant reasoning]: ${part.text}`] : []
         const input = typeof part.state.input === "string" ? part.state.input : JSON.stringify(part.state.input)
-        if (part.state.status === "completed")
+        if (part.state.status === "completed") {
+          const result = serializeToolContent(part.state.content)
           return [
             `[Assistant tool call]: ${part.name}(${input})`,
-            `[Tool result]: ${truncate(serializeToolContent(part.state.content))}`,
+            `[Tool result]: ${tier ? tier(part.name, result, truncate) : truncate(result)}`,
           ]
+        }
         if (part.state.status === "error")
           return [`[Assistant tool call]: ${part.name}(${input})`, `[Tool error]: ${part.state.error.message}`]
         return [`[Assistant tool call]: ${part.name}(${input})`]
@@ -133,23 +141,28 @@ const settings = (documents: readonly Config.Entry[]) => {
 const select = (
   entries: readonly Entry[],
   tokens: number,
+  // FORK FEATURE (5): when provided, the HEAD (summarized-away portion) re-serializes
+  // its tool outputs through this tier fn. The split math + the RECENT window always
+  // use the legacy serialization, so `recent` stays byte-for-byte identical and the
+  // head/recent boundary is stable. See enharden/tiering.ts.
+  tier?: TierFn,
 ): { readonly head: string; readonly recent: string } | undefined => {
-  const conversation = entries
+  const items = entries
     .filter((entry) => entry.message.type !== "compaction")
-    .map((entry) => serialize(entry.message))
-    .filter(Boolean)
-  if (conversation.length === 0) return
+    .map((entry) => ({ entry, text: serialize(entry.message) }))
+    .filter((item) => item.text.length > 0)
+  if (items.length === 0) return
   let total = 0
-  let split = conversation.length
+  let split = items.length
   let splitPrefix = ""
   let splitSuffix = ""
-  for (let index = conversation.length - 1; index >= 0; index--) {
-    const next = total + Token.estimate(conversation[index])
+  for (let index = items.length - 1; index >= 0; index--) {
+    const next = total + Token.estimate(items[index].text)
     if (next > tokens) {
       const remaining = Math.max(0, tokens - total) * 4
       if (remaining > 0) {
-        splitPrefix = conversation[index].slice(0, -remaining)
-        splitSuffix = conversation[index].slice(-remaining)
+        splitPrefix = items[index].text.slice(0, -remaining)
+        splitSuffix = items[index].text.slice(-remaining)
         split = index + 1
       }
       break
@@ -157,9 +170,13 @@ const select = (
     total = next
     split = index
   }
+  const headTexts = tier
+    ? items.slice(0, split).map((item) => serialize(item.entry.message, tier))
+    : items.slice(0, split).map((item) => item.text)
+  const head = [...headTexts, splitPrefix].filter(Boolean).join("\n\n")
   return {
-    head: [...conversation.slice(0, split), splitPrefix].filter(Boolean).join("\n\n"),
-    recent: [splitSuffix, ...conversation.slice(split)].filter(Boolean).join("\n\n"),
+    head: tier ? CompactionTiering.capHead(head) : head,
+    recent: [splitSuffix, ...items.slice(split).map((item) => item.text)].filter(Boolean).join("\n\n"),
   }
 }
 
@@ -178,7 +195,11 @@ export const make = (dependencies: Dependencies) => {
     const context = input.model.route.defaults.limits?.context
     if (context === undefined || context <= 0) return false
     const output = input.request.generation?.maxTokens ?? input.model.route.defaults.limits?.output ?? 0
-    const selected = select(input.entries, config.tokens)
+    const selected = select(
+      input.entries,
+      config.tokens,
+      CompactionTiering.ENHARDEN_ENABLED ? CompactionTiering.tierToolOutput : undefined,
+    )
     const previousSummary = input.entries.find((entry) => entry.message.type === "compaction")?.message
     if (!selected || (selected.head.length === 0 && previousSummary?.type !== "compaction")) return false
     const summaryPrompt = buildPrompt({
