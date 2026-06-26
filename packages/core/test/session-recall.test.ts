@@ -34,6 +34,15 @@ describe("filterMatches", () => {
     expect(r.matches.map((m) => m.seq)).toEqual([1])
   })
 
+  test("tool filter matches the name field, not tool-name words in content text", () => {
+    // bash output mentions the word "edit" in its text, but no tool is named "edit"
+    const noisy = [
+      row(1, "assistant", { content: [{ name: "bash", state: { content: "please edit src/auth/login.ts later" } }] }),
+    ]
+    expect(SessionRecall.filterMatches(noisy, opts({ tool: "edit" })).matches.length).toBe(0)
+    expect(SessionRecall.filterMatches(noisy, opts({ tool: "bash" })).matches.length).toBe(1)
+  })
+
   test("no matches for an absent query", () => {
     const r = SessionRecall.filterMatches(rows, opts({ query: "nonexistent-token-xyz" }))
     expect(r.total).toBe(0)

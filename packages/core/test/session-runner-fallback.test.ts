@@ -37,11 +37,14 @@ describe("shouldFallback", () => {
     ).toBe(true)
   })
 
+  test("true for quota exhaustion (provider unavailable -> try another model)", () => {
+    expect(SessionRunnerFallback.shouldFallback(err(new QuotaExceededReason({ message: "q" })))).toBe(true)
+  })
+
   test("false for fatal reasons", () => {
     expect(SessionRunnerFallback.shouldFallback(err(new AuthenticationReason({ message: "a", kind: "invalid" })))).toBe(
       false,
     )
-    expect(SessionRunnerFallback.shouldFallback(err(new QuotaExceededReason({ message: "q" })))).toBe(false)
     expect(SessionRunnerFallback.shouldFallback(err(new ContentPolicyReason({ message: "c" })))).toBe(false)
     expect(SessionRunnerFallback.shouldFallback(err(new TransportReason({ message: "t" })))).toBe(false)
     expect(

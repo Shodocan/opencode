@@ -19,13 +19,16 @@ export const MAX_TURN_TRANSITIONS = 8
 export const keyOfRef = (ref: ModelV2.Ref): string =>
   `${ref.providerID}/${ref.id}${ref.variant ? `#${ref.variant}` : ""}`
 
-// A failure is fallback-eligible only when the provider error is retriable
-// (RateLimit / ProviderInternal — see packages/llm/src/schema/errors.ts) or it
-// is a context-overflow that survived the existing compaction-recovery branch.
-// Fatal reasons (auth, quota, content-policy, no-route, transport,
-// non-overflow invalid-request, …) are NOT eligible.
+// A failure is fallback-eligible when the provider error is retriable (RateLimit
+// / ProviderInternal — see packages/llm/src/schema/errors.ts), OR it is a quota
+// exhaustion (not same-model-retriable, but the canonical "this provider is
+// unavailable → try another model" case), OR it is a context-overflow that
+// survived the compaction-recovery branch. Truly fatal reasons (auth,
+// content-policy, no-route, transport, non-overflow invalid-request, …) are NOT
+// eligible — falling back would not help.
 export const shouldFallback = (failure: unknown): boolean =>
-  (failure instanceof LLMError && failure.retryable) || isContextOverflowFailure(failure)
+  (failure instanceof LLMError && (failure.retryable || failure.reason._tag === "QuotaExceeded")) ||
+  isContextOverflowFailure(failure)
 
 // Pick the next un-tried model from the agent's fallback chain, or undefined to
 // decline (no chain / not eligible / hop budget exhausted / all tried).

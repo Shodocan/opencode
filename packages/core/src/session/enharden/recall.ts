@@ -50,7 +50,9 @@ export const filterMatches = (rows: ReadonlyArray<Row>, opts: SearchOptions): Re
   let truncated = false
   for (const row of rows) {
     const blob = JSON.stringify(row.data ?? "")
-    if (opts.tool && !blob.includes(opts.tool)) continue
+    // Match the serialized tool-part `name` field, not the tool name appearing
+    // anywhere in content text (common tool names are common English words).
+    if (opts.tool && !blob.includes(`"name":"${opts.tool}"`)) continue
     const idx = blob.toLowerCase().indexOf(q)
     if (idx < 0) continue
     total++

@@ -310,7 +310,11 @@ export const layer = Layer.effect(
           // interrupt cause), once output has started, when a provider error was already
           // published mid-stream (e.g. non-overflow overload), or past the combined
           // transition budget. shouldFallback (inside nextFallbackModel) gates eligibility.
-          const fallbackFailure = overflowFailure ?? failure
+          // The TERMINAL stream error drives fallback eligibility; the captured
+          // mid-stream overflow event is only the failure when the stream itself did
+          // not fail (otherwise an overflow warning would mask a fatal terminal error,
+          // since shouldFallback always accepts overflow).
+          const fallbackFailure = failure ?? overflowFailure
           const interrupted = stream._tag === "Failure" && Cause.hasInterrupts(stream.cause)
           if (
             fallbackFailure &&
