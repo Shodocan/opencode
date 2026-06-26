@@ -13,14 +13,14 @@ import {
   ListRootsRequestSchema,
   type LoggingMessageNotification,
   LoggingMessageNotificationSchema,
+  NotificationSchema,
   type Tool as MCPToolDef,
   ToolListChangedNotificationSchema,
-  NotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js"
+import z from "zod/v4"
 import { Config } from "@/config/config"
 import { ConfigMCPV1 } from "@opencode-ai/core/v1/config/mcp"
 import { NamedError } from "@opencode-ai/core/util/error"
-import z from "zod/v4"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { withTimeout } from "@/util/timeout"
 import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -28,6 +28,7 @@ import { McpOAuthProvider, OAUTH_CALLBACK_PATH } from "./oauth-provider"
 import { McpOAuthCallback } from "./oauth-callback"
 import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/server/tui-event"
 import { SessionStatus } from "@/session/status"
 import open from "open"

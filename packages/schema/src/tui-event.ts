@@ -8,7 +8,24 @@ import { SessionID } from "./session-id"
 
 const DEFAULT_TOAST_DURATION = 5000
 
-export const PromptAppend = Event.define({ type: "tui.prompt.append", schema: { text: Schema.String } })
+export const PromptAppend = Event.define({
+  type: "tui.prompt.append",
+  schema: {
+    text: Schema.String,
+    submit: optional(Schema.Boolean),
+    sessionID: optional(SessionID),
+  },
+})
+
+export const PromptSynthetic = Event.define({
+  type: "tui.prompt.synthetic",
+  schema: {
+    text: Schema.String,
+    sessionID: SessionID,
+    visible: optional(Schema.Boolean),
+    caller: optional(Schema.String),
+  },
+})
 
 export const CommandExecute = Event.define({
   type: "tui.command.execute",
@@ -53,17 +70,6 @@ export const SessionSelect = Event.define({
   type: "tui.session.select",
   schema: {
     sessionID: SessionID.annotate({ description: "Session ID to navigate to" }),
-  },
-})
-
-// PR #30019 — TUI notifications for MCP plugins.
-export const PromptSynthetic = Event.define({
-  type: "tui.prompt.synthetic",
-  schema: {
-    text: Schema.String,
-    sessionID: SessionID,
-    visible: optional(Schema.Boolean),
-    caller: optional(Schema.String),
   },
 })
 

@@ -385,7 +385,7 @@ export function Session() {
         const parts = sync.data.part[message.id]
         if (!parts || !Array.isArray(parts)) return false
 
-        return parts.some((part) => part && part.type === "text" && !part.synthetic && !part.ignored)
+        return parts.some((part) => part && isVisibleUserTextPart(part))
       })
       .sort((a, b) => a.y - b.y)
 
@@ -832,7 +832,7 @@ export function Session() {
         const messages = sync.data.message[route.sessionID]
         if (!messages || !messages.length) return
 
-        // Find the most recent user message with non-ignored, non-synthetic text parts
+        // Find the most recent user message with text visible in the transcript.
         for (let i = messages.length - 1; i >= 0; i--) {
           const message = messages[i]
           if (!message || message.role !== "user") continue
@@ -840,9 +840,7 @@ export function Session() {
           const parts = sync.data.part[message.id]
           if (!parts || !Array.isArray(parts)) continue
 
-          const hasValidTextPart = parts.some(
-            (part) => part && part.type === "text" && !part.synthetic && !part.ignored,
-          )
+          const hasValidTextPart = parts.some((part) => part && isVisibleUserTextPart(part))
 
           if (hasValidTextPart) {
             const child = scroll.getChildren().find((child) => {

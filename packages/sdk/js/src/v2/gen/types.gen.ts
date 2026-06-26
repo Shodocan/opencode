@@ -1407,6 +1407,8 @@ export type GlobalEvent = {
         type: "tui.prompt.append"
         properties: {
           text: string
+          submit?: boolean
+          sessionID?: string
         }
       }
     | {
@@ -2629,6 +2631,8 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
 }
 
@@ -2904,6 +2908,8 @@ export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
 }
 
@@ -6315,6 +6321,8 @@ export type V2EventTuiPromptAppend = {
   type: "tui.prompt.append"
   data: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
 }
 
@@ -11276,6 +11284,8 @@ export type SyncHistoryListResponse = SyncHistoryListResponses[keyof SyncHistory
 export type TuiAppendPromptData = {
   body?: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
   path?: never
   query?: {

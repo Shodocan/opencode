@@ -336,7 +336,8 @@ export function Prompt(props: PromptProps) {
     promptEvents.onAppend(evt.properties as Parameters<typeof promptEvents.onAppend>[0])
   })
 
-  event.on("tui.prompt.synthetic", (evt) => {
+  event.on("tui.prompt.synthetic", (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
     promptEvents.onSynthetic(evt.properties as Parameters<typeof promptEvents.onSynthetic>[0])
   })
 
