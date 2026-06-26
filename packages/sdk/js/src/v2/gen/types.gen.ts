@@ -1730,6 +1730,8 @@ export type AgentConfig = {
   steps?: number
   maxSteps?: number
   permission?: PermissionConfig
+  can_spawn_subagents?: boolean
+  subagents?: Array<string>
   [key: string]:
     | unknown
     | string
@@ -1754,6 +1756,7 @@ export type AgentConfig = {
     | "info"
     | number
     | PermissionConfig
+    | Array<string>
     | undefined
 }
 
@@ -2376,6 +2379,8 @@ export type Agent = {
   temperature?: number
   color?: string
   permission: PermissionRuleset
+  canSpawnSubagents?: boolean
+  subagents?: Array<string>
   model?: {
     modelID: string
     providerID: string
