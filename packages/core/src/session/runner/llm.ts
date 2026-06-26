@@ -25,6 +25,7 @@ import { ToolRegistry } from "../../tool/registry"
 import { ToolOutputStore } from "../../tool-output-store"
 import { SessionContextEpoch } from "../context-epoch"
 import { SessionCompaction } from "../compaction"
+import { SessionRunnerFallback } from "./fallback" // FORK FEATURE (6) fallback-model
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionInput } from "../input"
@@ -147,6 +148,16 @@ export const layer = Layer.effect(
       | { readonly _tag: "ContinueAfterCompaction"; readonly step: number }
       // Overflow compaction completed; rebuild once through the path without overflow recovery.
       | { readonly _tag: "ContinueAfterOverflowCompaction"; readonly step: number }
+      // FORK FEATURE (6) fallback-model: retry the turn on the next model in the
+      // agent's fallback chain after a retriable failure. Carries the new model,
+      // the cumulative tried-set, and the combined transition budget. See fallback.ts.
+      | {
+          readonly _tag: "ContinueWithFallbackModel"
+          readonly step: number
+          readonly model: ModelV2.Ref
+          readonly tried: ReadonlySet<string>
+          readonly transitions: number
+        }
 
     class TurnTransitionError extends Error {
       constructor(readonly transition: TurnTransition) {
@@ -157,6 +168,13 @@ export const layer = Layer.effect(
     const continueAfterCompaction = (step: number) => new TurnTransitionError({ _tag: "ContinueAfterCompaction", step })
     const continueAfterOverflowCompaction = (step: number) =>
       new TurnTransitionError({ _tag: "ContinueAfterOverflowCompaction", step })
+    // FORK FEATURE (6) fallback-model
+    const continueWithFallbackModel = (
+      step: number,
+      model: ModelV2.Ref,
+      tried: ReadonlySet<string>,
+      transitions: number,
+    ) => new TurnTransitionError({ _tag: "ContinueWithFallbackModel", step, model, tried, transitions })
 
     const loadSystemContext = (agent: AgentV2.Selection) =>
       Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
@@ -168,6 +186,11 @@ export const layer = Layer.effect(
       promotion: SessionInput.Delivery | undefined,
       step: number,
       recoverOverflow?: typeof compaction.compactAfterOverflow,
+      // FORK FEATURE (6) fallback-model: ambient model override + cumulative tried-set
+      // + combined transition budget, threaded through the turn-transition re-runs.
+      modelOverride?: ModelV2.Ref,
+      tried?: ReadonlySet<string>,
+      transitions: number = 0,
     ) {
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -189,7 +212,8 @@ export const layer = Layer.effect(
       }
       const system =
         initialized ?? (yield* SessionContextEpoch.prepare(db, events, loadSystemContext(agent), session.id))
-      const model = yield* models.resolve(session)
+      // FORK FEATURE (6): resolve the fallback model when an override is active.
+      const model = yield* models.resolve(modelOverride ? { ...session, model: modelOverride } : session)
       const entries = yield* SessionHistory.entriesForRunner(db, session.id, system.baselineSeq)
       const context = entries.map((entry) => entry.message)
       const isLastStep = agent.info?.steps !== undefined && currentStep >= agent.info.steps
@@ -208,13 +232,15 @@ export const layer = Layer.effect(
       if (yield* compaction.compactIfNeeded({ sessionID: session.id, entries, model, request }))
         return yield* Effect.die(continueAfterCompaction(currentStep))
       const startSnapshot = yield* snapshots.capture()
+      // FORK FEATURE (6): report the active model's variant (override or session).
+      const activeVariant = (modelOverride ?? session.model)?.variant
       const publisher = createLLMEventPublisher(events, {
         sessionID: session.id,
         agent: agent.id,
         model: {
           id: ModelV2.ID.make(model.id),
           providerID: ProviderV2.ID.make(model.provider),
-          ...(session.model?.variant === undefined ? {} : { variant: session.model.variant }),
+          ...(activeVariant === undefined ? {} : { variant: activeVariant }),
         },
         snapshot: startSnapshot,
       })
@@ -342,31 +368,96 @@ export const layer = Layer.effect(
       sessionID: SessionSchema.ID,
       promotion: SessionInput.Delivery | undefined,
       step: number,
+      // FORK FEATURE (6) fallback-model: ambient override + tried-set + budget.
+      modelOverride?: ModelV2.Ref,
+      tried?: ReadonlySet<string>,
+      transitions?: number,
     ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
 
-    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step).pipe(
+    const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (
+      sessionID,
+      promotion,
+      step,
+      modelOverride,
+      tried,
+      transitions = 0,
+    ) {
+      return yield* runTurnAttempt(sessionID, promotion, step, undefined, modelOverride, tried, transitions).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
+            // FORK FEATURE (6): a fallback re-run routes back through runTurn so the
+            // new model gets a fresh overflow-recovery budget.
+            if (defect.transition._tag === "ContinueWithFallbackModel") {
+              yield* Effect.yieldNow
+              return yield* runTurn(
+                sessionID,
+                undefined,
+                defect.transition.step,
+                defect.transition.model,
+                defect.transition.tried,
+                defect.transition.transitions,
+              )
+            }
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* Effect.die("Post-compaction provider attempt cannot recover another overflow")
             yield* Effect.yieldNow
-            return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
+            // Re-thread the ambient fallback override across compaction (anti-ping-pong).
+            return yield* runAfterOverflowCompaction(
+              sessionID,
+              undefined,
+              defect.transition.step,
+              modelOverride,
+              tried,
+              transitions + 1,
+            )
           }),
         ),
       )
     })
 
-    const runTurn: RunTurn = Effect.fnUntraced(function* (sessionID, promotion, step) {
-      return yield* runTurnAttempt(sessionID, promotion, step, compaction.compactAfterOverflow).pipe(
+    const runTurn: RunTurn = Effect.fnUntraced(function* (
+      sessionID,
+      promotion,
+      step,
+      modelOverride,
+      tried,
+      transitions = 0,
+    ) {
+      return yield* runTurnAttempt(
+        sessionID,
+        promotion,
+        step,
+        compaction.compactAfterOverflow,
+        modelOverride,
+        tried,
+        transitions,
+      ).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
             yield* Effect.yieldNow
+            // FORK FEATURE (6): retry on the next fallback model (its transition
+            // already carries the incremented tried-set + budget).
+            if (defect.transition._tag === "ContinueWithFallbackModel")
+              return yield* runTurn(
+                sessionID,
+                undefined,
+                defect.transition.step,
+                defect.transition.model,
+                defect.transition.tried,
+                defect.transition.transitions,
+              )
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
-              return yield* runAfterOverflowCompaction(sessionID, undefined, defect.transition.step)
-            return yield* runTurn(sessionID, undefined, defect.transition.step)
+              return yield* runAfterOverflowCompaction(
+                sessionID,
+                undefined,
+                defect.transition.step,
+                modelOverride,
+                tried,
+                transitions + 1,
+              )
+            return yield* runTurn(sessionID, undefined, defect.transition.step, modelOverride, tried, transitions + 1)
           }),
         ),
       )
