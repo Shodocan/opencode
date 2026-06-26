@@ -93,15 +93,36 @@ function getServerPlugin(value: unknown) {
 }
 
 function getLegacyPlugins(mod: Record<string, unknown>) {
+  // Legacy plugins expose their entrypoint via `default` or a named `server`
+  // export. Iterating every function export misclassifies utility helpers
+  // (e.g. `createMonitorPlugin`, `registerCommands`) as plugin factories;
+  // calling them returns `undefined`, which then poisons the hooks array and
+  // crashes downstream consumers (provider.ts `hook.provider`, etc.). Only
+  // treat the intended entrypoints as plugins.
+  const candidates = [mod.default, mod.server].filter((value): value is unknown => value !== undefined)
   const seen = new Set<unknown>()
   const result: PluginInstance[] = []
 
-  for (const entry of Object.values(mod)) {
+  for (const entry of candidates) {
     if (seen.has(entry)) continue
     seen.add(entry)
     const plugin = getServerPlugin(entry)
-    if (!plugin) throw new TypeError("Plugin export is not a function")
+    if (!plugin) continue
     result.push(plugin)
+  }
+
+  if (result.length === 0) {
+    // No recognized entrypoint — fall back to the original broad scan so we
+    // don't silently drop genuinely legacy plugins that only export a bare
+    // function without a `default`/`server` marker.
+    for (const entry of Object.values(mod)) {
+      if (seen.has(entry)) continue
+      seen.add(entry)
+      const plugin = getServerPlugin(entry)
+      if (!plugin) continue
+      result.push(plugin)
+      break
+    }
   }
 
   return result
