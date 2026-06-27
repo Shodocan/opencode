@@ -23,7 +23,7 @@ branch, no longer a clean single-feature PR.
 | **(3) getLegacyPlugins fix** | `95e18ef489` |
 | **(4) app stream tolerance** | `4777f4f0fb` |
 | **(5) compaction-enhardening** | `44661eec44` (tiering), `6f3cf62db9` (recall) |
-| **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger) |
+| **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger), `0be3e3a73b` (v1 AgentSchema + KNOWN_KEYS) |
 | **(7) MinIO auto-update** | `<this commit>` (install detection + manifest latest + in-place binary swap) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
@@ -148,13 +148,16 @@ Kill-switch: `OPENCODE_COMPACTION_ENHARDEN=0` ⇒ pure legacy pass-through.
 New fork-owned file (zero-conflict): `packages/core/src/session/runner/fallback.ts` + its tests.
 Config (additive): `fallback` on `packages/schema/src/agent.ts` (AgentV2.Info) +
 `packages/core/src/config/agent.ts` (ConfigV2.Agent) + `packages/core/src/config/plugin/agent.ts`
-(**`agentKeys` MUST include `"fallback"`** — load-bearing v2-routing gate — plus the parse block).
+(**`agentKeys` MUST include `"fallback"`** — load-bearing v2-routing gate — plus the parse block) +
+`packages/core/src/v1/config/agent.ts` (commit `0be3e3a73b` — v1 `AgentSchema` field + `KNOWN_KEYS`
+entry; **load-bearing for legacy/frontmatter agents** that route through the v1 decoder +
+`ConfigMigrateV1.migrateAgent`, which must carry `fallback` through v1→v2 or the chain is lost).
 
 | File | Risk | What the fork changed | Future-merge recipe |
 |---|---|---|---|
-| `packages/core/src/session/runner/llm.ts` | **med-high** | H1 import; H2 `ContinueWithFallbackModel` transition variant; H3 ctor; H4 `runTurnAttempt` gains `modelOverride/tried/transitions`; H5 model-resolve honors override; H6 publisher reports active variant; **H7 trigger before the overflow-publish**; H8 `RunTurn` type; H9/H10 `runAfterOverflowCompaction`+`runTurn` thread params, add the fallback arm, re-thread ambient override across compaction, increment the transition budget. | **MANDATORY merge-review focus.** The post-stream block was reworked by upstream `3cbd31fe`; re-insert H7 between the overflow-recovery `return` and `if (overflowFailure) yield* publish(overflowFailure)`. Preserve all 4 gate predicates (interrupt / assistant-started / provider-error / transition-budget). Mirror the existing `ContinueAfterOverflowCompaction` arm shape for H9/H10. Gate semantics drift silently with NO compile error — the `session-runner.test.ts` FORK tests are the safety net. |
+| `packages/core/src/session/runner/llm.ts` | **med-high** | H1 import; H2 `ContinueWithFallbackModel` transition variant; H3 ctor; H4 `runTurnAttempt` gains `modelOverride/tried/transitions`; H5 model-resolve honors override; H6 publisher reports active variant; **H7 trigger before the overflow-publish**; H8 `RunTurn` type; H9/H10 `runAfterOverflowCompaction`+`runTurn` thread params, add the fallback arm, re-thread ambient override across compaction, increment the transition budget. | **MANDATORY merge-review focus.** The post-stream block was reworked by upstream (`820c984d47` / `f8f648e5ce`, "fix(core): recover v2 context overflow"); re-insert H7 between the overflow-recovery `return` and `if (overflowFailure) yield* publish(overflowFailure)`. Preserve all 4 gate predicates (interrupt / assistant-started / provider-error / transition-budget). Mirror the existing `ContinueAfterOverflowCompaction` arm shape for H9/H10. Gate semantics drift silently with NO compile error — the `session-runner.test.ts` FORK tests are the safety net. |
 | `packages/core/src/config/plugin/agent.ts` | med | `"fallback"` added to `agentKeys` + a parse block (mirrors `item.model`). | Keep both. Without the `agentKeys` entry a markdown agent with `fallback:` frontmatter mis-routes to the legacy v1 decoder. |
-| `packages/schema/src/agent.ts`, `packages/core/src/config/agent.ts` | low | additive `fallback` field. | Re-add alongside upstream agent fields; regen SDK after. |
+| `packages/schema/src/agent.ts`, `packages/core/src/config/agent.ts`, `packages/core/src/v1/config/agent.ts` | low | additive `fallback` field (v2: `AgentV2.Info` + `ConfigV2.Agent`; v1: `AgentSchema` field + `KNOWN_KEYS` entry via `0be3e3a73b`). | Re-add alongside upstream agent fields; regen SDK after. The v1 field is load-bearing for legacy/frontmatter agents — `ConfigMigrateV1.migrateAgent` must carry `fallback` through v1→v2. |
 
 Triggers only on retriable HTTP failures (rate-limit/5xx/overload) or a context-overflow that
 survives compaction. Does NOT cover mid-stream in-band SSE provider-errors (documented limitation).
