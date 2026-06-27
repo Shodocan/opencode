@@ -36,6 +36,12 @@ const AgentSchema = Schema.StructWithRest(
     }),
     maxSteps: Schema.optional(PositiveInt).annotate({ description: "@deprecated Use 'steps' field instead." }),
     permission: Schema.optional(ConfigPermissionV1.Info),
+    // FORK FEATURE (6) fallback-model — legacy/frontmatter agents use this
+    // path, so keep fallback out of `options` and preserve it through v1->v2
+    // migration and the runtime Agent.Info layer.
+    fallback: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
+      description: "Ordered fallback model refs to retry when the active model fails with a retriable error.",
+    }),
     can_spawn_subagents: Schema.optional(Schema.Boolean).annotate({
       description:
         "Allow this subagent to dispatch its own subagents via the task tool (default: false). When true, grants task-tool permission unless `permission.task` is already set (in which case your scoping wins). Primary agents can always spawn; this field is meaningful for `mode: subagent`.",
@@ -63,6 +69,7 @@ const KNOWN_KEYS = new Set([
   "maxSteps",
   "options",
   "permission",
+  "fallback",
   "disable",
   "tools",
   "can_spawn_subagents",
