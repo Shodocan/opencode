@@ -40,8 +40,8 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/server/routes/instance/httpapi/groups/tui.ts` — `TuiPublishPayload` union
 - `packages/core/src/v1/config/agent.ts` — `AgentSchema` + `KNOWN_KEYS`
 - `packages/opencode/src/cli/cmd/run.ts` — deleted subagent guards
-- _(pending)_ `packages/core/src/session/compaction.ts` — head-only tiering hook
-- _(pending)_ `packages/core/src/session/runner/llm.ts` — fallback H7 + the two `catchDefect` arms
+- `packages/core/src/session/compaction.ts` — head-only tiering hook
+- `packages/core/src/session/runner/llm.ts` — fallback H7 + the two `catchDefect` arms
 
 ---
 
@@ -98,7 +98,9 @@ are structurally zero-conflict.
 `packages/tui/test/visible-user-text.test.ts` (new file),
 `packages/tui/test/cli/tui/use-event.test.tsx` (low — keep `as GlobalEvent['payload']` cast),
 `packages/opencode/test/agent/can-spawn-subagents.test.ts` (new file),
-`packages/opencode/test/cli/run/stream.transport.test.ts` (low — keep widened `TestGlobalPayload` union).
+`packages/opencode/test/cli/run/stream.transport.test.ts` (low — keep widened `TestGlobalPayload` union),
+`packages/core/test/session-recall.test.ts` (new file — Feature 5 compaction recall),
+`packages/core/test/session-runner-fallback.test.ts` (new file — Feature 6 fallback).
 
 ---
 
