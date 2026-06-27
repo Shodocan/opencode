@@ -18,6 +18,41 @@ export type Method = "curl" | "npm" | "yarn" | "pnpm" | "bun" | "brew" | "scoop"
 
 export type ReleaseType = "patch" | "minor" | "major"
 
+// FORK FEATURE (7) MinIO auto-update — see FORK_CHANGES.md.
+// The personal opencode-custom MinIO distribution installs the binary at
+// `<PREFIX>/lib/opencode-custom/opencode` (PREFIX defaults to
+// ~/.opencode-custom-hindsight; wrapper `och` in <PREFIX>/bin). Upstream's
+// `method()` does not recognize that path, so it returns "unknown" and
+// `upgrade()` bails — the build never auto-updates. These helpers detect the
+// custom install, fetch a version manifest from MinIO, and swap the binary
+// in place (leaving the wrapper + user PREFIX customizations untouched).
+//
+// Manifest: https://s3.casonatto.dev/shared/opencode-custom/manifest.json
+//   { version: "1.17.11-RC2", url: "<tarball url>", sha256: "<hex>" }
+// Version scheme: clean release = X.Y.Z; bug-fix republishes on the same
+// release = X.Y.Z-RC1, -RC2, … (RC resets to RC1 each upstream release). The
+// auto-update gate is string-equality + major/minor compare (see cli/upgrade.ts),
+// so X.Y.Z → X.Y.Z-RCn correctly triggers a patch upgrade.
+const CUSTOM_INSTALL_MARKER = "opencode-custom-hindsight/lib/opencode-custom"
+const CUSTOM_MANIFEST_URL = "https://s3.casonatto.dev/shared/opencode-custom/manifest.json"
+
+// True when the running binary lives under the custom-MinIO install prefix.
+export const isCustomMinioInstall = (execPath: string = process.execPath): boolean =>
+  execPath.includes(CUSTOM_INSTALL_MARKER)
+
+// Derive the LIB_DIR containing the binary from execPath:
+// <PREFIX>/lib/opencode-custom/opencode → <PREFIX>/lib/opencode-custom
+export const customLibDir = (execPath: string = process.execPath): string => {
+  const idx = execPath.indexOf(CUSTOM_INSTALL_MARKER)
+  return idx >= 0 ? execPath.slice(0, idx + CUSTOM_INSTALL_MARKER.length) : ""
+}
+
+const CustomMinioManifest = Schema.Struct({
+  version: Schema.String,
+  url: Schema.String,
+  sha256: Schema.String,
+})
+
 export const Event = InstallationEvent
 
 export function getReleaseType(current: string, latest: string): ReleaseType {
@@ -163,6 +198,56 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       Effect.mapError(() => new UpgradeFailedError({ stderr: upgradeFailure("curl") })),
     )
 
+    // FORK FEATURE (7) — in-place binary swap for the custom-MinIO install.
+    // Only replaces <LIB_DIR>/opencode (the one file that changes between
+    // versions); leaves the wrapper + user PREFIX customizations untouched.
+    // `target` is ignored — the manifest is the source of truth for url+sha.
+    const upgradeCustomMinio = Effect.fnUntraced(
+      function* (_target: string) {
+        const libDir = customLibDir()
+        if (!libDir) return yield* new UpgradeFailedError({ stderr: "could not derive LIB_DIR from execPath" })
+        // Fetch the manifest (url + sha256 for the tarball).
+        const response = yield* httpOk.execute(HttpClientRequest.get(CUSTOM_MANIFEST_URL).pipe(HttpClientRequest.acceptJson))
+        const manifest = yield* HttpClientResponse.schemaBodyJson(CustomMinioManifest)(response)
+        const tmpDir = (yield* text(["mktemp", "-d"])).trim()
+        try {
+          const tarball = `${tmpDir}/opencode-custom.tar.gz`
+          const dl = yield* run(["curl", "--fail", "--location", "--silent", "--show-error", "-o", tarball, manifest.url])
+          if (dl.code !== 0) return yield* new UpgradeFailedError({ stderr: `download failed: ${dl.stderr || dl.stdout}` })
+          // Verify sha256.
+          const actual = (yield* text(["sha256sum", tarball])).split(/\s+/)[0]
+          if (actual !== manifest.sha256) {
+            return yield* new UpgradeFailedError({
+              stderr: `sha256 mismatch: expected ${manifest.sha256}, got ${actual}`,
+            })
+          }
+          // Extract + locate the opencode binary, then swap it in place.
+          const extractDir = `${tmpDir}/extract`
+          yield* run(["mkdir", "-p", extractDir])
+          const ex = yield* run(["tar", "-xzf", tarball, "-C", extractDir])
+          if (ex.code !== 0) return yield* new UpgradeFailedError({ stderr: `extract failed: ${ex.stderr || ex.stdout}` })
+          // Find the opencode binary (matches install.sh's logic).
+          const found = (
+            yield* text([
+              "sh",
+              "-c",
+              `find "${extractDir}" -maxdepth 3 -type f -name opencode -perm -u+x 2>/dev/null | head -n1`,
+            ])
+          ).trim()
+          const srcBin = found || (yield* text(["sh", "-c", `find "${extractDir}" -maxdepth 3 -type f -name opencode | head -n1`])).trim()
+          if (!srcBin) return yield* new UpgradeFailedError({ stderr: "could not locate opencode binary in tarball" })
+          const inst = yield* run(["install", "-m", "0755", srcBin, `${libDir}/opencode`])
+          if (inst.code !== 0) return yield* new UpgradeFailedError({ stderr: `install failed: ${inst.stderr || inst.stdout}` })
+          return { code: 0, stdout: `swapped ${srcBin} -> ${libDir}/opencode`, stderr: "" }
+        } finally {
+          yield* run(["rm", "-rf", tmpDir])
+        }
+      },
+      Effect.mapError((err) =>
+        err instanceof UpgradeFailedError ? err : new UpgradeFailedError({ stderr: upgradeFailure("curl") }),
+      ),
+    )
+
     const result: Interface = {
       info: Effect.fn("Installation.info")(function* () {
         return {
@@ -173,6 +258,9 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       method: Effect.fn("Installation.method")(function* () {
         if (process.execPath.includes(path.join(".opencode", "bin"))) return "curl" as Method
         if (process.execPath.includes(path.join(".local", "bin"))) return "curl" as Method
+        // FORK FEATURE (7) — recognize the custom-MinIO install as a curl-style
+        // upgradeable method so `upgrade()` does not bail on "unknown".
+        if (isCustomMinioInstall()) return "curl" as Method
         const exec = process.execPath.toLowerCase()
 
         const checks: Array<{ name: Method; command: () => Effect.Effect<string> }> = [
@@ -206,6 +294,14 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
       }),
       latest: Effect.fn("Installation.latest")(function* (installMethod?: Method) {
         const detectedMethod = installMethod || (yield* result.method())
+
+        // FORK FEATURE (7) — for the custom-MinIO install, the latest version
+        // lives in manifest.json (one source of truth shared with upgrade()).
+        if (detectedMethod === "curl" && isCustomMinioInstall()) {
+          const response = yield* httpOk.execute(HttpClientRequest.get(CUSTOM_MANIFEST_URL).pipe(HttpClientRequest.acceptJson))
+          const data = yield* HttpClientResponse.schemaBodyJson(CustomMinioManifest)(response)
+          return data.version
+        }
 
         if (detectedMethod === "brew") {
           const formula = yield* getBrewFormula()
@@ -265,6 +361,12 @@ export const layer: Layer.Layer<Service, never, HttpClient.HttpClient | AppProce
         let upgradeResult: { code: number; stdout: string; stderr: string } | undefined
         switch (m) {
           case "curl":
+            // FORK FEATURE (7) — route the custom-MinIO install to the in-place
+            // binary-swap path; upstream curl installs keep using opencode.ai.
+            if (isCustomMinioInstall()) {
+              upgradeResult = yield* upgradeCustomMinio(target)
+              break
+            }
             upgradeResult = yield* upgradeCurl(target)
             break
           case "npm":

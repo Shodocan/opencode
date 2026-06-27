@@ -24,6 +24,7 @@ branch, no longer a clean single-feature PR.
 | **(4) app stream tolerance** | `4777f4f0fb` |
 | **(5) compaction-enhardening** | `44661eec44` (tiering), `6f3cf62db9` (recall) |
 | **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger) |
+| **(7) MinIO auto-update** | `<this commit>` (install detection + manifest latest + in-place binary swap) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -42,6 +43,7 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/cli/cmd/run.ts` — deleted subagent guards
 - `packages/core/src/session/compaction.ts` — head-only tiering hook
 - `packages/core/src/session/runner/llm.ts` — fallback H7 + the two `catchDefect` arms
+- `packages/opencode/src/installation/index.ts` — **Feature (7)**: custom-MinIO path detection (`isCustomMinioInstall`/`customLibDir`), `manifest.json` branch in `latest()`, `upgradeCustomMinio` in-place binary-swap branch in `upgrade()`'s `case "curl"`
 
 ---
 
@@ -157,3 +159,29 @@ Config (additive): `fallback` on `packages/schema/src/agent.ts` (AgentV2.Info) +
 Triggers only on retriable HTTP failures (rate-limit/5xx/overload) or a context-overflow that
 survives compaction. Does NOT cover mid-stream in-band SSE provider-errors (documented limitation).
 See `docs/superpowers/fork-features-plan.md`.
+
+### Feature (7) — MinIO auto-update
+
+The personal `opencode-custom` MinIO distribution installs the binary at
+`<PREFIX>/lib/opencode-custom/opencode` (PREFIX default `~/.opencode-custom-hindsight`).
+Upstream `Installation.method()` does not recognize that path → returns
+`"unknown"` → `cli/upgrade.ts` bails (`if (method === "unknown") return`), so
+the build never auto-updated.
+
+| File | Risk | What fork changed | Future-merge recipe |
+|---|---|---|---|
+| `packages/opencode/src/installation/index.ts` | med | `isCustomMinioInstall`/`customLibDir` helpers + `CUSTOM_INSTALL_MARKER`/`CUSTOM_MANIFEST_URL`/`CustomMinioManifest` consts; `method()` returns `"curl"` for the custom path; `latest()` fetches `manifest.json` (version) when curl+custom; `upgrade()`'s `case "curl"` routes to `upgradeCustomMinio` (download tarball, verify sha256, extract, `install -m 0755` over `<LIB_DIR>/opencode`). | Keep the helpers + consts; keep the 3 call-site branches (method/latest/upgrade). All are gated on `isCustomMinioInstall()` so upstream curl/npm/brew paths are untouched. Re-graft after upstream's `method()`/`latest()`/`upgrade()` restructures. |
+| `packages/opencode/test/installation/custom-minio.test.ts` | low | **New file** — detection, manifest latest(), in-place swap upgrade, RC version scheme. | New file keep as-is. |
+
+**Version scheme:** clean release = `X.Y.Z`; bug-fix republishes on the same
+release = `X.Y.Z-RC1`, `-RC2`, … (RC resets to RC1 each upstream release). The
+auto-update gate is string-equality + `getReleaseType` (major/minor compare), so
+`X.Y.Z → X.Y.Z-RCn` is a patch → auto-upgrade fires. `OPENCODE_VERSION` stamps
+the build (e.g. `OPENCODE_VERSION=1.17.11-RC1`).
+
+**Publish recipe** (see memory `opencode-custom-publish`): build with
+`OPENCODE_VERSION=<ver>`, tar to a **version-stable** key
+`opencode-custom-linux-x64.tar.gz` + `.sha256`, write `manifest.json`
+`{ version, url, sha256 }`, flip `install.sh` `DEFAULT_URL`/`DEFAULT_SHA256`.
+The binary's `latest()` reads `manifest.json`; `upgrade()` swaps the binary in
+place (wrapper + user PREFIX customizations untouched).
