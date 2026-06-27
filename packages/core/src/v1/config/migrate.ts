@@ -121,6 +121,11 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     steps: info.steps,
     disabled: info.disable,
     permissions: permissions(info.permission),
+    // FORK FEATURE (6) fallback-model — carry the ordered fallback chain through
+    // v1->v2 migration so legacy/frontmatter agents keep their fallback models.
+    // The v1 AgentSchema accepts `fallback` as string[]; the v2 ConfigV2.Agent
+    // expects the same shape, so pass it through verbatim when present.
+    ...(info.fallback !== undefined ? { fallback: info.fallback } : {}),
   }
 }
 

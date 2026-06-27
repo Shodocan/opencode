@@ -9,7 +9,10 @@ describe("public event manifest", () => {
     expect(EventManifest.Definitions).toBe(SchemaEventManifest.Definitions)
     expect(EventManifest.Latest).toBe(SchemaEventManifest.Latest)
     expect(EventManifest.Durable).toBe(SchemaEventManifest.Durable)
-    expect(EventManifest.Latest.size).toBe(88)
+    // FORK FEATURE (1) MCP/TUI notifications — added PromptSynthetic +
+    // AgentState (tui.prompt.synthetic, tui.agent.state) as public wire types,
+    // bumping Latest from 88 to 90.
+    expect(EventManifest.Latest.size).toBe(90)
     expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
     expect(EventManifest.Latest.get("todo.updated")).toBe(Todo.Event.Updated)
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)

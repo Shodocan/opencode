@@ -70,9 +70,12 @@ export function DialogMoveSession(props: DialogMoveSessionProps) {
     return loadedProject()
   })
 
-  const [directories, { refetch }] = createResource(
+  const [directories, { refetch }] = createResource<ProjectDirectory[] | undefined, string | undefined>(
     () => (props.initialRemoving ? undefined : props.projectID),
     async (projectID, info): Promise<ProjectDirectory[] | undefined> => {
+      // SolidJS only invokes the fetcher for truthy sources, but the typed
+      // source is `string | undefined`, so narrow here for the SDK calls below.
+      if (!projectID) return info.value
       try {
         await sdk.client.v2.projectCopy.refresh(
           { projectID, location: { directory: sdk.directory } },

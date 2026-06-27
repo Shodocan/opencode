@@ -233,6 +233,23 @@ Use native v2 fields.`,
             )
             await fs.writeFile(path.join(tmp.path, "agents", "disabled.md"), "---\ndisabled: true\n---\nDisabled")
             await fs.writeFile(path.join(tmp.path, "modes", "plan.md"), "Make a plan.")
+            // FORK FEATURE (6) fallback-model — legacy frontmatter agent that
+            // declares a fallback chain. `tools:` is not a v2 agentKeys entry, so
+            // this routes through the v1 decoder + ConfigMigrateV1.migrateAgent;
+            // the chain must survive that migration as ModelV2.Ref[] on the
+            // runtime AgentV2.Info (regression for the v1->v2 fallback drop).
+            await fs.writeFile(
+              path.join(tmp.path, "agents", "fallback.md"),
+              `---
+model: openrouter/anthropic/claude-sonnet-4-6
+tools:
+  write: false
+fallback:
+  - openrouter/anthropic/claude-haiku-4-5
+  - openrouter/openai/gpt-5
+---
+Resilient agent.`,
+            )
           })
           const agents = yield* AgentV2.Service
           const config = Config.Service.of({
@@ -265,6 +282,15 @@ Use native v2 fields.`,
           })
           expect(yield* agents.get(AgentV2.ID.make("disabled"))).toBeUndefined()
           expect(yield* agents.get(AgentV2.ID.make("plan"))).toMatchObject({ system: "Make a plan.", mode: "primary" })
+          // FORK FEATURE (6) — fallback chain survives v1->v2 migration as refs.
+          expect(yield* agents.get(AgentV2.ID.make("fallback"))).toMatchObject({
+            model: { providerID: "openrouter", id: "anthropic/claude-sonnet-4-6" },
+            system: "Resilient agent.",
+            fallback: [
+              { providerID: "openrouter", id: "anthropic/claude-haiku-4-5", variant: undefined },
+              { providerID: "openrouter", id: "openai/gpt-5", variant: undefined },
+            ],
+          })
         }),
       ),
     ),
