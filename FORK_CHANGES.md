@@ -25,7 +25,7 @@ branch, no longer a clean single-feature PR.
 | **(5) compaction-enhardening** | `44661eec44` (tiering), `6f3cf62db9` (recall) |
 | **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger), `0be3e3a73b` (v1 AgentSchema + KNOWN_KEYS) |
 | **(7) MinIO auto-update** | `173b2b03c5` (install detection + manifest latest + in-place binary swap) |
-| **(8) session.status AbortError suppress** | `<this commit>` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
+| **(8) session.status AbortError suppress** | `ac5c41d51a` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
