@@ -24,7 +24,8 @@ branch, no longer a clean single-feature PR.
 | **(4) app stream tolerance** | `4777f4f0fb` |
 | **(5) compaction-enhardening** | `44661eec44` (tiering), `6f3cf62db9` (recall) |
 | **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger), `0be3e3a73b` (v1 AgentSchema + KNOWN_KEYS) |
-| **(7) MinIO auto-update** | `<this commit>` (install detection + manifest latest + in-place binary swap) |
+| **(7) MinIO auto-update** | `173b2b03c5` (install detection + manifest latest + in-place binary swap) |
+| **(8) session.status AbortError suppress** | `<this commit>` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -56,7 +57,7 @@ are structurally zero-conflict.
 
 | File | Risk | What the fork changed | Future-merge recipe |
 |---|---|---|---|
-| `packages/opencode/src/mcp/index.ts` | **high** | 5 zod `NotificationSchema` handlers (`prompt/append,prompt/synthetic,command/execute,toast/show,session/select`) decoding into `TuiEvent` + 2 `events.listen` fan-out blocks (SessionStatus, AgentState) with finalizers. Imports `NotificationSchema`, `zod/v4`, `SessionStatus`. | Keep all 5 handlers + both fan-out blocks; re-graft into upstream's restructured client-setup + `addFinalizer`; ensure the 3 imports survive. |
+| `packages/opencode/src/mcp/index.ts` | **high** | 5 zod `NotificationSchema` handlers (`prompt/append,prompt/synthetic,command/execute,toast/show,session/select`) decoding into `TuiEvent` + 2 `events.listen` fan-out blocks (SessionStatus, AgentState) with finalizers, both routed through a `notify()` helper that suppresses `AbortError` (expected when transport closes mid-send). Imports `NotificationSchema`, `zod/v4`, `SessionStatus`. | Keep all 5 handlers + both fan-out blocks; re-graft into upstream's restructured client-setup + `addFinalizer`; ensure the 3 imports survive. Keep the `notify()` helper + AbortError suppress. |
 | `packages/schema/src/tui-event.ts` | med | `PromptSynthetic` (`tui.prompt.synthetic`) + `AgentState` (`tui.agent.state`) defines added to the single `Event.inventory(...)` call. | Keep both `define()` blocks; **union** upstream's + fork's event types into one `Event.inventory(...)` arg list. |
 | `…/httpapi/groups/tui.ts` | med | `EventTuiPromptSynthetic` + `EventTuiAgentState` struct schemas added to `TuiPublishPayload` union. | Add the fork's two struct consts + union members alongside any upstream-added tui structs. |
 | `…/httpapi/handlers/tui.ts` | med | Two `if`-branches in `publish` forwarding PromptSynthetic + AgentState. | Keep both branches next to the existing PromptAppend/CommandExecute/ToastShow/SessionSelect ones. |

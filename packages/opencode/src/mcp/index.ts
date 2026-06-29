@@ -614,6 +614,14 @@ export const layer = Layer.effect(
         // Fan opencode session status changes out to every connected MCP server.
         // Servers opt in by registering a handler for "notifications/opencode/session/status";
         // servers that ignore the method get the notification dropped by the MCP SDK.
+        const notify = (name: string, client: MCPClient, method: string, params: unknown) =>
+          client.notification({ method, params: params as Record<string, unknown> }).catch((cause) => {
+            // AbortError is expected when the transport closes mid-send (shutdown, reconnect,
+            // server disconnect). The notification is best-effort — silently drop it.
+            if (cause && typeof cause === "object" && "name" in cause && (cause as { name: string }).name === "AbortError") return
+            console.error(`${method} notification failed`, { server: name, cause })
+          })
+
         const unsubscribeStatus = yield* events.listen((evt) =>
           Effect.sync(() => {
             if (evt.type !== SessionStatus.Event.Status.type) return
@@ -621,9 +629,7 @@ export const layer = Layer.effect(
             const params = { sessionID: data.sessionID, status: data.status }
             for (const [name, client] of Object.entries(s.clients)) {
               if (s.status[name]?.status !== "connected") continue
-              client
-                .notification({ method: "notifications/opencode/session/status", params })
-                .catch((cause) => console.error("session.status notification failed", { server: name, cause }))
+              notify(name, client, "notifications/opencode/session/status", params)
             }
           }),
         )
@@ -634,9 +640,7 @@ export const layer = Layer.effect(
             const data = evt.data as typeof TuiEvent.AgentState.data.Type
             for (const [name, client] of Object.entries(s.clients)) {
               if (s.status[name]?.status !== "connected") continue
-              client
-                .notification({ method: "notifications/opencode/agent/state", params: data })
-                .catch((cause) => console.error("agent.state notification failed", { server: name, cause }))
+              notify(name, client, "notifications/opencode/agent/state", data)
             }
           }),
         )

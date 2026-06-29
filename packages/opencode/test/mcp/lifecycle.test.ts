@@ -50,6 +50,10 @@ interface MockClientState {
   requestHandlers: Map<unknown, (...args: any[]) => Promise<any>>
   notificationHandlers: Map<unknown, (...args: any[]) => any>
   sentNotifications: Array<{ method: string; params?: unknown }>
+  // When true, notification() rejects with an AbortError to simulate a transport
+  // abort mid-send (close/reconnect). The MCP fan-out must suppress these.
+  notificationShouldAbort: boolean
+  notificationCalls: number
 }
 
 const clientStates = new Map<string, MockClientState>()
@@ -92,6 +96,8 @@ function getOrCreateClientState(name?: string): MockClientState {
       requestHandlers: new Map(),
       notificationHandlers: new Map(),
       sentNotifications: [],
+      notificationShouldAbort: false,
+      notificationCalls: 0,
     }
     clientStates.set(key, state)
   }
@@ -263,6 +269,15 @@ void mock.module("@modelcontextprotocol/sdk/client/index.js", () => ({
 
     async notification(notification: { method: string; params?: unknown }) {
       this._state?.sentNotifications.push(notification)
+      if (this._state) this._state.notificationCalls++
+      if (this._state?.notificationShouldAbort) {
+        // Mimic the DOMException AbortError thrown by fetch() when the transport's
+        // AbortController fires mid-send.
+        const err = new Error("The operation was aborted.") as Error & { name: string; code: number }
+        err.name = "AbortError"
+        err.code = 20
+        throw err
+      }
     }
   },
 }))
@@ -283,6 +298,7 @@ const { TuiEvent } = await import("../../src/server/tui-event")
 const { SessionID } = await import("../../src/session/schema")
 const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
 const { EventV2Bridge } = await import("../../src/event-v2-bridge")
+const { SessionStatus } = await import("../../src/session/status")
 
 const it = testEffect(Layer.mergeAll(MCP.defaultLayer, EventV2Bridge.defaultLayer))
 
@@ -667,8 +683,47 @@ it.instance(
 )
 
 // ========================================================================
-// Test: connect() / disconnect() lifecycle
+// Test: session.status fan-out suppresses AbortError when transport closes mid-send
 // ========================================================================
+
+it.instance(
+  "session.status notification suppresses AbortError when transport aborts mid-send",
+  () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        lastCreatedClientName = "abort-server"
+        const serverState = getOrCreateClientState("abort-server")
+        // Simulate a transport whose AbortController fires mid-notification (close/reconnect).
+        serverState.notificationShouldAbort = true
+
+        yield* mcp.add("abort-server", {
+          type: "local",
+          command: ["echo", "test"],
+        })
+
+        const events = yield* EventV2Bridge.Service
+        const sessionID = SessionID.make("ses_abort-server")
+        yield* events.publish(SessionStatus.Event.Status, {
+          sessionID,
+          status: { type: "busy" },
+        })
+
+        // The fan-out calls notification() which rejects with AbortError. The catch
+        // handler must suppress it (no unhandled rejection, no thrown error escapes).
+        // Poll until the notification attempt is recorded — if suppression failed,
+        // the unhandled rejection would surface as a test failure.
+        yield* pollWithTimeout(
+          Effect.sync(() => (serverState.notificationCalls > 0 ? true : undefined)),
+          "session.status notification was never attempted",
+        )
+
+        expect(serverState.notificationCalls).toBeGreaterThan(0)
+        expect(serverState.sentNotifications.find((n) => n.method === "notifications/opencode/session/status")).toBeTruthy()
+      }),
+    ),
+  { config: { mcp: {} } },
+)
+
 
 it.instance(
   "disconnect sets status to disabled and removes client",
