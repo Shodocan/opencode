@@ -7,6 +7,7 @@ import {
   TransportReason,
   InvalidRequestReason,
   RateLimitReason,
+  QuotaExceededReason,
   AuthenticationReason,
   type LLMClientShape,
   type LLMRequest,
@@ -3245,13 +3246,43 @@ describe("SessionRunnerLLM", () => {
 
       requests.length = 0
       responses = undefined
-      response = successResponse
+      response = fragmentFixture("text", "fallback-text", ["Fallback answer"]).completeEvents
       responseStream = Stream.fail(rateLimited()) // primary fails once; replacement then succeeds
 
       yield* session.resume(sessionID)
 
       expect(requests.map((request) => request.model)).toEqual([model, replacementModel])
-      expect((yield* session.context(sessionID)).at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+      const context = yield* session.context(sessionID)
+      expect(context.at(-2)).toMatchObject({
+        type: "model-switched",
+        model: { id: ModelV2.ID.make("replacement"), providerID: ProviderV2.ID.make("fake") },
+        source: "fallback",
+        from: { id: ModelV2.ID.make("fake-model"), providerID: ProviderV2.ID.make("fake") },
+        reason: { category: "rate-limit" },
+        attempts: { total: 3, lowerLevel: 3, runnerLevel: 0 },
+      })
+      expect(context.at(-1)).toMatchObject({ type: "assistant", finish: "stop" })
+    }),
+  )
+
+  it.effect("FORK fallback-model: tries quota failures three total times before fallback", () =>
+    Effect.gen(function* () {
+      yield* setup
+      yield* configureFallback
+      const session = yield* SessionV2.Service
+      const failure = new LLMError({
+        module: "test",
+        method: "stream",
+        reason: new QuotaExceededReason({ message: "quota exceeded" }),
+      })
+      yield* session.prompt({ sessionID, prompt: Prompt.make({ text: "Quota then fallback" }), resume: false })
+
+      requests.length = 0
+      streamFailure = failure
+
+      expect(yield* session.resume(sessionID).pipe(Effect.flip)).toBe(failure)
+      expect(requests.map((request) => request.model)).toEqual([model, model, model, replacementModel])
+      streamFailure = undefined
     }),
   )
 

@@ -41,12 +41,36 @@ describe("shouldFallback", () => {
     expect(SessionRunnerFallback.shouldFallback(err(new QuotaExceededReason({ message: "q" })))).toBe(true)
   })
 
+  test("true for provider offline transport but false for timeout-only transport", () => {
+    expect(SessionRunnerFallback.shouldFallback(err(new TransportReason({ message: "offline", kind: "TransportError" })))).toBe(
+      true,
+    )
+    expect(SessionRunnerFallback.shouldFallback(err(new TransportReason({ message: "timeout", kind: "Timeout" })))).toBe(
+      false,
+    )
+  })
+
+  test("centralizes timeout-only detection", () => {
+    expect(SessionRunnerFallback.isTimeoutOnlyFailure(err(new TransportReason({ message: "timeout", kind: "Timeout" })))).toBe(
+      true,
+    )
+    expect(
+      SessionRunnerFallback.isTimeoutOnlyFailure(err(new TransportReason({ message: "offline", kind: "TransportError" }))),
+    ).toBe(false)
+    expect(SessionRunnerFallback.isTimeoutOnlyFailure(err(new RateLimitReason({ message: "rl" })))).toBe(false)
+  })
+
+  test("requires three total same-model attempts before fallback", () => {
+    expect(SessionRunnerFallback.hasMinimumAttemptsForFallback(1)).toBe(false)
+    expect(SessionRunnerFallback.hasMinimumAttemptsForFallback(2)).toBe(false)
+    expect(SessionRunnerFallback.hasMinimumAttemptsForFallback(3)).toBe(true)
+  })
+
   test("false for fatal reasons", () => {
     expect(SessionRunnerFallback.shouldFallback(err(new AuthenticationReason({ message: "a", kind: "invalid" })))).toBe(
       false,
     )
     expect(SessionRunnerFallback.shouldFallback(err(new ContentPolicyReason({ message: "c" })))).toBe(false)
-    expect(SessionRunnerFallback.shouldFallback(err(new TransportReason({ message: "t" })))).toBe(false)
     expect(
       SessionRunnerFallback.shouldFallback(err(new NoRouteReason({ route: "r" as any, provider: "p" as any, model: "m" as any }))),
     ).toBe(false)

@@ -838,6 +838,10 @@ export type GlobalEvent = {
           sessionID: string
           messageID: string
           model: ModelRef
+          source?: SessionMessageModelSwitchSource
+          from?: ModelRef
+          reason?: SessionMessageModelSwitchReason
+          attempts?: SessionMessageModelSwitchAttempts
         }
       }
     | {
@@ -1732,6 +1736,7 @@ export type AgentConfig = {
   steps?: number
   maxSteps?: number
   permission?: PermissionConfig
+  fallback?: Array<string>
   can_spawn_subagents?: boolean
   subagents?: Array<string>
   [key: string]:
@@ -1758,6 +1763,7 @@ export type AgentConfig = {
     | "info"
     | number
     | PermissionConfig
+    | Array<string>
     | Array<string>
     | undefined
 }
@@ -3009,6 +3015,19 @@ export type ModelRef = {
   variant?: string
 }
 
+export type SessionMessageModelSwitchSource = "manual" | "fallback"
+
+export type SessionMessageModelSwitchReason = {
+  category: "rate-limit" | "quota-exceeded" | "provider-internal" | "provider-offline" | "context-overflow"
+  message?: string
+}
+
+export type SessionMessageModelSwitchAttempts = {
+  total: number
+  lowerLevel: number
+  runnerLevel: number
+}
+
 export type LocationRef = {
   directory: string
   workspaceID?: string
@@ -3296,6 +3315,10 @@ export type SyncEventSessionNextModelSwitched = {
       sessionID: string
       messageID: string
       model: ModelRef
+      source?: SessionMessageModelSwitchSource
+      from?: ModelRef
+      reason?: SessionMessageModelSwitchReason
+      attempts?: SessionMessageModelSwitchAttempts
     }
   }
 }
@@ -3930,6 +3953,10 @@ export type SessionMessageModelSwitched = {
   }
   type: "model-switched"
   model: ModelRef
+  source?: SessionMessageModelSwitchSource
+  from?: ModelRef
+  reason?: SessionMessageModelSwitchReason
+  attempts?: SessionMessageModelSwitchAttempts
 }
 
 export type SessionMessageUser = {
@@ -4157,6 +4184,10 @@ export type SessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+    source?: SessionMessageModelSwitchSource
+    from?: ModelRef
+    reason?: SessionMessageModelSwitchReason
+    attempts?: SessionMessageModelSwitchAttempts
   }
 }
 
@@ -5212,6 +5243,10 @@ export type V2EventSessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+    source?: SessionMessageModelSwitchSource
+    from?: ModelRef
+    reason?: SessionMessageModelSwitchReason
+    attempts?: SessionMessageModelSwitchAttempts
   }
 }
 
@@ -6933,6 +6968,10 @@ export type EventSessionNextModelSwitched = {
     sessionID: string
     messageID: string
     model: ModelRef
+    source?: SessionMessageModelSwitchSource
+    from?: ModelRef
+    reason?: SessionMessageModelSwitchReason
+    attempts?: SessionMessageModelSwitchAttempts
   }
 }
 

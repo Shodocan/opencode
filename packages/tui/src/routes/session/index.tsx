@@ -36,6 +36,7 @@ import type {
   TextPart,
   ReasoningPart,
   SessionStatus,
+  SessionMessageModelSwitched,
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
@@ -88,6 +89,19 @@ addDefaultParsers(parsers.parsers)
 
 const GO_UPSELL_FREE_TIER_LAST_SEEN_AT = "go_upsell_last_seen_at"
 const GO_UPSELL_FREE_TIER_DONT_SHOW = "go_upsell_dont_show"
+
+type FallbackModelSwitchedMessage = SessionMessageModelSwitched & {
+  readonly source?: "manual" | "fallback"
+  readonly from?: SessionMessageModelSwitched["model"]
+  readonly reason?: { readonly category: string; readonly message?: string }
+  readonly attempts?: { readonly total: number; readonly lowerLevel: number; readonly runnerLevel: number }
+}
+
+const modelRefLabel = (model: SessionMessageModelSwitched["model"] | undefined) =>
+  model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : "unknown"
+
+const isModelSwitchedMessage = (message: unknown): message is FallbackModelSwitchedMessage =>
+  typeof message === "object" && message !== null && "type" in message && message.type === "model-switched"
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_LAST_SEEN_AT = "go_upsell_account_rate_limit_last_seen_at"
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_DONT_SHOW = "go_upsell_account_rate_limit_dont_show"
 const GO_UPSELL_WINDOW = 86_400_000 // 24 hrs
@@ -1249,6 +1263,9 @@ export function Session() {
                       <Match when={revert()?.messageID && message.id >= revert()!.messageID}>
                         <></>
                       </Match>
+                      <Match when={isModelSwitchedMessage(message)}>
+                        <ModelSwitchedMessage message={message as unknown as FallbackModelSwitchedMessage} />
+                      </Match>
                       <Match when={message.role === "user"}>
                         <UserMessage
                           index={index()}
@@ -1343,6 +1360,29 @@ export function Session() {
         </box>
       </context.Provider>
     </LocationProvider>
+  )
+}
+
+function ModelSwitchedMessage(props: { message: FallbackModelSwitchedMessage }) {
+  const { theme } = useTheme()
+  const reason = createMemo(() => props.message.reason?.message ?? props.message.reason?.category)
+
+  return (
+    <box marginTop={1} paddingLeft={2} flexShrink={0} border={["left"]} borderColor={theme.backgroundPanel}>
+      <Switch>
+        <Match when={props.message.source === "fallback"}>
+          <text fg={theme.warning}>
+            Fallback takeover: {modelRefLabel(props.message.from)} → {modelRefLabel(props.message.model)}
+          </text>
+          <Show when={reason()}>
+            {(value) => <text fg={theme.textMuted}>Reason: {value()}</text>}
+          </Show>
+        </Match>
+        <Match when={true}>
+          <text fg={theme.textMuted}>Model switched: {modelRefLabel(props.message.model)}</text>
+        </Match>
+      </Switch>
+    </box>
   )
 }
 
