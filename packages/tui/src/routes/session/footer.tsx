@@ -5,6 +5,18 @@ import { useDirectory } from "../../context/directory"
 import { useConnected } from "../../component/use-connected"
 import { createStore } from "solid-js/store"
 import { useRoute } from "../../context/route"
+import type { SessionMessageModelSwitched } from "@opencode-ai/sdk/v2"
+
+type FallbackModelSwitchedMessage = SessionMessageModelSwitched & {
+  readonly source?: "manual" | "fallback"
+  readonly from?: SessionMessageModelSwitched["model"]
+}
+
+const modelRefLabel = (model: SessionMessageModelSwitched["model"] | undefined) =>
+  model ? `${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}` : "unknown"
+
+const isModelSwitchedMessage = (message: unknown): message is FallbackModelSwitchedMessage =>
+  typeof message === "object" && message !== null && "type" in message && message.type === "model-switched"
 
 export function Footer() {
   const { theme } = useTheme()
@@ -16,6 +28,14 @@ export function Footer() {
   const permissions = createMemo(() => {
     if (route.data.type !== "session") return []
     return sync.data.permission[route.data.sessionID] ?? []
+  })
+  const fallbackSwitch = createMemo(() => {
+    if (route.data.type !== "session") return undefined
+    const latest = ((sync.data.message[route.data.sessionID] ?? []) as readonly unknown[])
+      .filter(isModelSwitchedMessage)
+      .findLast((message) => message.source === "fallback" || message.source === "manual" || message.source === undefined)
+    if (latest?.source !== "fallback") return undefined
+    return latest
   })
   const directory = useDirectory()
   const connected = useConnected()
@@ -81,6 +101,9 @@ export function Footer() {
                 </Switch>
                 {mcp()} MCP
               </text>
+            </Show>
+            <Show when={fallbackSwitch()}>
+              {(message) => <text fg={theme.warning}>fallback from {modelRefLabel(message().from)}</text>}
             </Show>
             <text fg={theme.textMuted}>/status</text>
           </Match>

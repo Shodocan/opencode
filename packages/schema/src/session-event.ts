@@ -69,6 +69,10 @@ export const ModelSwitched = Event.define({
     ...Base,
     messageID: SessionMessage.ID,
     model: Model.Ref,
+    source: SessionMessage.ModelSwitchSource.pipe(optional),
+    from: Model.Ref.pipe(optional),
+    reason: SessionMessage.ModelSwitchReason.pipe(optional),
+    attempts: SessionMessage.ModelSwitchAttempts.pipe(optional),
   },
 })
 export type ModelSwitched = typeof ModelSwitched.Type

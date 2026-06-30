@@ -457,6 +457,18 @@ export type SessionsContextOutput = {
         readonly time: { readonly created: number }
         readonly type: "model-switched"
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly source?: "manual" | "fallback"
+        readonly from?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly reason?: {
+          readonly category:
+            | "rate-limit"
+            | "quota-exceeded"
+            | "provider-internal"
+            | "provider-offline"
+            | "context-overflow"
+          readonly message?: string
+        }
+        readonly attempts?: { readonly total: number; readonly lowerLevel: number; readonly runnerLevel: number }
       }
     | {
         readonly id: string
@@ -625,6 +637,18 @@ export type SessionsEventsOutput =
         readonly sessionID: string
         readonly messageID: string
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly source?: "manual" | "fallback"
+        readonly from?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly reason?: {
+          readonly category:
+            | "rate-limit"
+            | "quota-exceeded"
+            | "provider-internal"
+            | "provider-offline"
+            | "context-overflow"
+          readonly message?: string
+        }
+        readonly attempts?: { readonly total: number; readonly lowerLevel: number; readonly runnerLevel: number }
       }
     }
   | {
@@ -1074,6 +1098,18 @@ export type SessionsMessageOutput = {
         readonly time: { readonly created: number }
         readonly type: "model-switched"
         readonly model: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly source?: "manual" | "fallback"
+        readonly from?: { readonly id: string; readonly providerID: string; readonly variant?: string }
+        readonly reason?: {
+          readonly category:
+            | "rate-limit"
+            | "quota-exceeded"
+            | "provider-internal"
+            | "provider-offline"
+            | "context-overflow"
+          readonly message?: string
+        }
+        readonly attempts?: { readonly total: number; readonly lowerLevel: number; readonly runnerLevel: number }
       }
     | {
         readonly id: string

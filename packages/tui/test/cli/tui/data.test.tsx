@@ -283,6 +283,10 @@ test("settles pending tools when a live failure arrives", async () => {
         messageID: "msg_model_1",
         timestamp: 0,
         model: { id: "model-1", providerID: "provider-1" },
+        source: "fallback",
+        from: { id: "model-0", providerID: "provider-0" },
+        reason: { category: "rate-limit", message: "rate limit" },
+        attempts: { total: 3, lowerLevel: 3, runnerLevel: 0 },
       },
     })
     emitEvent(events, {
@@ -365,6 +369,13 @@ test("settles pending tools when a live failure arrives", async () => {
       "model-switched",
       "agent-switched",
     ])
+    const modelSwitched = sync.session.message.list("session-1")?.find((message) => message.type === "model-switched")
+    expect(modelSwitched).toMatchObject({
+      source: "fallback",
+      from: { id: "model-0", providerID: "provider-0" },
+      reason: { category: "rate-limit", message: "rate limit" },
+      attempts: { total: 3, lowerLevel: 3, runnerLevel: 0 },
+    })
   } finally {
     app.renderer.destroy()
   }

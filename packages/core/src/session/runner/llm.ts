@@ -29,6 +29,7 @@ import { SessionRunnerFallback } from "./fallback" // FORK FEATURE (6) fallback-
 import { SessionEvent } from "../event"
 import { SessionHistory } from "../history"
 import { SessionInput } from "../input"
+import { SessionMessage } from "../message"
 import { SessionSchema } from "../schema"
 import { SessionStore } from "../store"
 import { type RunError, Service } from "./index"
@@ -157,7 +158,22 @@ export const layer = Layer.effect(
           readonly model: ModelV2.Ref
           readonly tried: ReadonlySet<string>
           readonly transitions: number
+          readonly takeover: FallbackTakeover
         }
+      | {
+          readonly _tag: "ContinueRetrySameModel"
+          readonly step: number
+          readonly model: ModelV2.Ref | undefined
+          readonly tried: ReadonlySet<string> | undefined
+          readonly transitions: number
+          readonly attempts: number
+        }
+
+    type FallbackTakeover = {
+      readonly from: ModelV2.Ref
+      readonly reason: ReturnType<typeof SessionRunnerFallback.reasonForFailure>
+      readonly attempts: ReturnType<typeof SessionRunnerFallback.attemptsForFailure>
+    }
 
     class TurnTransitionError extends Error {
       constructor(readonly transition: TurnTransition) {
@@ -174,7 +190,15 @@ export const layer = Layer.effect(
       model: ModelV2.Ref,
       tried: ReadonlySet<string>,
       transitions: number,
-    ) => new TurnTransitionError({ _tag: "ContinueWithFallbackModel", step, model, tried, transitions })
+      takeover: FallbackTakeover,
+    ) => new TurnTransitionError({ _tag: "ContinueWithFallbackModel", step, model, tried, transitions, takeover })
+    const continueRetrySameModel = (
+      step: number,
+      model: ModelV2.Ref | undefined,
+      tried: ReadonlySet<string> | undefined,
+      transitions: number,
+      attempts: number,
+    ) => new TurnTransitionError({ _tag: "ContinueRetrySameModel", step, model, tried, transitions, attempts })
 
     const loadSystemContext = (agent: AgentV2.Selection) =>
       Effect.all([systemContext.load(), skillGuidance.load(agent), referenceGuidance.load()], {
@@ -191,6 +215,8 @@ export const layer = Layer.effect(
       modelOverride?: ModelV2.Ref,
       tried?: ReadonlySet<string>,
       transitions: number = 0,
+      attempts: number = 1,
+      takeover?: FallbackTakeover,
     ) {
       const session = yield* getSession(sessionID)
       if (session.location.directory !== location.directory || session.location.workspaceID !== location.workspaceID)
@@ -234,6 +260,12 @@ export const layer = Layer.effect(
       const startSnapshot = yield* snapshots.capture()
       // FORK FEATURE (6): report the active model's variant (override or session).
       const activeVariant = (modelOverride ?? session.model)?.variant
+      const activeModelRef = {
+        id: ModelV2.ID.make(model.id),
+        providerID: ProviderV2.ID.make(model.provider),
+        ...(activeVariant === undefined ? {} : { variant: activeVariant }),
+      }
+      const modelLog = (ref: ModelV2.Ref | undefined) => ({ provider: ref?.providerID, model: ref?.id })
       const publisher = createLLMEventPublisher(events, {
         sessionID: session.id,
         agent: agent.id,
@@ -245,8 +277,51 @@ export const layer = Layer.effect(
         snapshot: startSnapshot,
       })
       const withPublication = Semaphore.makeUnsafe(1).withPermit
+      let takeoverPublished = false
+      let takeoverCancelled = false
+      const isFallbackCommitEvent = (event: LLMEvent) =>
+        event.type === "text-start" ||
+        event.type === "reasoning-start" ||
+        event.type === "tool-input-start" ||
+        event.type === "tool-call"
+      const publishTakeover = Effect.fnUntraced(function* (event: LLMEvent) {
+        if (!takeover || takeoverPublished || takeoverCancelled || !isFallbackCommitEvent(event)) return
+        const active = yield* getSession(session.id)
+        if (active.model && SessionRunnerFallback.keyOfRef(active.model) !== SessionRunnerFallback.keyOfRef(takeover.from)) {
+          takeoverCancelled = true
+          return
+        }
+        const activeModel = modelOverride ?? session.model ?? activeModelRef
+        if (!activeModel) return
+        takeoverPublished = true
+        yield* Effect.logInfo("fallback takeover", {
+          event_type: "fallback.takeover",
+          session: session.id,
+          fallback: {
+            event: "fallback.takeover",
+            from: modelLog(takeover.from),
+            to: modelLog(activeModel),
+            reason: takeover.reason.category,
+            attempts: {
+              total: takeover.attempts.total,
+              lower_level: takeover.attempts.lowerLevel,
+              runner_level: takeover.attempts.runnerLevel,
+            },
+          },
+        })
+        yield* events.publish(SessionEvent.ModelSwitched, {
+          sessionID: session.id,
+          messageID: SessionMessage.ID.create(),
+          timestamp: yield* DateTime.now,
+          model: activeModel,
+          source: "fallback",
+          from: takeover.from,
+          reason: takeover.reason,
+          attempts: takeover.attempts,
+        })
+      })
       const publish = (event: LLMEvent, outputPaths: ReadonlyArray<string> = []) =>
-        withPublication(publisher.publish(event, outputPaths))
+        withPublication(publishTakeover(event).pipe(Effect.andThen(publisher.publish(event, outputPaths))))
       let overflowFailure: ProviderErrorEvent | undefined
       const providerStream = llm.stream(request).pipe(
         Stream.runForEach((event) =>
@@ -323,14 +398,69 @@ export const layer = Layer.effect(
             !publisher.hasProviderError() &&
             transitions < SessionRunnerFallback.MAX_TURN_TRANSITIONS
           ) {
-            const currentRef = modelOverride ?? session.model
+            const currentRef = modelOverride ?? session.model ?? activeModelRef
             const triedNext = new Set<string>([
               ...(tried ?? []),
               ...(currentRef ? [SessionRunnerFallback.keyOfRef(currentRef)] : []),
             ])
             const nextModel = SessionRunnerFallback.nextFallbackModel(agent.info, fallbackFailure, triedNext)
-            if (nextModel)
-              return yield* Effect.die(continueWithFallbackModel(currentStep, nextModel, triedNext, transitions + 1))
+            if (SessionRunnerFallback.isTimeoutOnlyFailure(fallbackFailure))
+              yield* Effect.logInfo("fallback timeout blocked", {
+                event_type: "fallback.timeout_blocked",
+                session: session.id,
+                fallback: {
+                  event: "fallback.timeout_blocked",
+                  from: modelLog(currentRef),
+                  reason: "timeout",
+                  eligible: false,
+                  timeout_blocked: true,
+                },
+              })
+            if (nextModel) {
+              const failureAttempts = SessionRunnerFallback.attemptsForFailure(fallbackFailure, attempts)
+              if (!SessionRunnerFallback.hasMinimumAttemptsForFallback(failureAttempts.total))
+                yield* Effect.logInfo("fallback attempt failed", {
+                  event_type: "fallback.attempt_failed",
+                  session: session.id,
+                  fallback: {
+                    event: "fallback.attempt_failed",
+                    from: modelLog(currentRef),
+                    to: modelLog(nextModel),
+                    reason: SessionRunnerFallback.reasonForFailure(fallbackFailure).category,
+                    attempts: {
+                      total: failureAttempts.total,
+                      lower_level: failureAttempts.lowerLevel,
+                      runner_level: failureAttempts.runnerLevel,
+                    },
+                    eligible: true,
+                    timeout_blocked: false,
+                  },
+                })
+              if (!SessionRunnerFallback.hasMinimumAttemptsForFallback(failureAttempts.total))
+                return yield* Effect.die(
+                  continueRetrySameModel(currentStep, modelOverride, tried, transitions + 1, attempts + 1),
+                )
+              if (currentRef)
+                return yield* Effect.die(
+                  continueWithFallbackModel(currentStep, nextModel, triedNext, transitions + 1, {
+                    from: currentRef,
+                    reason: SessionRunnerFallback.reasonForFailure(fallbackFailure),
+                    attempts: failureAttempts,
+                  }),
+                )
+            }
+            if (!nextModel && agent.info?.fallback?.length && SessionRunnerFallback.shouldFallback(fallbackFailure))
+              yield* Effect.logInfo("fallback exhausted", {
+                event_type: "fallback.exhausted",
+                session: session.id,
+                fallback: {
+                  event: "fallback.exhausted",
+                  from: modelLog(currentRef),
+                  reason: SessionRunnerFallback.reasonForFailure(fallbackFailure).category,
+                  tried_chain: [...triedNext].join(","),
+                  exhausted: true,
+                },
+              })
           }
           if (overflowFailure) yield* publish(overflowFailure)
           const llmFailure = failure instanceof LLMError ? failure : undefined
@@ -399,6 +529,8 @@ export const layer = Layer.effect(
       modelOverride?: ModelV2.Ref,
       tried?: ReadonlySet<string>,
       transitions?: number,
+      attempts?: number,
+      takeover?: FallbackTakeover,
     ) => Effect.Effect<{ readonly needsContinuation: boolean; readonly step: number }, RunError>
 
     const runAfterOverflowCompaction: RunTurn = Effect.fnUntraced(function* (
@@ -408,8 +540,10 @@ export const layer = Layer.effect(
       modelOverride,
       tried,
       transitions = 0,
+      attempts = 1,
+      takeover,
     ) {
-      return yield* runTurnAttempt(sessionID, promotion, step, undefined, modelOverride, tried, transitions).pipe(
+      return yield* runTurnAttempt(sessionID, promotion, step, undefined, modelOverride, tried, transitions, attempts, takeover).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
             if (!(defect instanceof TurnTransitionError)) return yield* Effect.die(defect)
@@ -424,6 +558,21 @@ export const layer = Layer.effect(
                 defect.transition.model,
                 defect.transition.tried,
                 defect.transition.transitions,
+                1,
+                defect.transition.takeover,
+              )
+            }
+            if (defect.transition._tag === "ContinueRetrySameModel") {
+              yield* Effect.yieldNow
+              return yield* runTurn(
+                sessionID,
+                undefined,
+                defect.transition.step,
+                defect.transition.model,
+                defect.transition.tried,
+                defect.transition.transitions,
+                defect.transition.attempts,
+                takeover,
               )
             }
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
@@ -437,6 +586,8 @@ export const layer = Layer.effect(
               modelOverride,
               tried,
               transitions + 1,
+              attempts,
+              takeover,
             )
           }),
         ),
@@ -450,6 +601,8 @@ export const layer = Layer.effect(
       modelOverride,
       tried,
       transitions = 0,
+      attempts = 1,
+      takeover,
     ) {
       return yield* runTurnAttempt(
         sessionID,
@@ -459,6 +612,8 @@ export const layer = Layer.effect(
         modelOverride,
         tried,
         transitions,
+        attempts,
+        takeover,
       ).pipe(
         Effect.catchDefect(
           Effect.fnUntraced(function* (defect) {
@@ -474,6 +629,19 @@ export const layer = Layer.effect(
                 defect.transition.model,
                 defect.transition.tried,
                 defect.transition.transitions,
+                1,
+                defect.transition.takeover,
+              )
+            if (defect.transition._tag === "ContinueRetrySameModel")
+              return yield* runTurn(
+                sessionID,
+                undefined,
+                defect.transition.step,
+                defect.transition.model,
+                defect.transition.tried,
+                defect.transition.transitions,
+                defect.transition.attempts,
+                takeover,
               )
             if (defect.transition._tag === "ContinueAfterOverflowCompaction")
               return yield* runAfterOverflowCompaction(
@@ -483,8 +651,19 @@ export const layer = Layer.effect(
                 modelOverride,
                 tried,
                 transitions + 1,
+                attempts,
+                takeover,
               )
-            return yield* runTurn(sessionID, undefined, defect.transition.step, modelOverride, tried, transitions + 1)
+            return yield* runTurn(
+              sessionID,
+              undefined,
+              defect.transition.step,
+              modelOverride,
+              tried,
+              transitions + 1,
+              attempts,
+              takeover,
+            )
           }),
         ),
       )

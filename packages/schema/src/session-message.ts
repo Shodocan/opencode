@@ -5,7 +5,7 @@ import { optional } from "./schema"
 import { ProviderMetadata, ToolContent } from "./llm"
 import { Model } from "./model"
 import { FileAttachment, Prompt } from "./prompt"
-import { DateTimeUtcFromMillis, RelativePath, statics } from "./schema"
+import { DateTimeUtcFromMillis, NonNegativeInt, RelativePath, statics } from "./schema"
 import { SessionID } from "./session-id"
 import { ascending } from "./identifier"
 
@@ -34,11 +34,33 @@ export const AgentSwitched = Schema.Struct({
   agent: Schema.String,
 }).annotate({ identifier: "Session.Message.AgentSwitched" })
 
+export type ModelSwitchSource = typeof ModelSwitchSource.Type
+export const ModelSwitchSource = Schema.Literals(["manual", "fallback"]).annotate({
+  identifier: "Session.Message.ModelSwitchSource",
+})
+
+export type ModelSwitchReason = typeof ModelSwitchReason.Type
+export const ModelSwitchReason = Schema.Struct({
+  category: Schema.Literals(["rate-limit", "quota-exceeded", "provider-internal", "provider-offline", "context-overflow"]),
+  message: Schema.String.pipe(optional),
+}).annotate({ identifier: "Session.Message.ModelSwitchReason" })
+
+export type ModelSwitchAttempts = typeof ModelSwitchAttempts.Type
+export const ModelSwitchAttempts = Schema.Struct({
+  total: NonNegativeInt,
+  lowerLevel: NonNegativeInt,
+  runnerLevel: NonNegativeInt,
+}).annotate({ identifier: "Session.Message.ModelSwitchAttempts" })
+
 export interface ModelSwitched extends Schema.Schema.Type<typeof ModelSwitched> {}
 export const ModelSwitched = Schema.Struct({
   ...Base,
   type: Schema.Literal("model-switched"),
   model: Model.Ref,
+  source: ModelSwitchSource.pipe(optional),
+  from: Model.Ref.pipe(optional),
+  reason: ModelSwitchReason.pipe(optional),
+  attempts: ModelSwitchAttempts.pipe(optional),
 }).annotate({ identifier: "Session.Message.ModelSwitched" })
 
 export interface User extends Schema.Schema.Type<typeof User> {}
