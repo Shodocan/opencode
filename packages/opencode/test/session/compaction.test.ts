@@ -303,7 +303,9 @@ function readCompactionPart(sessionID: SessionID) {
     .messages({ sessionID })
     .pipe(
       Effect.map((messages) =>
-        messages.at(-2)?.parts.find((item): item is SessionV1.CompactionPart => item.type === "compaction"),
+        messages
+          .findLast((message) => message.parts.some((item) => item.type === "compaction"))
+          ?.parts.find((item): item is SessionV1.CompactionPart => item.type === "compaction"),
       ),
     )
 }
@@ -937,6 +939,37 @@ describe("session.compaction.process", () => {
     }),
   )
 
+  it.instance(
+    "adds synthetic continue prompt after manual compaction",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      const msg = yield* createUserMessage(session.id, "hello")
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+
+      const result = yield* SessionCompaction.use.process({
+        parentID: msg.id,
+        messages: msgs,
+        sessionID: session.id,
+        auto: false,
+      })
+
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const last = all.at(-1)
+
+      expect(result).toBe("continue")
+      expect(last?.info.role).toBe("user")
+      expect(last?.parts[0]).toMatchObject({
+        type: "text",
+        synthetic: true,
+        metadata: { compaction_continue: true },
+      })
+      if (last?.parts[0]?.type === "text") {
+        expect(last.parts[0].text).toContain("Continue if you have next steps")
+      }
+    }),
+  )
+
   itCompaction.instance(
     "persists tail_start_id for retained recent turns",
     Effect.gen(function* () {
@@ -1105,7 +1138,7 @@ describe("session.compaction.process", () => {
   )
 
   itCompaction.instance(
-    "allows plugins to disable synthetic continue prompt",
+    "continues even when plugins disable synthetic continue prompt",
     Effect.gen(function* () {
       const ssn = yield* SessionNs.Service
       const session = yield* ssn.create({})
@@ -1123,7 +1156,7 @@ describe("session.compaction.process", () => {
       const last = all.at(-1)
 
       expect(result).toBe("continue")
-      expect(last?.info.role).toBe("assistant")
+      expect(last?.info.role).toBe("user")
       expect(
         all.some(
           (msg) =>
@@ -1132,7 +1165,7 @@ describe("session.compaction.process", () => {
               (part) => part.type === "text" && part.synthetic && part.text.includes("Continue if you have next steps"),
             ),
         ),
-      ).toBe(false)
+      ).toBe(true)
     }).pipe(withCompaction({ plugin: autocontinue(false) })),
   )
 
