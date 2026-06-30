@@ -92,13 +92,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     agent: input.agent,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
-    tools[item.id] = tool({
+    const handler = tool({
       description: item.description,
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
+            const ctx = context(args as Record<string, unknown>, options)
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
@@ -127,6 +127,13 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
         )
       },
     })
+    // FORK: register case-insensitive aliases so the AI SDK's tools[toolCall.toolName]
+    // lookup succeeds when models emit tool names with unexpected casing (e.g. "Task"
+    // instead of "task"). Without this, the AI SDK's forwardStream silently drops the
+    // tool call (break with no error, no log) when tools[toolCall.toolName] is null.
+    tools[item.id] = handler
+    const lower = item.id.toLowerCase()
+    if (lower !== item.id && !tools[lower]) tools[lower] = handler
   }
 
   const hasMcpResourceServer = Object.values(yield* mcp.clients()).some(

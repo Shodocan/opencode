@@ -296,11 +296,27 @@ const live: Layer.Layer<
           async experimental_repairToolCall(failed) {
             const lower = failed.toolCall.toolName.toLowerCase()
             if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
+              Effect.runFork(
+                Effect.logWarning("tool call repaired: case mismatch", {
+                  "tool.original": failed.toolCall.toolName,
+                  "tool.repaired": lower,
+                  "session.id": input.sessionID,
+                }),
+              )
               return {
                 ...failed.toolCall,
                 toolName: lower,
               }
             }
+            // FORK: log the dropped tool call so silent AI SDK drops are visible.
+            Effect.runFork(
+              Effect.logWarning("tool call could not be repaired", {
+                "tool.name": failed.toolCall.toolName,
+                "tool.error": failed.error.message,
+                "tool.available": Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+                "session.id": input.sessionID,
+              }),
+            )
             return {
               ...failed.toolCall,
               input: JSON.stringify({
