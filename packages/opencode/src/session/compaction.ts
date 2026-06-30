@@ -59,6 +59,13 @@ function summaryText(message: SessionV1.WithParts) {
   return text || undefined
 }
 
+function isCompactionContinuation(message: SessionV1.WithParts) {
+  return (
+    message.info.role === "user" &&
+    message.parts.some((part) => part.type === "text" && part.synthetic && part.metadata?.compaction_continue === true)
+  )
+}
+
 function completedCompactions(messages: SessionV1.WithParts[]) {
   const users = new Map<MessageID, number>()
   for (let i = 0; i < messages.length; i++) {
@@ -90,6 +97,7 @@ function turns(messages: SessionV1.WithParts[]) {
     const msg = messages[i]
     if (msg.info.role !== "user") continue
     if (msg.parts.some((part) => part.type === "compaction")) continue
+    if (isCompactionContinuation(msg)) continue
     result.push({
       start: i,
       end: messages.length,
@@ -311,14 +319,22 @@ export const layer = Layer.effect(
         const idx = input.messages.findIndex((m) => m.info.id === input.parentID)
         for (let i = idx - 1; i >= 0; i--) {
           const msg = input.messages[i]
-          if (msg.info.role === "user" && !msg.parts.some((p) => p.type === "compaction")) {
+          if (
+            msg.info.role === "user" &&
+            !msg.parts.some((p) => p.type === "compaction") &&
+            !isCompactionContinuation(msg)
+          ) {
             replay = { info: msg.info, parts: msg.parts }
             messages = input.messages.slice(0, i)
             break
           }
         }
         const hasContent =
-          replay && messages.some((m) => m.info.role === "user" && !m.parts.some((p) => p.type === "compaction"))
+          replay &&
+          messages.some(
+            (m) =>
+              m.info.role === "user" && !m.parts.some((p) => p.type === "compaction") && !isCompactionContinuation(m),
+          )
         if (!hasContent) {
           replay = undefined
           messages = input.messages
@@ -419,7 +435,9 @@ export const layer = Layer.effect(
         })
       }
 
-      if (result === "continue" && input.auto) {
+      if (processor.message.error) return "stop"
+
+      if (result === "continue") {
         if (replay) {
           const original = replay.info
           const replayMsg = yield* session.updateMessage({
@@ -450,60 +468,54 @@ export const layer = Layer.effect(
 
         if (!replay) {
           const info = yield* provider.getProvider(userMessage.model.providerID)
-          if (
-            (yield* plugin.trigger(
-              "experimental.compaction.autocontinue",
-              {
-                sessionID: input.sessionID,
-                agent: userMessage.agent,
-                model: yield* provider
-                  .getModel(userMessage.model.providerID, userMessage.model.modelID)
-                  .pipe(Effect.orDie),
-                provider: {
-                  source: info.source,
-                  info,
-                  options: info.options,
-                },
-                message: userMessage,
-                overflow: input.overflow === true,
-              },
-              { enabled: true },
-            )).enabled
-          ) {
-            const continueMsg = yield* session.updateMessage({
-              id: MessageID.ascending(),
-              role: "user",
+          yield* plugin.trigger(
+            "experimental.compaction.autocontinue",
+            {
               sessionID: input.sessionID,
-              time: { created: Date.now() },
               agent: userMessage.agent,
-              model: userMessage.model,
-            })
-            const text =
-              (input.overflow
-                ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
-                : "") +
-              "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
-            yield* session.updatePart({
-              id: PartID.ascending(),
-              messageID: continueMsg.id,
-              sessionID: input.sessionID,
-              type: "text",
-              // Internal marker for auto-compaction followups so provider plugins
-              // can distinguish them from manual post-compaction user prompts.
-              // This is not a stable plugin contract and may change or disappear.
-              metadata: { compaction_continue: true },
-              synthetic: true,
-              text,
-              time: {
-                start: Date.now(),
-                end: Date.now(),
+              model: yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie),
+              provider: {
+                source: info.source,
+                info,
+                options: info.options,
               },
-            })
-          }
+              message: userMessage,
+              overflow: input.overflow === true,
+            },
+            { enabled: true },
+          )
+          const continueMsg = yield* session.updateMessage({
+            id: MessageID.ascending(),
+            role: "user",
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+            agent: userMessage.agent,
+            model: userMessage.model,
+          })
+          const text =
+            (input.overflow
+              ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
+              : "") +
+            "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+          yield* session.updatePart({
+            id: PartID.ascending(),
+            messageID: continueMsg.id,
+            sessionID: input.sessionID,
+            type: "text",
+            // Internal marker for post-compaction followups so provider plugins
+            // can distinguish them from manual post-compaction user prompts.
+            // This is not a stable plugin contract and may change or disappear.
+            metadata: { compaction_continue: true },
+            synthetic: true,
+            text,
+            time: {
+              start: Date.now(),
+              end: Date.now(),
+            },
+          })
         }
       }
 
-      if (processor.message.error) return "stop"
       if (result === "continue") {
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }

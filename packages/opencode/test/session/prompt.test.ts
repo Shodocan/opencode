@@ -523,6 +523,40 @@ it.instance("loop calls LLM and returns assistant message", () =>
   }),
 )
 
+it.instance("loop continues after manual compaction", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const compact = yield* SessionCompaction.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "keep working" }],
+    })
+    yield* compact.create({ sessionID: chat.id, agent: "build", model: ref, auto: false })
+    yield* llm.text("summary")
+    yield* llm.text("resumed")
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    const messages = yield* sessions.messages({ sessionID: chat.id })
+
+    expect(yield* llm.hits).toHaveLength(2)
+    expect(
+      messages.some(
+        (msg) =>
+          msg.info.role === "user" &&
+          msg.parts.some((part) => part.type === "text" && part.synthetic && part.metadata?.compaction_continue),
+      ),
+    ).toBe(true)
+    expect(result.info.role).toBe("assistant")
+    expect(result.parts.some((part) => part.type === "text" && part.text === "resumed")).toBe(true)
+  }),
+)
+
 withMcpInstructions.instance(
   "loop includes MCP instructions in model system context",
   () =>
