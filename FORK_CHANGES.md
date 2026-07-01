@@ -140,7 +140,8 @@ and their tests. Hot touches:
 | File | Risk | What the fork changed | Future-merge recipe |
 |---|---|---|---|
 | `packages/core/src/session/compaction.ts` | med | `serialize(msg, tier?)` param + `select(entries, tokens, tier?)` re-tiers the HEAD only (recent stays byte-identical legacy `truncate`); call site passes `CompactionTiering.tierToolOutput` when `ENHARDEN_ENABLED`. | Re-apply the `tier?` param on `serialize`/`select`, the head-only re-serialize + `CompactionTiering.capHead`, and the tier arg at the `select(...)` call. `compaction-tiering.test.ts` tripwire red-fails if dropped. Never tier `recent`. |
-| `packages/core/src/tool/builtins.ts` | low | `SessionRecallTool.layer` appended to `locationLayer` (the reachable v2 tool path). | Keep the import + the `locationLayer` append (append-only). |
+| `packages/core/src/tool/builtins.ts` | low | `SessionRecallTool.node` appended to the `deps` array of the `node = makeLocationNode({ name: "built-in-tools", deps: [...] })` aggregate (the reachable v2 tool path). | Keep the import + the `SessionRecallTool.node` entry in the `deps` array (append-only). Post-v1.17.12 the aggregate is a `makeLocationNode` (PR #34621), not `locationLayer`; re-graft into whatever shape upstream's aggregate takes. |
+| `packages/core/src/tool/session-recall.ts` | low | Fork-owned file; exports `node = makeLocationNode({ name: "tool/session-recall", layer, deps: [ToolRegistry.toolsNode, Database.node] })`. | Fork-owned (zero-conflict). If upstream renames `makeLocationNode` or changes `LayerNode` deps shape, update this export to match; `ToolRegistry.toolsNode` provides `Tools.Service`, `Database.node` provides `Database.Service`. |
 
 Kill-switch: `OPENCODE_COMPACTION_ENHARDEN=0` ⇒ pure legacy pass-through.
 
