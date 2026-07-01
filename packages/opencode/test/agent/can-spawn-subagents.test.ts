@@ -1,11 +1,13 @@
 import { expect } from "bun:test"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Effect } from "effect"
+import { Config } from "@/config/config"
 import { Agent } from "../../src/agent/agent"
 import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
 import { Permission } from "../../src/permission"
 import { testEffect } from "../lib/effect"
 
-const it = testEffect(Agent.defaultLayer)
+const it = testEffect(LayerNode.compile(LayerNode.group([Config.node, Agent.node])))
 
 // `deriveSubagentSessionPermission` is the helper task.ts uses to build a
 // subagent's session permission. These tests cover the can_spawn_subagents

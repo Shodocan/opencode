@@ -2,9 +2,11 @@ export * as SessionRecallTool from "./session-recall"
 
 import { ToolFailure } from "@opencode-ai/llm"
 import { Effect, Layer, Schema } from "effect"
+import { makeLocationNode } from "../effect/app-node"
 import { Database } from "../database/database"
 import { SessionRecall } from "../session/enharden/recall"
 import { Tool } from "./tool"
+import { ToolRegistry } from "./registry"
 import { Tools } from "./tools"
 
 // FORK FEATURE (5) compaction-enhardening — the F3 recovery tool. CORE tool so
@@ -68,3 +70,9 @@ export const layer = Layer.effectDiscard(
       .pipe(Effect.orDie)
   }),
 )
+
+export const node = makeLocationNode({
+  name: "tool/session-recall",
+  layer,
+  deps: [ToolRegistry.toolsNode, Database.node],
+})

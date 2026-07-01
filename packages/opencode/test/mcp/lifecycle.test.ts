@@ -2,7 +2,8 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { expect, mock, beforeEach } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
-import { Cause, Effect, Exit, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Cause, Effect, Exit } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { pollWithTimeout, testEffect } from "../lib/effect"
 import { TestInstance } from "../fixture/fixture"
@@ -300,7 +301,7 @@ const { McpOAuthCallback } = await import("../../src/mcp/oauth-callback")
 const { EventV2Bridge } = await import("../../src/event-v2-bridge")
 const { SessionStatus } = await import("../../src/session/status")
 
-const it = testEffect(Layer.mergeAll(MCP.defaultLayer, EventV2Bridge.defaultLayer))
+const it = testEffect(LayerNode.compile(LayerNode.group([MCP.node, EventV2Bridge.node])))
 
 function statusName(status: Record<string, MCPNS.Status> | MCPNS.Status, server: string) {
   if ("status" in status) return status.status
