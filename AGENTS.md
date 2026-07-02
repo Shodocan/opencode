@@ -4,6 +4,32 @@
 - The default branch in this repo is `dev`.
 - Local `main` ref may not exist; use `dev` or `origin/dev` for diffs.
 
+## Fork Releases (build + publish to MinIO)
+
+**Never do a release by hand.** Always use the Makefile — it is the single
+deterministic entry point and handles every step (build, package, upload,
+manifest, install.sh flip, verify, push, self-test). Manual releases have
+repeatedly shipped stale-sha mismatches and Cloudflare-cache-stale tarballs;
+the Makefile uploads with `Cache-Control: no-cache` and points manifest/install.sh
+at a versioned object key so the edge can never serve a previous RC's tarball.
+
+```sh
+make release          # bug-fix RC republish (auto next RC from manifest)
+make release-clean    # clean upstream release (auto latest upstream tag)
+make release VERSION=1.17.13-RC3   # explicit version
+make release-dry      # print what release would do (no build, no upload)
+```
+
+Pre-reqs: `bun`, `mc` (MinIO alias `casonatto`), `sha256sum`, `curl`, `gh`, `git`.
+Must be on `fork/main` with a clean tree. The Makefile halts on any verify
+failure **before** pushing or recording state, so a broken publish never
+records as done. Optional `make purge-cache` purges the Cloudflare edge cache
+(requires `CLOUDFLARE_API_TOKEN` + `CLOUDFLARE_ZONE_ID`).
+
+Version scheme: releases match upstream (`X.Y.Z`); bug-fix republishes on the
+same upstream append `-RC1`, `-RC2`, … (reset to RC1 on each new upstream
+release). See `RELEASE_MONITOR.md` for the full scheme + auto-update contract.
+
 ## Branch Names
 
 Use a short branch name of at most three words, separated by hyphens. Do not use slashes or type prefixes such as `feat/` or `fix/`.
