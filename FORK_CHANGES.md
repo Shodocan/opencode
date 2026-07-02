@@ -311,9 +311,11 @@ message (via `Gates.parseGates` at agent merge time), NOT at dispatch time.
 | `packages/core/src/v1/config/migrate.ts` | low | v1→v2 passthrough: `...(info.gates !== undefined ? { gates: info.gates } : {})` in `migrateAgent`. | Re-add the passthrough alongside `fallback`/`stopRecovery`. |
 | `packages/opencode/test/agent/gates.test.ts` | low (**new**) | 5 integration acceptance tests (requires_artifacts unmet→met, missing_run_root, requires_prior_dispatch 2→3, first_dispatch_must_be, no-gates regression) + 8 `parseGates` fail-fast unit tests. | New file — keep as-is. |
 
-**Minimum harness pin:** Shodocan custom OpenCode **1.17.14** or newer (this
-feature ships as a minor version bump; the harness README pin in
-`remote-agent-setup` should be updated from `1.17.11-RC1` to `1.17.14`).
+**Minimum harness pin:** Shodocan custom OpenCode **1.17.13-RC2** or newer
+(second bug-fix republish on top of upstream `v1.17.13`; `1.17.13-RC1` was the
+stop-recovery republish. RC counter resets to RC1 on the next upstream stable
+release. The harness README pin in `remote-agent-setup` should be updated from
+`1.17.11-RC1` to `1.17.13-RC2`).
 
 **Non-goals enforced:** no wave/severity/model-family logic in fork code; the
 fork only evaluates artifacts/counts/prior-dispatches. Unknown `gates`
