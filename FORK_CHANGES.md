@@ -27,6 +27,7 @@ branch, no longer a clean single-feature PR.
 | **(7) MinIO auto-update** | `173b2b03c5` (install detection + manifest latest + in-place binary swap) |
 | **(8) session.status AbortError suppress** | `ac5c41d51a` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
 | **(9) stop-recovery** | (this branch) L0 extra-body delivery for vLLM + L1 premature-stop recovery (length auto-continue, no-tool nudge, empty-after-thinking) |
+| **(10) gates** | (this branch) declarative `gates` block on agent definitions, evaluated at task-dispatch time (requires_artifacts, requires_prior_dispatch, first_dispatch_must_be); structured BLOCKED result to the parent; fail-fast config-parse on malformed blocks |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -53,6 +54,11 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/provider/provider.ts` — **Feature (9)**: `collectExtraBody` + per-instance fetch-wrapper for vLLM extra-body fields
 - `packages/core/src/v1/config/config.ts` — **Feature (9)**: root `stopRecovery` block
 - `packages/core/src/v1/config/agent.ts` — **Feature (9)**: agent `stopRecovery` KNOWN_KEY
+- `packages/core/src/v1/config/agent.ts` — **Feature (10)**: agent `gates` field + KNOWN_KEY
+- `packages/core/src/v1/config/migrate.ts` — **Feature (10)**: v1→v2 `gates` passthrough
+- `packages/opencode/src/agent/gates.ts` — **Feature (10)**: gate engine (parse/validate + evaluate + renderBlocked); new fork-owned file
+- `packages/opencode/src/agent/agent.ts` — **Feature (10)**: `gates` on runtime `Info` + merge-time `parseGates` (fail-fast)
+- `packages/opencode/src/tool/task.ts` — **Feature (10)**: dispatch-time `evaluateGates` hook (after subagents allow-list, before session create) + `TaskMetadata` type
 - `packages/tui/src/routes/session/visible-user-text.ts` — **Feature (9)**: visible-muted-automated rendering for recovery parts
 
 ---
@@ -110,6 +116,7 @@ are structurally zero-conflict.
 `packages/tui/test/visible-user-text.test.ts` (new file),
 `packages/tui/test/cli/tui/use-event.test.tsx` (low — keep `as GlobalEvent['payload']` cast),
 `packages/opencode/test/agent/can-spawn-subagents.test.ts` (new file),
+`packages/opencode/test/agent/gates.test.ts` (new file — Feature 10 gates),
 `packages/opencode/test/cli/run/stream.transport.test.ts` (low — keep widened `TestGlobalPayload` union),
 `packages/core/test/session-recall.test.ts` (new file — Feature 5 compaction recall),
 `packages/core/test/session-runner-fallback.test.ts` (new file — Feature 6 fallback).
@@ -247,3 +254,69 @@ Recipe: `docs/fork/qwen-vllm-recipe.md`.
 **SDK regen:** run `bun ./packages/sdk/js/script/build.ts` then `bun run
 generate` in `packages/client` after any schema/event change — the generated
 `SessionDurableEvent` union and `StopRecoveryError` must include the new types.
+
+### Feature (10) — gates (workflow-agnostic dispatch enforcement)
+
+A declarative `gates` block on agent definitions, evaluated at **task-dispatch
+time** (when a parent agent spawns a child via the task tool). The fork knows
+nothing about specific workflows, judges, or reviewers — only artifacts,
+counts, and prior dispatches. All workflow semantics live in the harness
+config (`remote-agent-setup`) that renders these fields. Default OFF; zero
+behavior change when `gates` is absent.
+
+Spec: `docs/artifacts/02-07-2026_agent-md-hardening/fork-gate-engine-handoff.md`
+(remote-agent-setup repo).
+
+Field semantics:
+
+- `requires_artifacts` — evaluated when THIS agent is dispatched as a child.
+  Each entry: `{ glob, min_count? }` (default min_count 1). `glob` may contain
+  the literal token `<run_root>`, substituted from the dispatching task brief
+  (`run_root: <abs path>` line in the prompt). If `run_root` is absent and the
+  glob needs it → BLOCKED with `missing_run_root`. Globs resolve against the
+  parent session's working directory when absolute paths are not produced.
+- `requires_prior_dispatch` — evaluated when THIS agent is dispatched. Passes
+  if the DISPATCHING session has already spawned ≥ `min_count` children whose
+  agent name matches `agent_pattern` (glob-style). `scope: session` = parent
+  session lifetime (only v1 scope).
+- `first_dispatch_must_be` — evaluated on the FIRST child dispatch of the agent
+  that carries this field (constrains the CARRIER as parent, not as child). If
+  the first spawned child is not the named agent, block that dispatch.
+
+Error contract (the part the harness depends on): a blocked dispatch returns a
+structured BLOCKED object to the parent as the task tool result (NOT a hard
+session error), so the parent LLM can self-repair:
+
+```json
+{
+  "status": "BLOCKED",
+  "gate": "requires_artifacts | requires_prior_dispatch | first_dispatch_must_be",
+  "agent": "<child agent name>",
+  "missing": ["<glob or pattern>", "..."],
+  "detail": "requires_artifacts: 0 of 1 matches for <run_root>/gate-consolidation.json (run_root=/abs/path)",
+  "recoverable": true
+}
+```
+
+Unknown `gates` sub-keys are warned once and ignored (forward compatibility).
+Malformed `gates` blocks fail fast at startup with the agent name in the
+message (via `Gates.parseGates` at agent merge time), NOT at dispatch time.
+
+| File | Risk | What the fork changed | Future-merge recipe |
+|---|---|---|---|
+| `packages/opencode/src/agent/gates.ts` | low (**new**) | Pure gate engine: `parseGates` (fail-fast validate with agent name) + `GatesConfigError` + `evaluateGates` (Effect-based; uses `Glob.scan` + `Session.children`) + `renderBlocked` + `extractRunRoot`. In-process unknown-key warn-once set. | New file — keep as-is. If upstream renames `Glob`/`Session.children`, update the imports. |
+| `packages/opencode/src/agent/agent.ts` | med | `gates: Schema.optional(Schema.Unknown)` on runtime `Info`; merge line calls `Gates.parseGates(key, value.gates ?? item.gates)` (fail-fast with the agent name at startup). `import { Gates } from "../agent/gates"`. | Re-add the `Info` field + merge line + import alongside `stopRecovery`. The `parseGates` call is load-bearing — without it a malformed block is silently swallowed. |
+| `packages/opencode/src/tool/task.ts` | med | `TaskMetadata` exported interface (shared shape for success + blocked results); gates enforcement block after the `subagents` allow-list and before `sessions.create`: skips on resume (`params.task_id` set), gathers `parent` + `sessions.children(parent.id)`, calls `Gates.evaluateGates`, returns `{ title, metadata: blockedMetadata, output: Gates.renderBlocked(blocked) }` on a block (NOT `Effect.fail`). `import { Gates } from "../agent/gates"`. | Re-graft the `TaskMetadata` interface + the enforcement block after upstream's task-tool restructure. The block's only coupling is `parent`/`next`/`parentAgent`/`sessions.children`/`params.prompt`. Keep the resume-skip guard (`if (!session)`). |
+| `packages/core/src/v1/config/agent.ts` | low | `gates: Schema.optional(Schema.Unknown)` on `AgentSchema` + `"gates"` in `KNOWN_KEYS` (load-bearing for v1→v2 routing; without the KNOWN_KEY, `gates` drops into `options` and never reaches the dispatch path). | Re-add the field + KNOWN_KEY alongside `stopRecovery`/`fallback`/`subagents`. |
+| `packages/core/src/v1/config/migrate.ts` | low | v1→v2 passthrough: `...(info.gates !== undefined ? { gates: info.gates } : {})` in `migrateAgent`. | Re-add the passthrough alongside `fallback`/`stopRecovery`. |
+| `packages/opencode/test/agent/gates.test.ts` | low (**new**) | 5 integration acceptance tests (requires_artifacts unmet→met, missing_run_root, requires_prior_dispatch 2→3, first_dispatch_must_be, no-gates regression) + 8 `parseGates` fail-fast unit tests. | New file — keep as-is. |
+
+**Minimum harness pin:** Shodocan custom OpenCode **1.17.14** or newer (this
+feature ships as a minor version bump; the harness README pin in
+`remote-agent-setup` should be updated from `1.17.11-RC1` to `1.17.14`).
+
+**Non-goals enforced:** no wave/severity/model-family logic in fork code; the
+fork only evaluates artifacts/counts/prior-dispatches. Unknown `gates`
+sub-keys warn once and ignore. Stock-OpenCode compatibility: `gates` is
+`Schema.optional` everywhere — nothing else in the agent definition depends on
+gate evaluation having run.

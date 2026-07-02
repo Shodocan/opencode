@@ -15,6 +15,7 @@ import PROMPT_EXPLORE from "./prompt/explore.txt"
 import PROMPT_SUMMARY from "./prompt/summary.txt"
 import PROMPT_TITLE from "./prompt/title.txt"
 import { Permission } from "@/permission"
+import { Gates } from "../agent/gates"
 import { mergeDeep, pipe, sortBy, values } from "remeda"
 import { Global } from "@opencode-ai/core/global"
 import path from "path"
@@ -46,6 +47,11 @@ export const Info = Schema.Struct({
   subagents: Schema.optional(Schema.Array(Schema.String)),
   // FORK FEATURE (9) stop-recovery — per-agent disable-only override.
   stopRecovery: Schema.optional(Schema.Boolean),
+  // FORK FEATURE (10) gates — declarative dispatch gates. Validated at merge
+  // time via parseGates (fail-fast with the agent name); kept loose as
+  // Schema.Unknown here so the parse/validate logic lives in one place
+  // (agent/gates.ts) and the fork stays workflow-agnostic.
+  gates: Schema.optional(Schema.Unknown),
   model: Schema.optional(
     Schema.Struct({
       modelID: ModelV2.ID,
@@ -299,6 +305,11 @@ const layer = Layer.effect(
           item.subagents = value.subagents ?? item.subagents
           // FORK FEATURE (9) stop-recovery — carry the disable-only override.
           item.stopRecovery = value.stopRecovery ?? item.stopRecovery
+          // FORK FEATURE (10) gates — parse/validate the declarative dispatch
+          // gates at merge time. Fail fast at startup (with the agent name) on
+          // a malformed block; undefined when absent (zero behavior change).
+          const mergedGates = value.gates ?? item.gates
+          item.gates = Gates.parseGates(key, mergedGates)
           if (value.can_spawn_subagents) {
             // Grant task-tool permission unless the subagent already scopes it.
             // If the user also set permission.task, their scoping wins (those

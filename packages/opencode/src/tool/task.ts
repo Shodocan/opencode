@@ -7,6 +7,7 @@ import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
+import { Gates } from "../agent/gates"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
@@ -19,6 +20,25 @@ export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
   prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+}
+
+// FORK FEATURE (10) gates — metadata emitted by the task tool. `blocked`/`gate`/
+// `agent` are present only on a gate-blocked dispatch (see Gates.renderBlocked);
+// `background`/`jobId` only on background dispatches. Declared as a shared type so
+// downstream callers and tests can branch on `metadata.blocked` uniformly.
+// `sessionId` is the spawned child session id; on a blocked dispatch no session is
+// created and it is set to `undefined` cast to the branded type (callers must check
+// `blocked` before interpreting `sessionId`).
+export interface TaskMetadata {
+  parentSessionId: SessionID
+  sessionId: SessionID
+  model: { modelID: string | undefined; providerID: string | undefined }
+  background?: boolean
+  jobId?: string
+  blocked?: boolean
+  gate?: string
+  agent?: string
+  [key: string]: unknown
 }
 
 const id = "task"
@@ -132,6 +152,49 @@ export const TaskTool = Tool.define(
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
       const parent = yield* sessions.get(ctx.sessionID)
+
+      // FORK FEATURE (10) gates — workflow-agnostic dispatch enforcement.
+      // Evaluated at dispatch time (after the subagents allow-list, before the
+      // child session is created). Skipped on resume (params.task_id set) since
+      // that continues an existing child session, not a new dispatch. A blocked
+      // dispatch returns a structured BLOCKED result as the tool output (NOT a
+      // hard session error) so the parent LLM can self-repair. No-op when
+      // neither parent nor child carries `gates` (zero behavior change).
+      if (!session) {
+        const blocked = yield* Gates.evaluateGates({
+          parent: { id: parent.id, directory: parent.directory },
+          parentGates: parentAgent?.gates as Gates.Gates | undefined,
+          childName: next.name,
+          childGates: next.gates as Gates.Gates | undefined,
+          prompt: params.prompt,
+          priorChildren: yield* sessions.children(parent.id),
+        }).pipe(Effect.orDie)
+        if (blocked) {
+          // Return the BLOCKED result as the tool output (NOT a hard error) so
+          // the parent LLM can self-repair. The metadata mirrors the success
+          // path's base shape (sessionId/model are placeholders — no session is
+          // created on a blocked dispatch) so the shared TaskMetadata type stays
+          // uniform for downstream callers and tests. The blocked payload rides
+          // in `output`; `blocked`/`gate`/`agent` mark the result as blocked.
+          const blockedMetadata: TaskMetadata = {
+            parentSessionId: ctx.sessionID,
+            // No session is created on a blocked dispatch; cast to the branded
+            // type to satisfy the shared TaskMetadata shape. Callers must check
+            // `blocked` before interpreting `sessionId`.
+            sessionId: undefined as unknown as SessionID,
+            model: next.model ?? { modelID: undefined, providerID: undefined },
+            blocked: true,
+            gate: blocked.gate,
+            agent: blocked.agent,
+          }
+          return {
+            title: params.description,
+            metadata: blockedMetadata,
+            output: Gates.renderBlocked(blocked),
+          }
+        }
+      }
+
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
@@ -178,7 +241,7 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
-      const metadata = {
+      const metadata: TaskMetadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,

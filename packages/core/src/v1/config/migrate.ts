@@ -149,6 +149,10 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     // override through v1->v2 migration. Root `stopRecovery` block is carried
     // separately below.
     ...(info.stopRecovery !== undefined ? { stopRecovery: info.stopRecovery } : {}),
+    // FORK FEATURE (10) gates — carry the declarative dispatch gates through
+    // v1->v2 migration so legacy/frontmatter agents keep their gates block.
+    // Parsed/validated at runtime agent-load (fail-fast with the agent name).
+    ...(info.gates !== undefined ? { gates: info.gates } : {}),
   }
 }
 

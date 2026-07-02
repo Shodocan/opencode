@@ -57,6 +57,14 @@ const AgentSchema = Schema.StructWithRest(
       description:
         "Allow-list of subagent_types this agent may dispatch via the task tool. If set, dispatching a subagent_type not in this list is rejected at runtime. If unset, any known agent is allowed (subject to `can_spawn_subagents` / `permission.task`).",
     }),
+    // FORK FEATURE (10) gates — workflow-agnostic dispatch enforcement primitive.
+    // Parsed/validated at agent-load time (fail-fast with the agent name); kept
+    // out of `options` so it reaches the dispatch path. See
+    // packages/opencode/src/agent/gates.ts and FORK_CHANGES.md Feature (10).
+    gates: Schema.optional(Schema.Unknown).annotate({
+      description:
+        "Declarative dispatch gates (requires_artifacts, requires_prior_dispatch, first_dispatch_must_be). Evaluated at task-dispatch time; blocked dispatches return a structured BLOCKED result to the parent. Malformed blocks fail fast at startup.",
+    }),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
 )
@@ -82,6 +90,7 @@ const KNOWN_KEYS = new Set([
   "can_spawn_subagents",
   "subagents",
   "stopRecovery",
+  "gates",
 ])
 
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {
