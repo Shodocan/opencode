@@ -18,6 +18,8 @@ export class Info extends Schema.Class<Info>("ConfigV2.Agent")({
   // retriable error (rate-limit / 5xx / overload) or a context-overflow that
   // survives compaction. See FORK_CHANGES.md.
   fallback: Schema.mutable(Schema.Array(Schema.String)).pipe(Schema.optional),
+  // FORK FEATURE (9) stop-recovery — per-agent disable-only override.
+  stopRecovery: Schema.Boolean.pipe(Schema.optional),
   request: ConfigProvider.Request.pipe(Schema.optional),
   system: Schema.String.pipe(Schema.optional),
   description: Schema.String.pipe(Schema.optional),

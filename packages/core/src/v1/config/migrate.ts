@@ -59,6 +59,25 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
       },
       buffer: info.compaction.reserved,
     },
+    // FORK FEATURE (9) stop-recovery — carry the root block through v1->v2.
+    stopRecovery: info.stopRecovery && {
+      enabled: info.stopRecovery.enabled,
+      lengthContinue: info.stopRecovery.lengthContinue && {
+        enabled: info.stopRecovery.lengthContinue.enabled,
+        max: info.stopRecovery.lengthContinue.max,
+        text: info.stopRecovery.lengthContinue.text,
+      },
+      noToolNudge: info.stopRecovery.noToolNudge && {
+        enabled: info.stopRecovery.noToolNudge.enabled,
+        graceRetry: info.stopRecovery.noToolNudge.graceRetry,
+        limit: info.stopRecovery.noToolNudge.limit,
+        text: info.stopRecovery.noToolNudge.text,
+      },
+      emptyAfterThinking: info.stopRecovery.emptyAfterThinking && {
+        enabled: info.stopRecovery.emptyAfterThinking.enabled,
+        text: info.stopRecovery.emptyAfterThinking.text,
+      },
+    },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,
     instructions: info.instructions,
@@ -126,6 +145,10 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     // The v1 AgentSchema accepts `fallback` as string[]; the v2 ConfigV2.Agent
     // expects the same shape, so pass it through verbatim when present.
     ...(info.fallback !== undefined ? { fallback: info.fallback } : {}),
+    // FORK FEATURE (9) stop-recovery — carry the per-agent disable-only
+    // override through v1->v2 migration. Root `stopRecovery` block is carried
+    // separately below.
+    ...(info.stopRecovery !== undefined ? { stopRecovery: info.stopRecovery } : {}),
   }
 }
 

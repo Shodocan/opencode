@@ -13,6 +13,9 @@ import { Provider } from "@/provider/provider"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+// FORK FEATURE (9) stop-recovery — L1 premature-stop recovery decision shell.
+import { clearState, decide } from "./stop-recovery"
+import { Todo } from "./todo"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -123,6 +126,8 @@ const layer = Layer.effect(
     const commands = yield* Command.Service
     const config = yield* Config.Service
     const permission = yield* Permission.Service
+    // FORK FEATURE (9) stop-recovery — pending-work signal for the no-tool nudge.
+    const todo = yield* Todo.Service
     const fsys = yield* FSUtil.Service
     const mcp = yield* MCP.Service
     const lsp = yield* LSP.Service
@@ -152,6 +157,7 @@ const layer = Layer.effect(
     const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
       yield* state.cancel(sessionID)
+      clearState(sessionID)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -1114,6 +1120,31 @@ const layer = Layer.effect(
             !hasToolCalls &&
             lastUser.id < lastAssistant.id
           ) {
+            // fork(stop-recovery): bounded premature-stop recovery — evaluates
+            // once per would-be turn end; injects a synthetic continue/nudge and
+            // re-enters, or falls through to the normal break. No-op when the
+            // feature is absent/disabled. spec §5.
+            const recovery = yield* decide(
+              {
+                sessionID,
+                msgs,
+                lastUser,
+                lastAssistant,
+                lastAssistantMsg,
+                step,
+                compactionPending: tasks.some((t) => t.type === "compaction"),
+              },
+              {
+                sessions,
+                agents,
+                permission,
+                events,
+                config,
+                todo,
+              },
+            )
+            if (recovery === "injected") continue
+
             const orphan = lastAssistantMsg?.parts.find(
               (part): part is SessionV1.ToolPart => part.type === "tool" && isOrphanedInterruptedTool(part),
             )
@@ -1208,6 +1239,7 @@ const layer = Layer.effect(
             })
             msg.time.completed = Date.now()
             yield* sessions.updateMessage(msg)
+            clearState(sessionID)
           })
 
           const handle = yield* processor
@@ -1608,6 +1640,8 @@ export const node = LayerNode.make({
     Command.node,
     Config.node,
     Permission.node,
+    // FORK FEATURE (9) stop-recovery — Todo.Service dependency.
+    Todo.node,
     FSUtil.node,
     MCP.node,
     LSP.node,

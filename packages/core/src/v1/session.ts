@@ -66,3 +66,10 @@ export const ContextOverflowError = NamedError.create("ContextOverflowError", {
   responseBody: Schema.optional(Schema.String),
 })
 export const ContentFilterError = NamedError.create("ContentFilterError", { message: Schema.String })
+// FORK FEATURE (9) stop-recovery — hard-stop error (spec §5.2).
+export const StopRecoveryError = NamedError.create("StopRecoveryError", {
+  message: Schema.String,
+  trigger: Schema.String,
+  attempts: NonNegativeInt,
+  limit: NonNegativeInt,
+})

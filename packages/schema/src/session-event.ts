@@ -77,6 +77,34 @@ export const ModelSwitched = Event.define({
 })
 export type ModelSwitched = typeof ModelSwitched.Type
 
+// FORK FEATURE (9) stop-recovery — durable telemetry for premature-stop
+// recovery decisions (length auto-continue, no-tool nudge, empty-after-thinking,
+// unknown-finish observed-only). One event per recovery decision incl. terminal
+// `halt`. See docs/artifacts/01-07-2026_premature-stop-recovery/spec.md §8.
+export const StopRecovery = Event.define({
+  type: "session.next.stop_recovery",
+  ...options,
+  schema: {
+    ...Base,
+    messageID: SessionMessage.ID,
+    trigger: Schema.Literals(["length", "no_tool", "empty_after_thinking", "unknown_finish"]),
+    action: Schema.Literals(["continue", "nudge_grace", "nudge", "halt", "observed"]),
+    attempt: Schema.Finite,
+    limit: Schema.Finite,
+    reasoning_only: Schema.optional(Schema.Boolean),
+    tokens: Schema.optional(
+      Schema.Struct({
+        input: Schema.Finite,
+        output: Schema.Finite,
+        reasoning: Schema.Finite,
+      }),
+    ),
+    cost: Schema.optional(Schema.Finite),
+    agent: Schema.optional(Schema.String),
+  },
+})
+export type StopRecovery = typeof StopRecovery.Type
+
 export const Moved = Event.define({
   type: "session.next.moved",
   ...options,
@@ -457,6 +485,7 @@ export const DurableDefinitions = Event.inventory(
   PromptAdmitted,
   ContextUpdated,
   Synthetic,
+  StopRecovery,
   Shell.Started,
   Shell.Ended,
   Step.Started,
@@ -488,6 +517,7 @@ export const Definitions = Event.inventory(
   PromptAdmitted,
   ContextUpdated,
   Synthetic,
+  StopRecovery,
   Shell.Started,
   Shell.Ended,
   Step.Started,

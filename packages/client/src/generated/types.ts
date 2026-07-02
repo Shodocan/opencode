@@ -831,6 +831,26 @@ export type SessionsHistoryOutput = {
     | {
         readonly id: string
         readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.stop_recovery"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly timestamp: number
+          readonly sessionID: string
+          readonly messageID: string
+          readonly trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+          readonly action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+          readonly attempt: number
+          readonly limit: number
+          readonly reasoning_only?: boolean | null
+          readonly tokens?: { readonly input: number; readonly output: number; readonly reasoning: number } | null
+          readonly cost?: number | null
+          readonly agent?: string | null
+        }
+      }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
         readonly type: "session.next.shell.started"
         readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
@@ -1296,6 +1316,26 @@ export type SessionsEventsOutput =
         readonly sessionID: string
         readonly messageID: string
         readonly text: string
+      }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.stop_recovery"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly timestamp: number
+        readonly sessionID: string
+        readonly messageID: string
+        readonly trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+        readonly action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+        readonly attempt: number
+        readonly limit: number
+        readonly reasoning_only?: boolean | undefined
+        readonly tokens?: { readonly input: number; readonly output: number; readonly reasoning: number } | undefined
+        readonly cost?: number | undefined
+        readonly agent?: string | undefined
       }
     }
   | {

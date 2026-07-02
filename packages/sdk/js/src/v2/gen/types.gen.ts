@@ -23,6 +23,7 @@ export type Event =
   | EventSessionNextPromptAdmitted
   | EventSessionNextContextUpdated
   | EventSessionNextSynthetic
+  | EventSessionNextStopRecovery
   | EventSessionNextShellStarted
   | EventSessionNextShellEnded
   | EventSessionNextStepStarted
@@ -316,6 +317,16 @@ export type ContentFilterError = {
   }
 }
 
+export type StopRecoveryError = {
+  name: "StopRecoveryError"
+  data: {
+    message: string
+    trigger: string
+    attempts: number
+    limit: number
+  }
+}
+
 export type ApiError = {
   name: "APIError"
   data: {
@@ -348,6 +359,7 @@ export type AssistantMessage = {
     | StructuredOutputError
     | ContextOverflowError
     | ContentFilterError
+    | StopRecoveryError
     | ApiError
   parentID: string
   modelID: string
@@ -898,6 +910,27 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.stop_recovery"
+        properties: {
+          timestamp: number
+          sessionID: string
+          messageID: string
+          trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+          action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+          attempt: number
+          limit: number
+          reasoning_only?: boolean
+          tokens?: {
+            input: number
+            output: number
+            reasoning: number
+          }
+          cost?: number
+          agent?: string
+        }
+      }
+    | {
+        id: string
         type: "session.next.shell.started"
         properties: {
           timestamp: number
@@ -1228,6 +1261,7 @@ export type GlobalEvent = {
             | StructuredOutputError
             | ContextOverflowError
             | ContentFilterError
+            | StopRecoveryError
             | ApiError
         }
       }
@@ -1645,6 +1679,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextPromptAdmitted
     | SyncEventSessionNextContextUpdated
     | SyncEventSessionNextSynthetic
+    | SyncEventSessionNextStopRecovery
     | SyncEventSessionNextShellStarted
     | SyncEventSessionNextShellEnded
     | SyncEventSessionNextStepStarted
@@ -1737,6 +1772,7 @@ export type AgentConfig = {
   maxSteps?: number
   permission?: PermissionConfig
   fallback?: Array<string>
+  stopRecovery?: boolean
   can_spawn_subagents?: boolean
   subagents?: Array<string>
   [key: string]:
@@ -2047,6 +2083,27 @@ export type Config = {
     tail_turns?: number
     preserve_recent_tokens?: number
     reserved?: number
+  }
+  stopRecovery?: {
+    enabled?: boolean
+    lengthContinue?: {
+      enabled?: boolean
+      /**
+       * Max auto-continues per real user turn for length truncation (0 disables, range 0-5, default 3)
+       */
+      max?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+      text?: string
+    }
+    noToolNudge?: {
+      enabled?: boolean
+      graceRetry?: boolean
+      limit?: number
+      text?: string
+    }
+    emptyAfterThinking?: {
+      enabled?: boolean
+      text?: string
+    }
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -2389,6 +2446,7 @@ export type Agent = {
   permission: PermissionRuleset
   canSpawnSubagents?: boolean
   subagents?: Array<string>
+  stopRecovery?: boolean
   model?: {
     modelID: string
     providerID: string
@@ -2800,6 +2858,7 @@ export type SessionDurableEvent =
   | SessionNextPromptAdmitted
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextStopRecovery
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -2927,6 +2986,7 @@ export type V2Event =
   | SessionNextPromptAdmitted
   | SessionNextContextUpdated
   | SessionNextSynthetic
+  | SessionNextStopRecovery
   | SessionNextShellStarted
   | SessionNextShellEnded
   | SessionNextStepStarted
@@ -3516,6 +3576,34 @@ export type SyncEventSessionNextSynthetic = {
       sessionID: string
       messageID: string
       text: string
+    }
+  }
+}
+
+export type SyncEventSessionNextStopRecovery = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.stop_recovery.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      messageID: string
+      trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+      action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+      attempt: number
+      limit: number
+      reasoning_only?: boolean
+      tokens?: {
+        input: number
+        output: number
+        reasoning: number
+      }
+      cost?: number
+      agent?: string
     }
   }
 }
@@ -4411,6 +4499,37 @@ export type SessionNextSynthetic = {
     sessionID: string
     messageID: string
     text: string
+  }
+}
+
+export type SessionNextStopRecovery = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.stop_recovery"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+    action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+    attempt: number
+    limit: number
+    reasoning_only?: boolean
+    tokens?: {
+      input: number
+      output: number
+      reasoning: number
+    }
+    cost?: number
+    agent?: string
   }
 }
 
@@ -5471,6 +5590,7 @@ export type SessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
+      | StopRecoveryError
       | ApiError
   }
 }
@@ -6485,6 +6605,28 @@ export type EventSessionNextSynthetic = {
   }
 }
 
+export type EventSessionNextStopRecovery = {
+  id: string
+  type: "session.next.stop_recovery"
+  properties: {
+    timestamp: number
+    sessionID: string
+    messageID: string
+    trigger: "length" | "no_tool" | "empty_after_thinking" | "unknown_finish"
+    action: "continue" | "nudge_grace" | "nudge" | "halt" | "observed"
+    attempt: number
+    limit: number
+    reasoning_only?: boolean
+    tokens?: {
+      input: number
+      output: number
+      reasoning: number
+    }
+    cost?: number
+    agent?: string
+  }
+}
+
 export type EventSessionNextShellStarted = {
   id: string
   type: "session.next.shell.started"
@@ -6844,6 +6986,7 @@ export type EventSessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
+      | StopRecoveryError
       | ApiError
   }
 }

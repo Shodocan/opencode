@@ -34,6 +34,31 @@ import { ProviderError } from "./error"
 
 const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 
+// FORK FEATURE (9) stop-recovery / L0.1 — recognized vLLM extra-body keys
+// delivered verbatim to the OpenAI-compatible request body. Includes any
+// caller-supplied `extraBody` record. See
+// docs/artifacts/01-07-2026_premature-stop-recovery/spec.md §L0.1.
+const VLLM_EXTRA_BODY_KEYS = new Set([
+  "min_p",
+  "top_k",
+  "thinking_token_budget",
+  "repetition_detection",
+  "repetition_penalty",
+  "frequency_penalty",
+  "presence_penalty",
+])
+
+function collectExtraBody(modelOptions: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!modelOptions) return undefined
+  const out: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(modelOptions)) {
+    if (VLLM_EXTRA_BODY_KEYS.has(key)) out[key] = value
+  }
+  const extra = (modelOptions as Record<string, unknown> | undefined)?.extraBody
+  if (extra && typeof extra === "object") Object.assign(out, extra)
+  return out
+}
+
 function wrapSSE(res: Response, ms: number, ctl: AbortController) {
   if (typeof ms !== "number" || ms <= 0) return res
   if (!res.body) return res
@@ -1689,6 +1714,28 @@ const layer = Layer.effect(
             ...options["headers"],
             ...model.headers,
           }
+
+        // FORK FEATURE (9) stop-recovery / L0.1 — deliver vLLM extra-body fields
+        // (min_p, top_k, thinking_token_budget, repetition_detection, ...) to the
+        // OpenAI-compatible request body. Additive per-provider-instance fetch
+        // wrapper; lowest-conflict fork mechanism (no upstream body-builder edit).
+        // See docs/artifacts/01-07-2026_premature-stop-recovery/spec.md §L0.1.
+        const extraBody = collectExtraBody(model.options)
+        const priorFetch = options["fetch"]
+        if (extraBody && Object.keys(extraBody).length > 0 && model.api.npm.includes("@ai-sdk/openai-compatible")) {
+          options["fetch"] = async (input: RequestInfo | URL, init?: RequestInit) => {
+            if (init?.body && typeof init.body === "string") {
+              try {
+                const parsed = JSON.parse(init.body)
+                init = { ...init, body: JSON.stringify({ ...parsed, ...extraBody }) }
+              } catch {
+                // body is not JSON (e.g. multipart); leave untouched
+              }
+            }
+            const fetchFn = (priorFetch ?? globalThis.fetch) as typeof fetch
+            return fetchFn(input, init)
+          }
+        }
 
         const key = Hash.fast(
           JSON.stringify({

@@ -61,6 +61,14 @@ export const ContextOverflowError = namedError("ContextOverflowError", {
 export const ContentFilterError = namedError("ContentFilterError", {
   message: Schema.String,
 })
+// FORK FEATURE (9) stop-recovery — hard-stop error when the nudge family hits
+// its limit. Follows the ContentFilterError precedent (spec §5.2).
+export const StopRecoveryError = namedError("StopRecoveryError", {
+  message: Schema.String,
+  trigger: Schema.String,
+  attempts: NonNegativeInt,
+  limit: NonNegativeInt,
+})
 
 export class OutputFormatText extends Schema.Class<OutputFormatText>("OutputFormatText")({
   type: Schema.Literal("text"),
@@ -390,6 +398,7 @@ const AssistantErrorSchema = Schema.Union([
   StructuredOutputError.EffectSchema,
   ContextOverflowError.EffectSchema,
   ContentFilterError.EffectSchema,
+  StopRecoveryError.EffectSchema,
   APIError.EffectSchema,
 ]).annotate({ discriminator: "name" })
 type AssistantError = Schema.Schema.Type<typeof AssistantErrorSchema>

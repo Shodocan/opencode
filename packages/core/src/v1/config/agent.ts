@@ -42,6 +42,13 @@ const AgentSchema = Schema.StructWithRest(
     fallback: Schema.optional(Schema.mutable(Schema.Array(Schema.String))).annotate({
       description: "Ordered fallback model refs to retry when the active model fails with a retriable error.",
     }),
+    // FORK FEATURE (9) stop-recovery — per-agent disable-only override for
+    // the L1 premature-stop recovery. Inherits the root `stopRecovery` block;
+    // `false` disables recovery for this agent. See
+    // docs/artifacts/01-07-2026_premature-stop-recovery/spec.md §7.
+    stopRecovery: Schema.optional(Schema.Boolean).annotate({
+      description: "Disable stop-recovery for this agent (default: inherits root stopRecovery.enabled).",
+    }),
     can_spawn_subagents: Schema.optional(Schema.Boolean).annotate({
       description:
         "Allow this subagent to dispatch its own subagents via the task tool (default: false). When true, grants task-tool permission unless `permission.task` is already set (in which case your scoping wins). Primary agents can always spawn; this field is meaningful for `mode: subagent`.",
@@ -74,6 +81,7 @@ const KNOWN_KEYS = new Set([
   "tools",
   "can_spawn_subagents",
   "subagents",
+  "stopRecovery",
 ])
 
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {

@@ -26,6 +26,7 @@ branch, no longer a clean single-feature PR.
 | **(6) fallback-model** | `0a3136a9bb` (config, dark), `dd56f3eb44` (threading), `b07050661f` (H7 trigger), `0be3e3a73b` (v1 AgentSchema + KNOWN_KEYS) |
 | **(7) MinIO auto-update** | `173b2b03c5` (install detection + manifest latest + in-place binary swap) |
 | **(8) session.status AbortError suppress** | `ac5c41d51a` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
+| **(9) stop-recovery** | (this branch) L0 extra-body delivery for vLLM + L1 premature-stop recovery (length auto-continue, no-tool nudge, empty-after-thinking) |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -45,6 +46,14 @@ Highest conflict exposure — review these first on every merge:
 - `packages/core/src/session/compaction.ts` — head-only tiering hook
 - `packages/core/src/session/runner/llm.ts` — fallback H7 + the two `catchDefect` arms
 - `packages/opencode/src/installation/index.ts` — **Feature (7)**: custom-MinIO path detection (`isCustomMinioInstall`/`customLibDir`), `manifest.json` branch in `latest()`, `upgradeCustomMinio` in-place binary-swap branch in `upgrade()`'s `case "curl"`
+- `packages/opencode/src/session/prompt.ts` — **Feature (9)**: stop-recovery guard block inside the runLoop exit guard + `Todo.Service`/`Todo.node` wiring
+- `packages/opencode/src/session/compaction.ts` — **Feature (9)**: shared `isSyntheticContinuation` predicate (compaction + stop-recovery markers)
+- `packages/schema/src/session-event.ts` — **Feature (9)**: `StopRecovery` durable event added to `Definitions`/`DurableDefinitions`/`Durable` union
+- `packages/schema/src/v1/session.ts` — **Feature (9)**: `StopRecoveryError` added to `AssistantErrorSchema` union
+- `packages/opencode/src/provider/provider.ts` — **Feature (9)**: `collectExtraBody` + per-instance fetch-wrapper for vLLM extra-body fields
+- `packages/core/src/v1/config/config.ts` — **Feature (9)**: root `stopRecovery` block
+- `packages/core/src/v1/config/agent.ts` — **Feature (9)**: agent `stopRecovery` KNOWN_KEY
+- `packages/tui/src/routes/session/visible-user-text.ts` — **Feature (9)**: visible-muted-automated rendering for recovery parts
 
 ---
 
@@ -190,3 +199,51 @@ the build (e.g. `OPENCODE_VERSION=1.17.11-RC1`).
 `{ version, url, sha256 }`, flip `install.sh` `DEFAULT_URL`/`DEFAULT_SHA256`.
 The binary's `latest()` reads `manifest.json`; `upgrade()` swaps the binary in
 place (wrapper + user PREFIX customizations untouched).
+
+### Feature (9) — stop-recovery (L0 + L1)
+
+Opt-in fork feature for the Qwen/vLLM local model: (L0) delivers vLLM
+anti-loop sampling parameters end-to-end via a per-provider-instance
+extra-body fetch-wrapper, and (L1) recovers bounded-and-visibly from
+premature turn ends (length truncation, no-tool-use with pending work,
+empty-after-thinking) in the V1 session loop. Default OFF; zero behavior
+change when `stopRecovery` is absent/disabled.
+
+Spec: `docs/artifacts/01-07-2026_premature-stop-recovery/spec.md`.
+Recipe: `docs/fork/qwen-vllm-recipe.md`.
+
+| File | Risk | What fork changed | Future-merge recipe |
+|---|---|---|---|
+| `packages/opencode/src/session/stop-recovery.ts` | low (**new**) | Pure decision module (`StopRecovery.evaluate`) + Effect shell (`decide`) that gathers facts, publishes `session.next.stop_recovery` telemetry, and injects synthetic continue/nudge messages by direct insertion (compaction precedent). In-memory per-session state. | New file — keep as-is. |
+| `packages/opencode/src/session/prompt.ts` | **high** | ONE block inside the runLoop exit guard (`if (lastAssistant?.finish && ...)`) before the orphan-logging/`break`: calls `stopRecoveryDecide(...)`, `continue`s if `"injected"`. Plus `Todo.Service`/`Todo.node` wiring (the no-tool nudge's pending-work signal). | Re-graft the single guard block after upstream's exit-guard restructure. The block's only coupling is `lastAssistant/lastUser/msgs/step/tasks` names + the resolved services (`sessions/agents/permission/events/config/todo`). Keep `Todo.Service` acquisition + `Todo.node` dep. |
+| `packages/opencode/src/session/compaction.ts` | med | Added `isStopRecoveryContinuation` + shared `isSyntheticContinuation`; the 3 `isCompactionContinuation` call sites (turn accounting `:100`, replay selection `:325`,`:336`) now use the shared predicate. `__test` export for the B3 unit test. | Keep the two predicates + the `__test` export; re-point the 3 call sites to `isSyntheticContinuation` after upstream's compaction restructure. |
+| `packages/opencode/src/provider/provider.ts` | med | `collectExtraBody` helper + `VLLM_EXTRA_BODY_KEYS` set; per-instance `options["fetch"]` wrapper in `resolveSDK` that deep-merges extra-body fields (`min_p`/`top_k`/`thinking_token_budget`/`repetition_detection`/penalties + caller `extraBody`) into the JSON body before dispatch, gated on `@ai-sdk/openai-compatible`. | Keep `collectExtraBody` + the fetch-wrapper block in `resolveSDK` (after the headers assignment, before the existing timeout fetch-wrapper). The wrapper is additive and only fires for openai-compatible providers with extra-body keys. |
+| `packages/opencode/src/agent/agent.ts` | low | `stopRecovery` on runtime `Info` schema + merge line (`item.stopRecovery = value.stopRecovery ?? item.stopRecovery`). | Re-add the field + merge line alongside `canSpawnSubagents`/`subagents`. |
+| `packages/schema/src/session-event.ts` | **high** | `StopRecovery` event defined (type `session.next.stop_recovery`) + registered in `Definitions`, `DurableDefinitions`, `Durable` union. | Add the `define` block + 3 inventory entries (Definitions, DurableDefinitions) alongside `ModelSwitched`. |
+| `packages/schema/src/v1/session.ts` | med | `StopRecoveryError` via `namedError` + added to `AssistantErrorSchema` union. | Add the `namedError` + the union member alongside `ContentFilterError`. |
+| `packages/core/src/v1/session.ts` | low | `StopRecoveryError` via `NamedError.create` (mirrors `ContentFilterError`). | Add alongside `ContentFilterError`. |
+| `packages/core/src/v1/config/config.ts` | low | Root `stopRecovery` block (enabled/lengthContinue/noToolNudge/emptyAfterThinking). | Re-add the block after `compaction`. |
+| `packages/core/src/v1/config/agent.ts` | low | Agent `stopRecovery?: boolean` + `KNOWN_KEYS` entry. | Re-add the field + KNOWN_KEYS string alongside `fallback`/`can_spawn_subagents`. |
+| `packages/core/src/v1/config/migrate.ts` | low | v1→v2 passthrough for root `stopRecovery` + agent `stopRecovery`. | Re-add the two passthrough blocks alongside the `fallback`/`compaction` ones. |
+| `packages/core/src/config/stop-recovery.ts` | low (**new**) | v2 `ConfigStopRecovery.Info` schema. | New file — keep as-is. |
+| `packages/core/src/config.ts` | low | `stopRecovery: ConfigStopRecovery.Info` field on `Config.Info` + import. | Re-add the field + import alongside `compaction`. |
+| `packages/core/src/config/agent.ts` | low | `stopRecovery` on `ConfigV2.Agent`. | Re-add alongside `fallback`. |
+| `packages/core/src/session/message-updater.ts` | low | `"session.next.stop_recovery": () => Effect.void` handler in the exhaustive `SessionEvent.All.match` (telemetry-only; no message projection). | Re-add the handler key after `session.next.revert.committed`. |
+| `packages/tui/src/routes/session/visible-user-text.ts` | low | `STOP_RECOVERY_MARKER` + `stopRecoveryHeader` for visible-muted-automated rendering. | Keep the marker + header helper; the `isVisibleUserTextPart` branch and `visibleUserTextParts` header fallback. |
+| `packages/opencode/test/stop-recovery.test.ts` | low (**new**) | Pure decision table tests (§5.0-§5.6). | New file. |
+| `packages/opencode/test/stop-recovery-loop.test.ts` | low (**new**) | Shell `decide` acceptance tests (B1/C1/C2/C3/C9/E1/E9/B6). | New file. |
+| `packages/opencode/test/stop-recovery-l0-capture.test.ts` | low (**new**) | L0 extra-body delivery capture (A1/A2/A3). | New file. |
+| `packages/opencode/test/stop-recovery-compaction.test.ts` | low (**new**) | B3 compaction exclusion predicate. | New file. |
+| `packages/core/test/config/stop-recovery.test.ts` | low (**new**) | Config schema + migration tests. | New file. |
+| `packages/tui/test/visible-user-text.test.ts` | low | Extended with stop-recovery rendering cases. | Keep the 3 new test cases. |
+| `packages/schema/test/event-manifest.test.ts` | med | Counts bumped to 59/91/91/36 + slice index 44-47. | Re-bump counts + re-align the slice index after any upstream event add/remove. |
+| `packages/opencode/test/event-manifest.test.ts` | med | `Latest` 90→91. | Re-bump after any upstream event add/remove. |
+| `docs/fork/qwen-vllm-recipe.md` | low (**new**) | vLLM serving recipe + staged rollout. | New file. |
+
+**Doom-loop enforcement mechanism:** `Permission.list()` filter
+(`permission === "doom_loop" && sessionID === sessionID`) in the `decide` shell
+(spec §5.5 rule (a)). Falls back to empty array on error.
+
+**SDK regen:** run `bun ./packages/sdk/js/script/build.ts` then `bun run
+generate` in `packages/client` after any schema/event change — the generated
+`SessionDurableEvent` union and `StopRecoveryError` must include the new types.

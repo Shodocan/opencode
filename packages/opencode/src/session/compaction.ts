@@ -66,6 +66,26 @@ function isCompactionContinuation(message: SessionV1.WithParts) {
   )
 }
 
+// FORK FEATURE (9) stop-recovery — sibling marker for recovery continuations.
+// Excluded from compaction turn accounting and overflow replay selection, same
+// as compaction_continue (spec §5.1/§6, B3).
+function isStopRecoveryContinuation(message: SessionV1.WithParts) {
+  return (
+    message.info.role === "user" &&
+    message.parts.some((part) => part.type === "text" && part.synthetic && part.metadata?.stop_recovery_continue === true)
+  )
+}
+
+// Shared predicate: any synthetic continuation marker (compaction or
+// stop-recovery). Used at the turn-accounting and replay-selection seams.
+function isSyntheticContinuation(message: SessionV1.WithParts) {
+  return isCompactionContinuation(message) || isStopRecoveryContinuation(message)
+}
+
+// Exported for the B3 unit test (spec §5.1: stop_recovery_continue excluded
+// from compaction turn accounting exactly like compaction_continue).
+export const __test = { isCompactionContinuation, isStopRecoveryContinuation, isSyntheticContinuation }
+
 function completedCompactions(messages: SessionV1.WithParts[]) {
   const users = new Map<MessageID, number>()
   for (let i = 0; i < messages.length; i++) {
@@ -96,8 +116,8 @@ function turns(messages: SessionV1.WithParts[]) {
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]
     if (msg.info.role !== "user") continue
-    if (msg.parts.some((part) => part.type === "compaction")) continue
-    if (isCompactionContinuation(msg)) continue
+     if (msg.parts.some((part) => part.type === "compaction")) continue
+     if (isSyntheticContinuation(msg)) continue
     result.push({
       start: i,
       end: messages.length,
@@ -322,7 +342,7 @@ const layer = Layer.effect(
           if (
             msg.info.role === "user" &&
             !msg.parts.some((p) => p.type === "compaction") &&
-            !isCompactionContinuation(msg)
+            !isSyntheticContinuation(msg)
           ) {
             replay = { info: msg.info, parts: msg.parts }
             messages = input.messages.slice(0, i)
@@ -333,7 +353,7 @@ const layer = Layer.effect(
           replay &&
           messages.some(
             (m) =>
-              m.info.role === "user" && !m.parts.some((p) => p.type === "compaction") && !isCompactionContinuation(m),
+              m.info.role === "user" && !m.parts.some((p) => p.type === "compaction") && !isSyntheticContinuation(m),
           )
         if (!hasContent) {
           replay = undefined

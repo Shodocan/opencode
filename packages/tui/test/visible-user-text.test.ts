@@ -29,4 +29,33 @@ describe("visible user text parts", () => {
       { text: "normal user text", muted: false },
     ])
   })
+
+  test("FORK FEATURE (9): stop-recovery synthetic part is visible + muted + automated header (UC4)", () => {
+    expect(
+      visibleUserTextParts([
+        {
+          id: "prt_recovery",
+          type: "text",
+          text: "Continue from where you left off.",
+          synthetic: true,
+          metadata: { stop_recovery_continue: true, stop_recovery: { trigger: "length", attempt: 1 } },
+        },
+      ] as never),
+    ).toEqual([{ text: "Continue from where you left off.", muted: true, header: "auto · stop recovery length 1" }])
+  })
+
+  test("FORK FEATURE (9): plain synthetic part without marker stays hidden", () => {
+    expect(
+      visibleUserTextParts([
+        { id: "p", type: "text", text: "x", synthetic: true } as never,
+      ]),
+    ).toEqual([])
+  })
+
+  test("FORK FEATURE (9): stop-recovery header without info falls back", () => {
+    const out = visibleUserTextParts([
+      { id: "p", type: "text", text: "x", synthetic: true, metadata: { stop_recovery_continue: true } } as never,
+    ])
+    expect(out).toEqual([{ text: "x", muted: true, header: "auto · stop recovery" }])
+  })
 })

@@ -12,7 +12,9 @@ describe("public event manifest", () => {
     // FORK FEATURE (1) MCP/TUI notifications — added PromptSynthetic +
     // AgentState (tui.prompt.synthetic, tui.agent.state) as public wire types,
     // bumping Latest from 88 to 90.
-    expect(EventManifest.Latest.size).toBe(90)
+    // FORK FEATURE (9) stop-recovery — added session.next.stop_recovery durable
+    // event, bumping Latest from 90 to 91.
+    expect(EventManifest.Latest.size).toBe(91)
     expect(EventManifest.Latest.get("session.next.step.ended")).toBe(SessionEvent.Step.Ended)
     expect(EventManifest.Latest.get("todo.updated")).toBe(Todo.Event.Updated)
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)

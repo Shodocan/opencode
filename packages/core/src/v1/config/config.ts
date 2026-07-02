@@ -163,6 +163,55 @@ export const Info = Schema.Struct({
       }),
     }),
   ),
+  // FORK FEATURE (9) stop-recovery — opt-in premature-stop recovery (L1) for
+  // the V1 session loop. Default disabled; zero behavior change when absent.
+  // See docs/artifacts/01-07-2026_premature-stop-recovery/spec.md §7.
+  stopRecovery: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Master opt-in for stop-recovery (default: false). All components are dead when false.",
+      }),
+      lengthContinue: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Enable length-truncation auto-continue (default: true, effective only when stopRecovery.enabled)",
+          }),
+          max: Schema.optional(Schema.Number.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(5))).annotate({
+            description: "Max auto-continues per real user turn for length truncation (0 disables, range 0-5, default 3)",
+          }),
+          text: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(500))).annotate({
+            description: "Override text for the length auto-continue synthetic message",
+          }),
+        }),
+      ),
+      noToolNudge: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Enable no-tool-use nudge (default: true, effective only when stopRecovery.enabled)",
+          }),
+          graceRetry: Schema.optional(Schema.Boolean).annotate({
+            description: "First nudge per real user turn does not count toward the limit (default: true)",
+          }),
+          limit: Schema.optional(NonNegativeInt).annotate({
+            description: "Consecutive no-progress nudges before hard stop (0 = unlimited, default 3)",
+          }),
+          text: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(500))).annotate({
+            description: "Override text for the no-tool / empty-after-thinking nudge synthetic message",
+          }),
+        }),
+      ),
+      emptyAfterThinking: Schema.optional(
+        Schema.Struct({
+          enabled: Schema.optional(Schema.Boolean).annotate({
+            description: "Enable empty-after-thinking nudge (default: true, effective only when stopRecovery.enabled)",
+          }),
+          text: Schema.optional(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(500))).annotate({
+            description: "Override text for the empty-after-thinking nudge synthetic message",
+          }),
+        }),
+      ),
+    }),
+  ),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

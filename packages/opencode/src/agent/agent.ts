@@ -44,6 +44,8 @@ export const Info = Schema.Struct({
   permission: PermissionV1.Ruleset,
   canSpawnSubagents: Schema.optional(Schema.Boolean),
   subagents: Schema.optional(Schema.Array(Schema.String)),
+  // FORK FEATURE (9) stop-recovery — per-agent disable-only override.
+  stopRecovery: Schema.optional(Schema.Boolean),
   model: Schema.optional(
     Schema.Struct({
       modelID: ModelV2.ID,
@@ -295,6 +297,8 @@ const layer = Layer.effect(
           item.permission = Permission.merge(item.permission, Permission.fromConfig(value.permission ?? {}))
           item.canSpawnSubagents = value.can_spawn_subagents ?? item.canSpawnSubagents
           item.subagents = value.subagents ?? item.subagents
+          // FORK FEATURE (9) stop-recovery — carry the disable-only override.
+          item.stopRecovery = value.stopRecovery ?? item.stopRecovery
           if (value.can_spawn_subagents) {
             // Grant task-tool permission unless the subagent already scopes it.
             // If the user also set permission.task, their scoping wins (those

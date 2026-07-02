@@ -395,6 +395,10 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       "session.next.revert.staged": () => Effect.void,
       "session.next.revert.cleared": () => Effect.void,
       "session.next.revert.committed": () => Effect.void,
+      // FORK FEATURE (9) stop-recovery — telemetry-only durable event; the
+      // synthetic nudge message is inserted directly by the loop (§5.0), not
+      // projected here, so this handler is a no-op.
+      "session.next.stop_recovery": () => Effect.void,
     })
   })
 }
