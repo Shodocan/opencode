@@ -148,19 +148,29 @@ export const TaskTool = Tool.define(
         )
       }
 
-      const session = params.task_id
+      // Resolve a resumable child session, if a task_id was passed. Only a
+      // session whose parent is THIS dispatching session is a legitimate
+      // resume — anything else (no parent match, or not found) is treated as
+      // a fresh dispatch so gates still evaluate (F2: a driver LLM cannot
+      // "resume" its way past a gate by naming an unrelated SessionID).
+      const requestedResume = params.task_id
         ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
         : undefined
+      const session = requestedResume && requestedResume.parentID === ctx.sessionID ? requestedResume : undefined
       const parent = yield* sessions.get(ctx.sessionID)
 
       // FORK FEATURE (10) gates — workflow-agnostic dispatch enforcement.
       // Evaluated at dispatch time (after the subagents allow-list, before the
-      // child session is created). Skipped on resume (params.task_id set) since
-      // that continues an existing child session, not a new dispatch. A blocked
+      // child session is created). Skipped ONLY on a legitimate resume (a
+      // child session that belongs to this dispatching parent). A blocked
       // dispatch returns a structured BLOCKED result as the tool output (NOT a
       // hard session error) so the parent LLM can self-repair. No-op when
       // neither parent nor child carries `gates` (zero behavior change).
       if (!session) {
+        // F1: evaluateGates catches its own fs errors internally and returns a
+        // recoverable BLOCKED result (never throws) — the error contract the
+        // harness depends on requires BLOCKED, never a hard crash the parent
+        // can't self-repair from.
         const blocked = yield* Gates.evaluateGates({
           parent: { id: parent.id, directory: parent.directory },
           parentGates: parentAgent?.gates as Gates.Gates | undefined,
@@ -168,7 +178,7 @@ export const TaskTool = Tool.define(
           childGates: next.gates as Gates.Gates | undefined,
           prompt: params.prompt,
           priorChildren: yield* sessions.children(parent.id),
-        }).pipe(Effect.orDie)
+        })
         if (blocked) {
           // Return the BLOCKED result as the tool output (NOT a hard error) so
           // the parent LLM can self-repair. The metadata mirrors the success

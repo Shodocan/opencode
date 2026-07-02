@@ -322,3 +322,14 @@ fork only evaluates artifacts/counts/prior-dispatches. Unknown `gates`
 sub-keys warn once and ignore. Stock-OpenCode compatibility: `gates` is
 `Schema.optional` everywhere — nothing else in the agent definition depends on
 gate evaluation having run.
+
+**Hardening (F1/F2):**
+- **F1 (fail-closed not fail-crash):** `evaluateGates` catches `Glob.scan`
+  errors internally and returns a recoverable BLOCKED result via
+  `Gates.evaluationError` (gate `requires_artifacts`, detail names the fs cause).
+  The dispatch never throws on an fs error — the parent LLM always gets a
+  self-repairable BLOCKED object (the error contract the harness depends on).
+- **F2 (resume bypass):** a `task_id` resume only skips gates when the resumed
+  session's `parentID === ctx.sessionID` (it belongs to the dispatching
+  parent). An unrelated SessionID falls through to a fresh dispatch and gates
+  still evaluate — a driver LLM cannot "resume" its way past a gate.

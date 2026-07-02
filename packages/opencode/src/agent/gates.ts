@@ -243,7 +243,10 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
     }
 
     // 3. requires_artifacts — on the CHILD. Globs may carry `<run_root>`,
-    //    substituted from the dispatch brief's `run_root:` field.
+    //    substituted from the dispatch brief's `run_root:` field. F1: the glob
+    //    scan is caught — an fs error (EACCES, ENOTDIR, bad base path) returns a
+    //    recoverable BLOCKED result instead of crashing the dispatch. The error
+    //    contract the harness depends on requires BLOCKED, never a hard throw.
     if (childGates.requires_artifacts) {
       const runRoot = extractRunRoot(prompt)
       for (const entry of childGates.requires_artifacts) {
@@ -255,11 +258,21 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
           })
         }
         const pattern = entry.glob.replaceAll("<run_root>", runRoot ?? "")
-        const matches = yield* Effect.promise(() => Glob.scan(pattern, { cwd: parent.directory, absolute: true, dot: true }))
-        if (matches.length < minCount) {
+        // F1: catch fs errors (EACCES, ENOTDIR, bad base path) and return a
+        // recoverable BLOCKED result instead of crashing the dispatch. The
+        // error contract the harness depends on requires BLOCKED, never a throw.
+        const scan = yield* Effect.promise(async () => {
+          try {
+            return { ok: true as const, found: await Glob.scan(pattern, { cwd: parent.directory, absolute: true, dot: true }) }
+          } catch (cause) {
+            return { ok: false as const, cause }
+          }
+        })
+        if (!scan.ok) return evaluationError(childName, scan.cause)
+        if (scan.found.length < minCount) {
           const rootDetail = runRoot ? ` (run_root=${runRoot})` : ""
           return blocked("requires_artifacts", childName, [entry.glob], {
-            detail: `requires_artifacts: ${matches.length} of ${minCount} matches for ${pattern}${rootDetail}`,
+            detail: `requires_artifacts: ${scan.found.length} of ${minCount} matches for ${pattern}${rootDetail}`,
           })
         }
       }
@@ -288,6 +301,26 @@ export function renderBlocked(result: BlockedResult): string {
     `<hint>The dispatch was blocked by a gate. Inspect \`gate\`, \`missing\`, and \`detail\`. The condition is recoverable: produce the missing artifact, dispatch the missing prior stage, or respect the required first dispatch, then retry.</hint>`,
     `</task>`,
   ].join("\n")
+}
+
+/**
+ * Build a BLOCKED result for an evaluation-time failure (e.g. a glob fs error:
+ * EACCES, ENOTDIR, bad base path). The error contract requires a recoverable
+ * BLOCKED object, NOT a hard crash — the parent LLM must be able to self-repair
+ * (e.g. fix permissions, correct the run_root, retry). `gate` is `requires_artifacts`
+ * since that is the only gate that touches the filesystem today; if other
+ * gates grow fs dependencies, branch on the cause here.
+ */
+export function evaluationError(childName: string, cause: unknown): BlockedResult {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return {
+    status: "BLOCKED",
+    gate: "requires_artifacts",
+    agent: childName,
+    missing: [],
+    detail: `requires_artifacts: evaluation failed (${message}). The gate could not be checked — fix the underlying condition (e.g. file permissions, run_root path) and retry.`,
+    recoverable: true,
+  }
 }
 
 function describe(value: unknown): string {

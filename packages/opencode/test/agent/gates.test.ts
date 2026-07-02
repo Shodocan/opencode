@@ -337,6 +337,75 @@ describe("fork feature (10) gates", () => {
     },
   )
 
+  // F1: requires_artifacts glob that throws must return a recoverable BLOCKED
+  // result, NOT a hard crash. The error contract the harness depends on
+  // requires BLOCKED, never a throw the parent can't self-repair from.
+  //
+  // The `glob` library swallows most fs errors and returns [] (which surfaces
+  // as a "0 of N matches" BLOCKED, not an evaluation error). Genuine throws
+  // (malformed patterns, or a future glob impl) are caught inside
+  // evaluateGates and surfaced as evaluationError(). We unit-test the catch
+  // contract directly: the evaluationError helper produces the exact BLOCKED
+  // shape evaluateGates returns on a throw.
+  itBun("F1: evaluationError produces a recoverable BLOCKED shape on a glob throw", () => {
+    const cause = new Error("EACCES: permission denied")
+    const result = Gates.evaluationError("fserror-gated", cause)
+    expect(result.status).toBe("BLOCKED")
+    expect(result.gate).toBe("requires_artifacts")
+    expect(result.agent).toBe("fserror-gated")
+    expect(result.missing).toEqual([])
+    expect(result.recoverable).toBe(true)
+    expect(result.detail).toContain("evaluation failed")
+    expect(result.detail).toContain("EACCES")
+    // renderBlocked round-trips the structured object into the tool output the
+    // parent LLM sees — assert the parent gets a self-repairable signal.
+    const output = Gates.renderBlocked(result)
+    expect(output).toContain("BLOCKED")
+    expect(output).toContain("recoverable")
+  })
+
+  // F2: a driver LLM cannot bypass gates by naming an unrelated SessionID as
+  // task_id. Only a session whose parent is THIS dispatching session is a
+  // legitimate resume; anything else falls through to a fresh dispatch and
+  // gates still evaluate.
+  it.instance(
+    "F2: resume with an unrelated SessionID does not bypass gates",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        // An unrelated session that does NOT belong to the dispatching parent.
+        const stranger = yield* sessions.create({ title: "stranger", agent: "unrelated" })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        // Naming the stranger as task_id must NOT skip the gate — the dispatch
+        // falls through to a fresh dispatch and the gate blocks it.
+        const result = yield* def.execute(
+          {
+            description: "bypass attempt",
+            prompt: "go",
+            subagent_type: "gated",
+            task_id: stranger.id,
+          },
+          ctx(chat, assistant),
+        )
+        expect(result.metadata.blocked).toBe(true)
+        expect(result.output).toContain("BLOCKED")
+        expect(result.output).toContain("requires_artifacts")
+      }),
+    {
+      config: {
+        agent: {
+          gated: {
+            mode: "subagent",
+            gates: { requires_artifacts: [{ glob: "gate-consolidation.json", min_count: 1 }] },
+          },
+        },
+      },
+    },
+  )
+
   // Acceptance 6: malformed gates block → startup error naming the agent
   // (fail-fast at config parse, not at dispatch time).
   describe("parseGates fail-fast", () => {
