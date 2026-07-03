@@ -192,11 +192,13 @@ selftest:
 	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	tmp_prefix="/tmp/och-selftest-$$V-$$$$"; \
 	echo "$(B)=== self-test: install.sh into $$tmp_prefix ===$(N)"; \
-	OPENCODE_CUSTOM_PREFIX="$$tmp_prefix" rtk curl -fsSL $(BASE_URL)/$(INSTALL_KEY) | sh >/tmp/och-selftest.log 2>&1 && { \
+	mc cat $(REMOTE)/$(BUCKET_PATH)/$(INSTALL_KEY) > /tmp/och-selftest-install.sh 2>/dev/null; \
+	export OPENCODE_CUSTOM_PREFIX="$$tmp_prefix"; \
+	sh /tmp/och-selftest-install.sh >/tmp/och-selftest.log 2>&1 && { \
 	  v=$$("$$tmp_prefix/lib/opencode-custom/opencode" --version 2>/dev/null); \
 	  [ "$$v" = "$$V" ] && echo "$(G)self-test ok: installed binary reports $$V$(N)" || { echo "$(R)self-test version mismatch: got '$$v' expected '$$V'$(N)"; rtk read /tmp/och-selftest.log; exit 1; }; \
 	} || { echo "$(R)self-test install failed$(N)"; rtk read /tmp/och-selftest.log; exit 1; }; \
-	rm -rf "$$tmp_prefix" /tmp/och-selftest.log
+	rm -rf "$$tmp_prefix" /tmp/och-selftest.log /tmp/och-selftest-install.sh
 
 # --- optional: purge Cloudflare cache for the tarball (needs CF creds) ------
 .PHONY: purge-cache
