@@ -24,11 +24,17 @@ while true; do
     | tail -1 || true)"
 
   if [[ -n "$latest" ]]; then
-    marker="$(cat "$STATE_FILE" 2>/dev/null || echo "v0.0.0")"
+    marker="$(cat "$STATE_FILE" 2>/dev/null || echo "0.0.0")"
+    # Normalize both sides to the bare base version (no "v" prefix, no "-RCn"
+    # suffix) so a clean release and its bug-fix republishes compare equal.
+    # The Makefile record step writes "1.17.13-RC2" (fork version); gh emits
+    # "v1.17.13" (upstream tag). Strip "v" and "-RCn" from both before comparing.
+    norm_latest="${latest#v}"; norm_latest="${norm_latest%%-RC*}"
+    norm_marker="${marker#v}"; norm_marker="${norm_marker%%-RC*}"
     # Only emit when upstream has moved past the state marker. Any output line =
     # "new stable release detected — wake the agent". The monitor --regex matches
     # any semver tag; silence means idle.
-    if [[ "$latest" != "$marker" ]]; then
+    if [[ "$norm_latest" != "$norm_marker" ]]; then
       echo "$latest"
     fi
   fi
