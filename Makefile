@@ -110,7 +110,7 @@ build:
 	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	echo "$(B)=== building $$V ===$(N)"; \
 	cd $(PKG_DIR) && OPENCODE_VERSION="$$V" bun script/build.ts --single --skip-embed-web-ui --skip-install; \
-	out=$$(./$(notdir $(BUILD_BIN)) --version); \
+	out=$$(dist/opencode-linux-x64/bin/opencode --version); \
 	[ "$$out" = "$$V" ] || { echo "$(R)smoke fail: binary reports '$$out' expected '$$V'$(N)"; exit 1; }; \
 	echo "$(G)build + smoke ok: $$out$(N)"
 
