@@ -357,11 +357,13 @@ describe("fork feature (10) gates", () => {
     expect(result.recoverable).toBe(true)
     expect(result.detail).toContain("evaluation failed")
     expect(result.detail).toContain("EACCES")
+    expect(result.recoverable_hint).toBeDefined()
+    expect(result.recoverable_hint).toContain("artifact")
     // renderBlocked round-trips the structured object into the tool output the
-    // parent LLM sees — assert the parent gets a self-repairable signal.
+    // parent LLM sees — assert the parent gets a self-repairable, unambiguous error.
     const output = Gates.renderBlocked(result)
     expect(output).toContain("BLOCKED")
-    expect(output).toContain("recoverable")
+    expect(output).toContain("<error")
   })
 
   // F2: a driver LLM cannot bypass gates by naming an unrelated SessionID as
@@ -444,16 +446,40 @@ describe("fork feature (10) gates", () => {
         requires_artifacts: [{ glob: "<run_root>/x.json", min_count: 1 }],
         requires_prior_dispatch: [{ agent_pattern: "review-*", min_count: 10, scope: "session" }],
         first_dispatch_must_be: "task-advisor",
+        contract_ref: "contracts/adversarial-review-output.md",
       })
       expect(parsed).toBeDefined()
       expect(parsed!.requires_artifacts).toHaveLength(1)
       expect(parsed!.requires_prior_dispatch).toHaveLength(1)
       expect(parsed!.first_dispatch_must_be).toBe("task-advisor")
+      expect(parsed!.contract_ref).toBe("contracts/adversarial-review-output.md")
     })
 
     itBun("returns undefined for absent gates", () => {
       expect(Gates.parseGates(agent, undefined)).toBeUndefined()
       expect(Gates.parseGates(agent, null)).toBeUndefined()
+    })
+
+    // The BLOCKED output is the ONLY signal the caller gets. It must be an
+    // unambiguous error (not soft XML), name the gate, reference the contract,
+    // and give a prescriptive recovery instruction — so the caller LLM knows
+    // exactly what failed and what to do.
+    itBun("renderBlocked produces an <error> with gate, contract_ref, and prescriptive hint", () => {
+      const result = Gates.evaluationError("review-judge", new Error("EACCES: permission denied"), "contracts/adversarial-review-output.md")
+      const output = Gates.renderBlocked(result)
+      // Must be an error, not a soft "task state=blocked"
+      expect(output).toContain("<error")
+      expect(output).not.toContain("<task state=")
+      // Must name the gate + agent + contract
+      expect(output).toContain("requires_artifacts")
+      expect(output).toContain("review-judge")
+      expect(output).toContain("contracts/adversarial-review-output.md")
+      // Must have a prescriptive "What to do" section
+      expect(output).toContain("What to do")
+      expect(output).toContain("recoverable")
+      // Must round-trip the structured JSON so the caller can parse it
+      expect(output).toContain("BLOCKED")
+      expect(output).toContain("recoverable_hint")
     })
   })
 })

@@ -52,12 +52,20 @@ export interface Gates {
   requires_artifacts?: RequireArtifactsEntry[]
   requires_prior_dispatch?: RequirePriorDispatchEntry[]
   first_dispatch_must_be?: string
+  /**
+   * Optional reference to the contract/workflow that defines these gates.
+   * The harness sets this so the BLOCKED result can tell the caller WHICH
+   * contract to consult. Free-form string, e.g.
+   * "contracts/adversarial-review-output.md" or "workflows/adversarial-pr-review.md".
+   */
+  contract_ref?: string
 }
 
 const KNOWN_GATE_KEYS = new Set([
   "requires_artifacts",
   "requires_prior_dispatch",
   "first_dispatch_must_be",
+  "contract_ref",
 ])
 
 // Unknown sub-keys warned once across the process (forward compatibility).
@@ -156,6 +164,13 @@ export function parseGates(agent: string, raw: unknown): Gates | undefined {
     gates.first_dispatch_must_be = obj.first_dispatch_must_be
   }
 
+  if (obj.contract_ref !== undefined) {
+    if (typeof obj.contract_ref !== "string") {
+      throw new GatesConfigError(agent, "contract_ref must be a string")
+    }
+    gates.contract_ref = obj.contract_ref
+  }
+
   return gates
 }
 
@@ -170,6 +185,16 @@ export interface BlockedResult {
   missing: string[]
   detail: string
   recoverable: true
+  /**
+   * The contract/workflow that defines this gate, if the agent's `gates` block
+   * carried a `contract_ref`. Lets the caller know WHICH document to consult.
+   */
+  contract_ref?: string
+  /**
+   * A prescriptive, human/LLM-readable instruction on what to do to recover.
+   * Specific to the gate type — see {@link recoverableHint}.
+   */
+  recoverable_hint: string
 }
 
 // ---------------------------------------------------------------------------
@@ -204,11 +229,33 @@ export interface EvaluateInput {
 }
 
 /**
+ * Prescriptive, per-gate recovery instruction the caller LLM reads in the
+ * BLOCKED output. Tells the caller exactly WHAT to do (not just WHAT failed).
+ */
+function recoverableHint(gate: BlockedResult["gate"], missing: string[]): string {
+  switch (gate) {
+    case "first_dispatch_must_be":
+      return `Dispatch "${missing[0] ?? "<required>"}" first as the first child of this session, then retry this dispatch. This gate enforces dispatch ordering (see the agent's contract_ref).`
+    case "requires_prior_dispatch": {
+      const pattern = missing[0] ?? "<pattern>"
+      return `Dispatch more children matching the pattern "${pattern}" from this session first. This gate requires a minimum number of prior sub-agent dispatches before this agent can run (see the agent's contract_ref for the workflow stage order).`
+    }
+    case "requires_artifacts": {
+      const globs = missing.join(", ") || "<glob>"
+      return `Produce the missing artifact(s) at: ${globs}. If the glob contains <run_root>, ensure the dispatch brief includes a "run_root: <abs path>" line and that the artifact file exists at that path. Then retry this dispatch. (See the agent's contract_ref for what produces this artifact and at which workflow stage.)`
+    }
+  }
+}
+
+/**
  * Evaluate all gates at dispatch time. Returns a {@link BlockedResult} if any
  * gate fails, or `undefined` if all pass (or no gates are configured).
  *
  * Order: `first_dispatch_must_be` (parent) → `requires_prior_dispatch` (child)
  * → `requires_artifacts` (child). The first failing gate wins.
+ *
+ * Each BLOCKED result carries a `contract_ref` (which contract/workflow defines
+ * the gate) and a `recoverable_hint` (prescriptive instruction on what to do).
  */
 export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult | undefined> {
   return Effect.gen(function* () {
@@ -222,6 +269,7 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
       if (priorChildren.length === 0 && childName !== required) {
         return blocked("first_dispatch_must_be", childName, [required], {
           detail: `first_dispatch_must_be: first child dispatch of parent must be "${required}", got "${childName}"`,
+          contractRef: parentGates.contract_ref,
         })
       }
     }
@@ -237,6 +285,7 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
         if (count < minCount) {
           return blocked("requires_prior_dispatch", childName, [entry.agent_pattern], {
             detail: `requires_prior_dispatch: ${count} of ${minCount} prior dispatches match "${entry.agent_pattern}"`,
+            contractRef: childGates.contract_ref,
           })
         }
       }
@@ -255,6 +304,7 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
         if (needsRunRoot && !runRoot) {
           return blocked("requires_artifacts", childName, [entry.glob], {
             detail: `requires_artifacts: glob "${entry.glob}" needs <run_root> but no run_root: field was found in the dispatch brief (missing_run_root)`,
+            contractRef: childGates.contract_ref,
           })
         }
         const pattern = entry.glob.replaceAll("<run_root>", runRoot ?? "")
@@ -268,11 +318,12 @@ export function evaluateGates(input: EvaluateInput): Effect.Effect<BlockedResult
             return { ok: false as const, cause }
           }
         })
-        if (!scan.ok) return evaluationError(childName, scan.cause)
+        if (!scan.ok) return evaluationError(childName, scan.cause, childGates.contract_ref)
         if (scan.found.length < minCount) {
           const rootDetail = runRoot ? ` (run_root=${runRoot})` : ""
           return blocked("requires_artifacts", childName, [entry.glob], {
             detail: `requires_artifacts: ${scan.found.length} of ${minCount} matches for ${pattern}${rootDetail}`,
+            contractRef: childGates.contract_ref,
           })
         }
       }
@@ -286,21 +337,54 @@ function blocked(
   gate: BlockedResult["gate"],
   agent: string,
   missing: string[],
-  opts: { detail: string },
+  opts: { detail: string; contractRef?: string },
 ): BlockedResult {
-  return { status: "BLOCKED", gate, agent, missing, detail: opts.detail, recoverable: true }
+  return {
+    status: "BLOCKED",
+    gate,
+    agent,
+    missing,
+    detail: opts.detail,
+    recoverable: true,
+    recoverable_hint: recoverableHint(gate, missing),
+    ...(opts.contractRef ? { contract_ref: opts.contractRef } : {}),
+  }
 }
 
-/** Render a BLOCKED result as the task tool output (parent LLM sees this). */
+/**
+ * Render a BLOCKED result as the task tool output the caller LLM sees.
+ *
+ * This is the ONLY signal the caller gets that a dispatch was blocked. It must
+ * be unambiguous: the caller must know (1) this is an error, (2) which gate
+ * failed, (3) WHICH contract/workflow to consult, and (4) exactly what to do
+ * to recover. The output uses an `<error>` tag (not `<task state="blocked">`)
+ * so the caller treats it as a hard stop, not a soft state it can ignore.
+ */
 export function renderBlocked(result: BlockedResult): string {
-  return [
-    `<task state="blocked">`,
-    `<blocked>`,
+  const lines: string[] = [
+    `<error state="blocked" gate="${result.gate}" agent="${result.agent}">`,
+    ``,
+    `## Dispatch blocked by a gate`,
+    ``,
+    `**Gate:** ${result.gate}`,
+    `**Agent:** ${result.agent}`,
+    `**Detail:** ${result.detail}`,
+    ...(result.contract_ref ? [`**Contract:** ${result.contract_ref}`] : []),
+    `**Recoverable:** yes`,
+    ``,
+    `### What to do`,
+    ``,
+    result.recoverable_hint,
+    ``,
+    `### Structured result`,
+    ``,
+    "```json",
     JSON.stringify(result, null, 2),
-    `</blocked>`,
-    `<hint>The dispatch was blocked by a gate. Inspect \`gate\`, \`missing\`, and \`detail\`. The condition is recoverable: produce the missing artifact, dispatch the missing prior stage, or respect the required first dispatch, then retry.</hint>`,
-    `</task>`,
-  ].join("\n")
+    "```",
+    ``,
+    `</error>`,
+  ]
+  return lines.join("\n")
 }
 
 /**
@@ -311,16 +395,19 @@ export function renderBlocked(result: BlockedResult): string {
  * since that is the only gate that touches the filesystem today; if other
  * gates grow fs dependencies, branch on the cause here.
  */
-export function evaluationError(childName: string, cause: unknown): BlockedResult {
+export function evaluationError(childName: string, cause: unknown, contractRef?: string): BlockedResult {
   const message = cause instanceof Error ? cause.message : String(cause)
-  return {
+  const result: BlockedResult = {
     status: "BLOCKED",
     gate: "requires_artifacts",
     agent: childName,
     missing: [],
     detail: `requires_artifacts: evaluation failed (${message}). The gate could not be checked — fix the underlying condition (e.g. file permissions, run_root path) and retry.`,
     recoverable: true,
+    recoverable_hint: recoverableHint("requires_artifacts", []),
   }
+  if (contractRef) result.contract_ref = contractRef
+  return result
 }
 
 function describe(value: unknown): string {
