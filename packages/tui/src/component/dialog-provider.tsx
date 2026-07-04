@@ -368,7 +368,7 @@ function ApiMethod(props: ApiMethodProps) {
       placeholder="API key"
       description={
         {
-          opencode: (
+          opencode: () => (
             <box gap={1}>
               <text fg={theme.textMuted}>
                 OpenCode Zen gives you access to all the best coding models at the cheapest prices with a single API
@@ -379,7 +379,7 @@ function ApiMethod(props: ApiMethodProps) {
               </text>
             </box>
           ),
-          "opencode-go": (
+          "opencode-go": () => (
             <box gap={1}>
               <text fg={theme.textMuted}>
                 OpenCode Go is a $10 per month subscription that provides reliable access to popular open coding models
