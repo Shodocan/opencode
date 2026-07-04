@@ -11,8 +11,9 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
+import { NamedError } from "@opencode-ai/core/util/error"
 
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Exit, Cause } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -362,9 +363,22 @@ const layer = Layer.effect(
       }
 
       const agent = yield* agents.get("compaction")
-      const model = agent.model
-        ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
-        : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
+      const modelRef = agent.model ?? userMessage.model
+      const modelExit = yield* provider.getModel(modelRef.providerID, modelRef.modelID).pipe(Effect.exit)
+      if (Exit.isFailure(modelExit)) {
+        const err = Cause.squash(modelExit.cause)
+        if (Provider.ModelNotFoundError.isInstance(err)) {
+          const hint = err.suggestions?.length ? ` Did you mean: ${err.suggestions.join(", ")}?` : ""
+          yield* events.publish(Session.Event.Error, {
+            sessionID: input.sessionID,
+            error: new NamedError.Unknown({
+              message: `Model not found: ${err.providerID}/${err.modelID}.${hint}`,
+            }).toObject(),
+          })
+        }
+        return yield* Effect.die(err)
+      }
+      const model = modelExit.value
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
@@ -488,12 +502,28 @@ const layer = Layer.effect(
 
         if (!replay) {
           const info = yield* provider.getProvider(userMessage.model.providerID)
+          const autoContinueModelExit = yield* provider
+            .getModel(userMessage.model.providerID, userMessage.model.modelID)
+            .pipe(Effect.exit)
+          if (Exit.isFailure(autoContinueModelExit)) {
+            const err = Cause.squash(autoContinueModelExit.cause)
+            if (Provider.ModelNotFoundError.isInstance(err)) {
+              const hint = err.suggestions?.length ? ` Did you mean: ${err.suggestions.join(", ")}?` : ""
+              yield* events.publish(Session.Event.Error, {
+                sessionID: input.sessionID,
+                error: new NamedError.Unknown({
+                  message: `Model not found: ${err.providerID}/${err.modelID}.${hint}`,
+                }).toObject(),
+              })
+            }
+            return yield* Effect.die(err)
+          }
           yield* plugin.trigger(
             "experimental.compaction.autocontinue",
             {
               sessionID: input.sessionID,
               agent: userMessage.agent,
-              model: yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie),
+              model: autoContinueModelExit.value,
               provider: {
                 source: info.source,
                 info,

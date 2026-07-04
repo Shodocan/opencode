@@ -186,12 +186,17 @@ const layer = Layer.effect(
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return false
+        // Truncate the error message before storing it. Some errors (notably
+        // the AI SDK's NoSuchToolError) embed the full available-tools list
+        // (60+ tool names) which overflows the terminal render grid and
+        // corrupts the TUI display. The full error is preserved in the log.
+        const message = errorMessage(error)
         yield* session.updatePart({
           ...match.part,
           state: {
             status: "error",
             input: match.part.state.input,
-            error: errorMessage(error),
+            error: message.length > 200 ? message.slice(0, 197) + "..." : message,
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
@@ -416,8 +421,16 @@ const layer = Layer.effect(
             return
           }
 
-          case "provider-error":
-            throw new Error(value.message)
+          case "provider-error": {
+            // Log the full message before truncation so diagnostics aren't lost.
+            // Truncate the failure value to avoid overflowing the TUI render grid.
+            const msg = value.message ?? "provider error"
+            if (msg.length > 500) {
+              yield* Effect.logError("provider-error (full message)", { "session.id": input.sessionID, message: msg })
+            }
+            const truncated = msg.length > 500 ? msg.slice(0, 497) + "..." : msg
+            return yield* Effect.fail(new Error(truncated))
+          }
 
           case "step-start":
             if (!ctx.snapshot) ctx.snapshot = yield* snapshot.track()

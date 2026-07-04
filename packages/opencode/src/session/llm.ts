@@ -308,12 +308,27 @@ const live: Layer.Layer<
                 toolName: lower,
               }
             }
-            // FORK: log the dropped tool call so silent AI SDK drops are visible.
+            // The AI SDK invokes repair for two failure modes: an unknown tool
+            // name, or invalid arguments to a known tool. Distinguish them so the
+            // model gets an accurate, self-correcting message either way instead
+            // of a generic args-error that hides the real cause.
+            const available = Object.keys(prepared.tools).filter((x) => x !== "invalid")
+            const isUnknownTool = !(failed.toolCall.toolName in prepared.tools)
+            // Cap the available-tools hint so the tool input stored in state.input
+            // doesn't overflow the TUI render grid with 60+ tool names. The full
+            // list is logged above for diagnostics.
+            const shown = available.slice(0, 15)
+            const hint = available.length
+              ? ` Available tools: ${shown.join(", ")}${available.length > shown.length ? `, ... (${available.length - shown.length} more)` : ""}.`
+              : " No tools are available in this turn."
+            const error = isUnknownTool
+              ? `Unknown tool: ${failed.toolCall.toolName}.${hint}`
+              : `Tool "${failed.toolCall.toolName}" failed: ${failed.error.message.length > 200 ? failed.error.message.slice(0, 197) + "..." : failed.error.message}`
             Effect.runFork(
               Effect.logWarning("tool call could not be repaired", {
                 "tool.name": failed.toolCall.toolName,
                 "tool.error": failed.error.message,
-                "tool.available": Object.keys(prepared.tools).filter((x) => x !== "invalid"),
+                "tool.available": available,
                 "session.id": input.sessionID,
               }),
             )
@@ -321,7 +336,7 @@ const live: Layer.Layer<
               ...failed.toolCall,
               input: JSON.stringify({
                 tool: failed.toolCall.toolName,
-                error: failed.error.message,
+                error,
               }),
               toolName: "invalid",
             }

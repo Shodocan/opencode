@@ -187,8 +187,16 @@ const layer = Layer.effect(
             const info = data.info
             yield* sync(info.sessionID, [{ type: "message", data: structuredClone(info) as SDK.Message }])
             if (info.role !== "user") return
-            const model = yield* provider.getModel(info.model.providerID, info.model.modelID)
-            yield* sync(info.sessionID, [{ type: "model", data: [model] }])
+            // A persisted message may reference a model that has since been removed
+            // from the provider catalog. Resolving it here inside the event
+            // subscriber would raise ProviderModelNotFoundError as a defect and
+            // tear down this share subscription fiber — killing TUI updates for
+            // every subsequent message. Skip the model sync when the model is gone;
+            // the message sync above already preserves TUI rendering.
+            const model = yield* provider
+              .getModel(info.model.providerID, info.model.modelID)
+              .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
+            if (model) yield* sync(info.sessionID, [{ type: "model", data: [model] }])
           }),
         )
         yield* watch(MessageV2.Event.PartUpdated, (data) =>
@@ -285,7 +293,10 @@ const layer = Layer.effect(
               .map((item) => [`${item.providerID}/${item.modelID}`, item] as const),
           ).values(),
         ),
-        (item) => provider.getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID)),
+        (item) =>
+          provider
+            .getModel(ProviderV2.ID.make(item.providerID), ModelV2.ID.make(item.modelID))
+            .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined))),
         { concurrency: 8 },
       )
 
@@ -294,7 +305,7 @@ const layer = Layer.effect(
         ...messages.map((item) => ({ type: "message" as const, data: item.info })),
         ...messages.flatMap((item) => item.parts.map((part) => ({ type: "part" as const, data: part }))),
         { type: "session_diff", data: diffs },
-        { type: "model", data: models },
+        { type: "model", data: models.filter((m): m is Provider.Model => m !== undefined) },
       ])
     })
 
