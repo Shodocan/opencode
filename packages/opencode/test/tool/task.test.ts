@@ -24,6 +24,7 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { Provider } from "@/provider/provider"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -33,6 +34,42 @@ const ref = {
   providerID: ProviderV2.ID.make("test"),
   modelID: ModelV2.ID.make("test-model"),
 }
+
+// Stub provider that resolves the test model with a variants map so the
+// override resolver can validate caller-specified variants.
+const stubModel = {
+  id: ref.modelID,
+  providerID: ref.providerID,
+  route: { type: "openai" as const, id: "test-model" },
+  defaults: undefined,
+  compatibility: undefined,
+  variants: { xhigh: {}, max: {}, default: {} },
+} as unknown as Provider.Model
+
+const stubProviderInfo = {
+  id: ref.providerID,
+  name: "test",
+  source: "config" as const,
+  env: [],
+  options: {},
+  models: { [ref.modelID]: stubModel } as never,
+}
+
+const providerLayer = Layer.succeed(
+  Provider.Service,
+  Provider.Service.of({
+    list: () => Effect.succeed({ [ref.providerID]: stubProviderInfo } as never),
+    getProvider: () => Effect.succeed(stubProviderInfo as never),
+    getModel: (providerID, modelID) =>
+      providerID === ref.providerID && modelID === ref.modelID
+        ? Effect.succeed(stubModel)
+        : Effect.fail(new Provider.ModelNotFoundError({ providerID, modelID })),
+    getLanguage: () => Effect.die("not implemented"),
+    closest: () => Effect.succeed(undefined),
+    getSmallModel: () => Effect.succeed(undefined),
+    defaultModel: () => Effect.succeed({ providerID: ref.providerID, modelID: ref.modelID }),
+  }),
+)
 
 const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   LayerNode.compile(
@@ -51,8 +88,12 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
+      Provider.node,
     ]),
-    [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
+    [
+      [RuntimeFlags.node, RuntimeFlags.layer(flags)],
+      [Provider.node, providerLayer],
+    ],
   )
 
 const it = testEffect(layer())

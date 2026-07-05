@@ -52,6 +52,9 @@ export const Info = Schema.Struct({
   // Schema.Unknown here so the parse/validate logic lives in one place
   // (agent/gates.ts) and the fork stays workflow-agnostic.
   gates: Schema.optional(Schema.Unknown),
+  // FORK FEATURE (11) subagent-model-override — per-agent opt-out. When true,
+  // callers cannot override this agent's model or variant via the task tool.
+  disableModelOverride: Schema.optional(Schema.Boolean),
   model: Schema.optional(
     Schema.Struct({
       modelID: ModelV2.ID,
@@ -310,6 +313,8 @@ const layer = Layer.effect(
           // a malformed block; undefined when absent (zero behavior change).
           const mergedGates = value.gates ?? item.gates
           item.gates = Gates.parseGates(key, mergedGates)
+          // FORK FEATURE (11) subagent-model-override — carry the opt-out flag.
+          item.disableModelOverride = value.disableModelOverride ?? item.disableModelOverride
           if (value.can_spawn_subagents) {
             // Grant task-tool permission unless the subagent already scopes it.
             // If the user also set permission.task, their scoping wins (those

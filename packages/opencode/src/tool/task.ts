@@ -11,6 +11,7 @@ import { Gates } from "../agent/gates"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
+import { Provider } from "@/provider/provider"
 import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -32,7 +33,13 @@ export interface TaskPromptOps {
 export interface TaskMetadata {
   parentSessionId: SessionID
   sessionId: SessionID
-  model: { modelID: string | undefined; providerID: string | undefined }
+  model: { modelID: string | undefined; providerID: string | undefined; variant?: string }
+  modelSource: "caller" | "caller-variant" | "agent" | "session" | "default"
+  modelOverride?: {
+    requested?: { providerID?: string; id?: string; variant?: string }
+    applied: boolean
+    warning?: string
+  }
   background?: boolean
   jobId?: string
   blocked?: boolean
@@ -69,6 +76,21 @@ const BaseParameterFields = {
       "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  // FORK FEATURE (11) subagent-model-override — per-dispatch model override.
+  // Public shape uses `id` (UC1); internal code maps to `modelID` at the boundary.
+  model: Schema.optional(
+    Schema.Struct({
+      id: Schema.String,
+      providerID: Schema.String,
+      variant: Schema.optional(Schema.String),
+    }),
+  ).annotate({
+    description:
+      "Override the model for this subagent (per-dispatch only). Shape: { id: string, providerID: string, variant?: string }. Does not change the subagent's configured model.",
+  }),
+  variant: Schema.optional(Schema.String).annotate({
+    description: "Override only the variant/effort for this subagent. Binds to the resolved model.",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -98,6 +120,180 @@ function renderOutput(input: {
   ].join("\n")
 }
 
+// FORK FEATURE (11) subagent-model-override — atomic model+variant resolver.
+// Builds candidates in precedence order (caller → agent config → parent/session
+// → provider default), validates each atomically (model exists + variant
+// exists on that model), and falls back with a warning on invalid caller
+// overrides. Never partially applies an invalid model+variant pair.
+type ResolvedModel = {
+  model: { modelID: string | undefined; providerID: string | undefined; variant?: string }
+  modelSource: "caller" | "caller-variant" | "agent" | "session" | "default"
+  modelOverride?: {
+    requested?: { providerID?: string; id?: string; variant?: string }
+    applied: boolean
+    warning?: string
+  }
+}
+
+function resolveTaskModel(input: {
+  provider: Provider.Interface
+  callerModel?: { id: string; providerID: string; variant?: string }
+  callerVariant?: string
+  agentConfig: Agent.Info
+  parentModel?: { modelID: string | undefined; providerID: string | undefined }
+  parentVariant?: string
+}): Effect.Effect<ResolvedModel, Error> {
+  return Effect.gen(function* () {
+    const { provider, callerModel, callerVariant, agentConfig, parentModel, parentVariant } = input
+
+    // UC3/UC6: agent opt-out blocks both model and variant overrides.
+    if (agentConfig.disableModelOverride && (callerModel || callerVariant)) {
+      return yield* Effect.fail(
+        new Error(
+          `Agent "${agentConfig.name}" has disableModelOverride enabled; model and variant overrides are blocked.`,
+        ),
+      )
+    }
+
+    // UC5: conflicting model.variant and top-level variant rejects.
+    if (callerModel?.variant && callerVariant && callerModel.variant !== callerVariant) {
+      return yield* Effect.fail(
+        new Error(
+          `Conflicting variant override: model.variant="${callerModel.variant}" vs variant="${callerVariant}". Provide one or the same value.`,
+        ),
+      )
+    }
+
+    const requestedVariant = callerModel?.variant ?? callerVariant
+    const requestedOverride = callerModel
+      ? { providerID: callerModel.providerID, id: callerModel.id, variant: requestedVariant }
+      : callerVariant
+        ? { variant: callerVariant }
+        : undefined
+
+    // Build candidates in precedence order.
+    type Candidate = {
+      model: { modelID: string; providerID: string; variant?: string }
+      source: "caller" | "caller-variant" | "agent" | "session" | "default"
+      isCaller: boolean
+    }
+    const candidates: Candidate[] = []
+
+    // 1. Caller model override (with or without variant).
+    if (callerModel) {
+      candidates.push({
+        model: {
+          modelID: callerModel.id,
+          providerID: callerModel.providerID,
+          variant: requestedVariant,
+        },
+        source: "caller",
+        isCaller: true,
+      })
+    }
+
+    // 2. Caller variant-only override (binds to next valid model's modelID).
+    if (!callerModel && callerVariant) {
+      // Variant-only: attach to agent config model or parent model.
+      if (agentConfig.model) {
+        candidates.push({
+          model: { ...agentConfig.model, variant: callerVariant },
+          source: "caller-variant",
+          isCaller: true,
+        })
+      } else if (parentModel?.modelID && parentModel?.providerID) {
+        candidates.push({
+          model: { modelID: parentModel.modelID, providerID: parentModel.providerID, variant: callerVariant },
+          source: "caller-variant",
+          isCaller: true,
+        })
+      }
+    }
+
+    // 3. Agent config model (with its configured variant).
+    if (agentConfig.model) {
+      const agentVariant = agentConfig.variant && agentConfig.model.modelID === agentConfig.model?.modelID
+        ? agentConfig.variant
+        : undefined
+      candidates.push({
+        model: { ...agentConfig.model, variant: agentVariant },
+        source: "agent",
+        isCaller: false,
+      })
+    }
+
+    // 4. Parent/session model (only when agent has no pinned model).
+    if (!agentConfig.model && parentModel?.modelID && parentModel?.providerID) {
+      candidates.push({
+        model: { modelID: parentModel.modelID, providerID: parentModel.providerID, variant: parentVariant },
+        source: "session",
+        isCaller: false,
+      })
+    }
+
+    // Try each candidate; fall back on invalid.
+    let warning: string | undefined
+    for (const candidate of candidates) {
+      const exit = yield* provider
+        .getModel(
+          candidate.model.providerID as never,
+          candidate.model.modelID as never,
+        )
+        .pipe(Effect.exit)
+
+      if (Exit.isFailure(exit)) {
+        if (candidate.isCaller) {
+          warning = `Override ${candidate.model.providerID}/${candidate.model.modelID}${candidate.model.variant ? `#${candidate.model.variant}` : ""} is invalid; fell back to ${candidate.source === "caller" ? "agent default" : "next candidate"}.`
+        }
+        continue
+      }
+
+      const resolved = exit.value
+      // Validate variant exists on the model when specified.
+      if (candidate.model.variant && candidate.model.variant !== "default") {
+        const variants = resolved.variants ?? {}
+        if (!(candidate.model.variant in variants)) {
+          if (candidate.isCaller) {
+            warning = `Variant "${candidate.model.variant}" is not valid for ${candidate.model.providerID}/${candidate.model.modelID}; fell back.`
+          }
+          // Strip the invalid variant and retry this model without it.
+          candidates.push({
+            model: { modelID: candidate.model.modelID, providerID: candidate.model.providerID, variant: undefined },
+            source: candidate.source,
+            isCaller: false,
+          })
+          continue
+        }
+      }
+
+      return {
+        model: {
+          modelID: candidate.model.modelID,
+          providerID: candidate.model.providerID,
+          ...(candidate.model.variant && candidate.model.variant !== "default" ? { variant: candidate.model.variant } : {}),
+        },
+        modelSource: candidate.source,
+        ...(requestedOverride || warning
+          ? {
+              modelOverride: {
+                requested: requestedOverride,
+                applied: candidate.isCaller,
+                ...(warning ? { warning } : {}),
+              },
+            }
+          : {}),
+      }
+    }
+
+    // All candidates failed — no valid fallback.
+    return yield* Effect.fail(
+      new Error(
+        `No valid model could be resolved for agent "${agentConfig.name}". Last candidate: ${callerModel ? callerModel.providerID + "/" + callerModel.id : "agent/session default"}.`,
+      ),
+    )
+  })
+}
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -105,6 +301,7 @@ export const TaskTool = Tool.define(
     const background = yield* BackgroundJob.Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
+    const provider = yield* Provider.Service
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
@@ -193,6 +390,7 @@ export const TaskTool = Tool.define(
             // `blocked` before interpreting `sessionId`.
             sessionId: undefined as unknown as SessionID,
             model: next.model ?? { modelID: undefined, providerID: undefined },
+            modelSource: "agent",
             blocked: true,
             gate: blocked.gate,
             agent: blocked.agent,
@@ -245,16 +443,28 @@ export const TaskTool = Tool.define(
         Effect.orDie,
       )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
-      const variant = msg.info.variant
+      const parentVariant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      // FORK FEATURE (11) subagent-model-override — resolve the model+variant
+      // atomically with precedence: caller override → agent config → parent
+      // session → provider default. The variant must never survive
+      // independently after its model candidate is rejected.
+      const resolved = yield* resolveTaskModel({
+        provider,
+        callerModel: params.model,
+        callerVariant: params.variant,
+        agentConfig: next,
+        parentModel: next.model ? undefined : { modelID: msg.info.modelID, providerID: msg.info.providerID },
+        parentVariant: next.model ? undefined : msg.info.variant,
+      })
+
+      const model = resolved.model
       const metadata: TaskMetadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        modelSource: resolved.modelSource,
+        ...(resolved.modelOverride ? { modelOverride: resolved.modelOverride } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -272,10 +482,10 @@ export const TaskTool = Tool.define(
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
           model: {
-            modelID: model.modelID,
-            providerID: model.providerID,
+            modelID: model.modelID as never,
+            providerID: model.providerID as never,
           },
-          variant: next.model ? undefined : variant,
+          variant: model.variant,
           agent: next.name,
           parts,
         })
@@ -291,7 +501,7 @@ export const TaskTool = Tool.define(
           .prompt({
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
-            variant,
+            variant: parentVariant,
             parts: [
               {
                 type: "text",

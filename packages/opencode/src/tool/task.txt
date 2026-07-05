@@ -17,3 +17,9 @@ Usage notes:
 5. The agent's outputs should generally be trusted
 6. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent. Tell it how to verify its work if possible (e.g., relevant test commands).
 7. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+
+Model/Variant override:
+- model: Override the model for this subagent. Shape: { id: string, providerID: string, variant?: string }. This is a per-dispatch override only; it does not change the subagent's configured model.
+- variant: Override only the variant/effort for this subagent. Binds to the resolved model.
+- If the subagent has disableModelOverride: true, both model and variant overrides are blocked.
+- Invalid model/variant combinations fall back to the subagent's configured model with a warning.

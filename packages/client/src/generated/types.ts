@@ -146,6 +146,7 @@ export type AgentsListOutput = {
       readonly resource: string
       readonly effect: "allow" | "deny" | "ask"
     }>
+    readonly disableModelOverride?: boolean
   }>
 }
 

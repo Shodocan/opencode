@@ -219,6 +219,9 @@ export const SubtaskPart = Schema.Struct({
     Schema.Struct({
       providerID: Provider.ID,
       modelID: Model.ID,
+      // FORK FEATURE (11) subagent-model-override — variant travels atomically
+      // with the model so the TUI and prompt loop can display/use it.
+      variant: Schema.optional(Schema.String),
     }),
   ),
   command: Schema.optional(Schema.String),
@@ -453,6 +456,7 @@ export const SubtaskPartInput = Schema.Struct({
     Schema.Struct({
       providerID: Provider.ID,
       modelID: Model.ID,
+      variant: Schema.optional(Schema.String),
     }),
   ),
   command: Schema.optional(Schema.String),

@@ -31,6 +31,8 @@ export const Info = Schema.Struct({
   color: Color.pipe(optional),
   steps: PositiveInt.pipe(optional),
   permissions: Permission.Ruleset,
+  // FORK FEATURE (11) subagent-model-override — per-agent opt-out.
+  disableModelOverride: Schema.Boolean.pipe(optional),
 })
   .annotate({ identifier: "AgentV2.Info" })
   .pipe(

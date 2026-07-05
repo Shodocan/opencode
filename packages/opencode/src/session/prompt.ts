@@ -271,6 +271,10 @@ const layer = Layer.effect(
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
       const taskModel = task.model ? yield* getModel(task.model.providerID, task.model.modelID, sessionID) : model
+      // FORK FEATURE (11) subagent-model-override — when the task carries a
+      // model override with a variant, use it for the child assistant message
+      // instead of the parent's variant.
+      const taskVariant = task.model?.variant ?? lastUser.model.variant
       const assistantMessage: SessionV1.Assistant = yield* sessions.updateMessage({
         id: MessageID.ascending(),
         role: "assistant",
@@ -278,7 +282,7 @@ const layer = Layer.effect(
         sessionID,
         mode: task.agent,
         agent: task.agent,
-        variant: lastUser.model.variant,
+        variant: taskVariant,
         path: { cwd: ctx.directory, root: ctx.worktree },
         cost: 0,
         tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -299,6 +303,8 @@ const layer = Layer.effect(
             prompt: task.prompt,
             description: task.description,
             subagent_type: task.agent,
+            // Map internal modelID to the public `id` field (UC1).
+            ...(task.model ? { model: { id: task.model.modelID, providerID: task.model.providerID, ...(task.model.variant ? { variant: task.model.variant } : {}) } } : {}),
             command: task.command,
           },
           time: { start: Date.now() },
@@ -309,6 +315,7 @@ const layer = Layer.effect(
         description: task.description,
         subagent_type: task.agent,
         command: task.command,
+        ...(task.model ? { model: { id: task.model.modelID, providerID: task.model.providerID, ...(task.model.variant ? { variant: task.model.variant } : {}) } } : {}),
       }
       yield* plugin.trigger(
         "tool.execute.before",

@@ -65,6 +65,11 @@ const AgentSchema = Schema.StructWithRest(
       description:
         "Declarative dispatch gates (requires_artifacts, requires_prior_dispatch, first_dispatch_must_be). Evaluated at task-dispatch time; blocked dispatches return a structured BLOCKED result to the parent. Malformed blocks fail fast at startup.",
     }),
+    // FORK FEATURE (11) subagent-model-override — per-agent opt-out. When true,
+    // callers cannot override this agent's model or variant via the task tool.
+    disableModelOverride: Schema.optional(Schema.Boolean).annotate({
+      description: "Block callers from overriding this agent's model or variant via the task tool (default: false).",
+    }),
   }),
   [Schema.Record(Schema.String, Schema.Any)],
 )
@@ -91,6 +96,7 @@ const KNOWN_KEYS = new Set([
   "subagents",
   "stopRecovery",
   "gates",
+  "disableModelOverride",
 ])
 
 const normalize = (agent: Schema.Schema.Type<typeof AgentSchema>): Schema.Schema.Type<typeof AgentSchema> => {

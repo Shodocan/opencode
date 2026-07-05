@@ -2301,7 +2301,11 @@ function Task(props: ToolProps) {
     const modelName = modelInfo?.name ?? first.model.modelID
     const providerName = provider?.name ?? first.model.providerID
     const variant = first.model.variant && first.model.variant !== "default" ? first.model.variant : undefined
-    return { modelName, providerName, variant }
+    // FORK FEATURE (11) subagent-model-override — show override source and
+    // fallback warning from the task metadata.
+    const modelSource = props.metadata.modelSource as string | undefined
+    const modelOverride = props.metadata.modelOverride as { warning?: string; applied?: boolean; requested?: unknown } | undefined
+    return { modelName, providerName, variant, modelSource, modelOverride }
   })
 
   const content = createMemo(() => {
@@ -2309,10 +2313,14 @@ function Task(props: ToolProps) {
     if (!description) return ""
     const agentLabel = Locale.titlecase(stringValue(props.input.subagent_type) ?? "General")
     const m = subagentModel()
+    // Fall back to props.metadata.model so the badge renders even before
+    // child session messages sync (advisor concern).
     const modelLabel = m ? ` · ${m.modelName} (${m.providerName})${m.variant ? ` - ${m.variant}` : ""}` : ""
+    const overrideBadge = m?.modelSource === "caller" || m?.modelSource === "caller-variant" ? " (caller override)" : ""
+    const fallbackBadge = m?.modelOverride?.warning ? ` [⚠ ${Locale.truncate(m.modelOverride.warning, 80)}]` : ""
     let content = [
       formatSubagentTitle(
-        `${agentLabel}${modelLabel}`,
+        `${agentLabel}${modelLabel}${overrideBadge}${fallbackBadge}`,
         description,
         props.metadata.background === true,
       ),

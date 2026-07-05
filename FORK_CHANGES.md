@@ -28,6 +28,7 @@ branch, no longer a clean single-feature PR.
 | **(8) session.status AbortError suppress** | `ac5c41d51a` (fan-out `notify()` helper suppresses `AbortError` when transport closes mid-send + regression test) |
 | **(9) stop-recovery** | (this branch) L0 extra-body delivery for vLLM + L1 premature-stop recovery (length auto-continue, no-tool nudge, empty-after-thinking) |
 | **(10) gates** | (this branch) declarative `gates` block on agent definitions, evaluated at task-dispatch time (requires_artifacts, requires_prior_dispatch, first_dispatch_must_be); structured BLOCKED result to the parent; fail-fast config-parse on malformed blocks |
+| **(11) subagent-model-override** | (this branch) per-dispatch model/variant override with atomic validation, precedence resolution (caller → agent → session → default), fallback-warn, opt-out policy (`disableModelOverride`), resume conflict, UI badge |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -60,6 +61,15 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/agent/agent.ts` — **Feature (10)**: `gates` on runtime `Info` + merge-time `parseGates` (fail-fast)
 - `packages/opencode/src/tool/task.ts` — **Feature (10)**: dispatch-time `evaluateGates` hook (after subagents allow-list, before session create) + `TaskMetadata` type
 - `packages/tui/src/routes/session/visible-user-text.ts` — **Feature (9)**: visible-muted-automated rendering for recovery parts
+- `packages/opencode/src/tool/task.ts` — **Feature (11)**: public `model`/`variant` parameters, atomic resolver, `modelSource`/`modelOverride` metadata
+- `packages/schema/src/v1/session.ts` — **Feature (11)**: `SubtaskPart.model` and `SubtaskPartInput.model` include `variant`
+- `packages/opencode/src/session/prompt.ts` — **Feature (11)**: `handleSubtask` uses task model variant for child assistant + maps `modelID`→`id`
+- `packages/core/src/config/agent.ts` — **Feature (11)**: `disableModelOverride` opt-out field
+- `packages/core/src/v1/config/agent.ts` — **Feature (11)**: v1 `disableModelOverride` + KNOWN_KEYS
+- `packages/core/src/v1/config/migrate.ts` — **Feature (11)**: v1→v2 `disableModelOverride` passthrough
+- `packages/schema/src/agent.ts` — **Feature (11)**: `disableModelOverride` on `Agent.Info`
+- `packages/opencode/src/agent/agent.ts` — **Feature (11)**: runtime `disableModelOverride` + merge carry-through
+- `packages/tui/src/routes/session/index.tsx` — **Feature (11)**: override/fallback badge in task title
 
 ---
 

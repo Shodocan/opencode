@@ -153,6 +153,9 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     // v1->v2 migration so legacy/frontmatter agents keep their gates block.
     // Parsed/validated at runtime agent-load (fail-fast with the agent name).
     ...(info.gates !== undefined ? { gates: info.gates } : {}),
+    // FORK FEATURE (11) subagent-model-override — carry the opt-out flag
+    // through v1->v2 migration so legacy/frontmatter agents keep their policy.
+    ...(info.disableModelOverride !== undefined ? { disableModelOverride: info.disableModelOverride } : {}),
   }
 }
 
