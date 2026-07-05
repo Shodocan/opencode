@@ -2292,12 +2292,27 @@ function Task(props: ToolProps) {
     return assistant - first
   })
 
+  const subagentModel = createMemo(() => {
+    const msgs = messages()
+    const first = msgs.find((m) => m.role === "user")
+    if (!first?.model) return undefined
+    const provider = sync.data.provider.find((item) => item.id === first.model.providerID)
+    const modelInfo = provider?.models[first.model.modelID]
+    const modelName = modelInfo?.name ?? first.model.modelID
+    const providerName = provider?.name ?? first.model.providerID
+    const variant = first.model.variant && first.model.variant !== "default" ? first.model.variant : undefined
+    return { modelName, providerName, variant }
+  })
+
   const content = createMemo(() => {
     const description = stringValue(props.input.description)
     if (!description) return ""
+    const agentLabel = Locale.titlecase(stringValue(props.input.subagent_type) ?? "General")
+    const m = subagentModel()
+    const modelLabel = m ? ` · ${m.modelName} (${m.providerName})${m.variant ? ` - ${m.variant}` : ""}` : ""
     let content = [
       formatSubagentTitle(
-        Locale.titlecase(stringValue(props.input.subagent_type) ?? "General"),
+        `${agentLabel}${modelLabel}`,
         description,
         props.metadata.background === true,
       ),
