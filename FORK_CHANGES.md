@@ -68,7 +68,7 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/session/compaction.ts` — **Feature (12)**: `stripAllVolatile(transformed)` applied after `experimental.chat.messages.transform` and before `toModelMessagesEffect` so ephemeral retrievals never launder into a permanent summary
 - `packages/opencode/src/tool/task.ts` — **Feature (12)**: defensive `stripAllVolatile` on parent-supplied prompt parts before they enter the child session (sub-agent retrieves its own context)
 - `packages/opencode/src/plugin/hindsight.ts` — **Feature (12)**: new fork-owned Hindsight plugin (`experimental.chat.system.transform` Tier-1 durable cached header + `chat.message` Tier-2 volatile retrieval, role-guarded)
-- `packages/opencode/src/plugin/index.ts` — **Feature (12)**: `hindsightPlugin()` gated on `HINDSIGHT_BASE_URL`/`HINDSIGHT_USER_ID` env, spread into `internalPlugins`
+- `packages/opencode/src/plugin/index.ts` — **Feature (12)**: `hindsightPlugin()` gated on `HINDSIGHT_BASE_URL`/`HINDSIGHT_USER_ID` env (opt-out via `HINDSIGHT_DISABLE=1`), spread into `internalPlugins`
 - `packages/schema/src/v1/session.ts` — **Feature (12)**: `volatile` optional field on `TextPart`
 - `packages/schema/src/v1/session.ts` — **Feature (11)**: `SubtaskPart.model` and `SubtaskPartInput.model` include `variant`
 - `packages/opencode/src/session/prompt.ts` — **Feature (11)**: `handleSubtask` uses task model variant for child assistant + maps `modelID`→`id`

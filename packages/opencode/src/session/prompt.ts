@@ -13,7 +13,7 @@ import { Provider } from "@/provider/provider"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
-import { filterVolatile, stripAllVolatile } from "./volatile"
+import { filterVolatile } from "./volatile"
 // FORK FEATURE (9) stop-recovery — L1 premature-stop recovery decision shell.
 import { clearState, decide } from "./stop-recovery"
 import { Todo } from "./todo"

@@ -90,6 +90,11 @@ export async function HindsightPlugin(_input: PluginInput, options: HindsightPlu
   const baseUrl = options.baseUrl.replace(/\/$/, "")
 
   return {
+    // Clear the per-session durable header cache on plugin disposal so a
+    // long-running process does not accumulate entries from closed sessions.
+    dispose: async () => {
+      durableCache.clear()
+    },
     // Tier-1: append durable header to the system prompt, once per session,
     // byte-identical every call so the cacheable prefix stays stable. The
     // snapshot is held constant mid-session via `durableCache`.
