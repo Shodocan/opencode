@@ -29,6 +29,7 @@ branch, no longer a clean single-feature PR.
 | **(9) stop-recovery** | (this branch) L0 extra-body delivery for vLLM + L1 premature-stop recovery (length auto-continue, no-tool nudge, empty-after-thinking) |
 | **(10) gates** | (this branch) declarative `gates` block on agent definitions, evaluated at task-dispatch time (requires_artifacts, requires_prior_dispatch, first_dispatch_must_be); structured BLOCKED result to the parent; fail-fast config-parse on malformed blocks |
 | **(11) subagent-model-override** | (this branch) per-dispatch model/variant override with atomic validation, precedence resolution (caller → agent → session → default), fallback-warn, opt-out policy (`disableModelOverride`), resume conflict, UI badge |
+| **(12) volatile-injection** | `644d97867` (initial: `volatile` flag on `TextPart` + step-based strip in `prompt.ts` + `chat.message` doc); (this branch) hardened: turn-ownership `filterVolatile` replacing the step axis, `stripAllVolatile` at compaction + sub-agent input, Hindsight plugin (`chat.message` Tier-2 volatile + `experimental.chat.system.transform` Tier-1 durable cached header), global retrieved-context-persistence system-prompt line |
 
 The other ~40 commits are `upstream/dev` merge commits + `regen SDK` follow-ups.
 
@@ -62,6 +63,13 @@ Highest conflict exposure — review these first on every merge:
 - `packages/opencode/src/tool/task.ts` — **Feature (10)**: dispatch-time `evaluateGates` hook (after subagents allow-list, before session create) + `TaskMetadata` type
 - `packages/tui/src/routes/session/visible-user-text.ts` — **Feature (9)**: visible-muted-automated rendering for recovery parts
 - `packages/opencode/src/tool/task.ts` — **Feature (11)**: public `model`/`variant` parameters, atomic resolver, `modelSource`/`modelOverride` metadata
+- `packages/opencode/src/session/prompt.ts` — **Feature (12)**: `filterVolatile(msgs, lastUser.id)` replaces the step-based strip block; `RETRIEEVED_CONTEXT_PERSISTENCE_PROMPT` added to the system array
+- `packages/opencode/src/session/volatile.ts` — **Feature (12)**: new fork-owned module exporting `filterVolatile`, `stripAllVolatile`, `activeUserIdOf`
+- `packages/opencode/src/session/compaction.ts` — **Feature (12)**: `stripAllVolatile(transformed)` applied after `experimental.chat.messages.transform` and before `toModelMessagesEffect` so ephemeral retrievals never launder into a permanent summary
+- `packages/opencode/src/tool/task.ts` — **Feature (12)**: defensive `stripAllVolatile` on parent-supplied prompt parts before they enter the child session (sub-agent retrieves its own context)
+- `packages/opencode/src/plugin/hindsight.ts` — **Feature (12)**: new fork-owned Hindsight plugin (`experimental.chat.system.transform` Tier-1 durable cached header + `chat.message` Tier-2 volatile retrieval, role-guarded)
+- `packages/opencode/src/plugin/index.ts` — **Feature (12)**: `hindsightPlugin()` gated on `HINDSIGHT_BASE_URL`/`HINDSIGHT_USER_ID` env, spread into `internalPlugins`
+- `packages/schema/src/v1/session.ts` — **Feature (12)**: `volatile` optional field on `TextPart`
 - `packages/schema/src/v1/session.ts` — **Feature (11)**: `SubtaskPart.model` and `SubtaskPartInput.model` include `variant`
 - `packages/opencode/src/session/prompt.ts` — **Feature (11)**: `handleSubtask` uses task model variant for child assistant + maps `modelID`→`id`
 - `packages/core/src/config/agent.ts` — **Feature (11)**: `disableModelOverride` opt-out field

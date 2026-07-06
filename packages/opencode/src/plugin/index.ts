@@ -20,6 +20,7 @@ import { AzureAuthPlugin } from "./azure"
 import { DigitalOceanAuthPlugin } from "./digitalocean"
 import { XaiAuthPlugin } from "./xai"
 import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
+import { HindsightPlugin } from "./hindsight"
 import { Effect, Layer, Context } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
@@ -61,8 +62,21 @@ export function experimentalWebSocketsEnabled(input: { enabled: boolean; channel
   return input.enabled || ["local", "dev", "beta"].includes(input.channel ?? InstallationChannel)
 }
 
+// FORK FEATURE (12) volatile-injection — Hindsight memory plugin.
+// Activates only when HINDSIGHT_BASE_URL and HINDSIGHT_USER_ID are set so
+// stock installs are unaffected. Returns null when disabled so it slots into
+// the internalPlugins array without changing the surrounding shape.
+function hindsightPlugin(): PluginInstance | null {
+  const baseUrl = process.env.HINDSIGHT_BASE_URL
+  const userId = process.env.HINDSIGHT_USER_ID
+  if (!baseUrl || !userId) return null
+  if (process.env.HINDSIGHT_DISABLE === "1" || process.env.HINDSIGHT_DISABLE === "true") return null
+  return (input) => HindsightPlugin(input, { userId, baseUrl })
+}
+
 // Built-in plugins that are directly imported (not installed from npm)
 function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
+  const hindsight = hindsightPlugin()
   return [
     // Temporary rollout: pre-release builds use WebSockets by default; releases require explicit opt-in.
     (input) =>
@@ -78,6 +92,7 @@ function internalPlugins(flags: RuntimeFlags.Info): PluginInstance[] {
     DigitalOceanAuthPlugin,
     SnowflakeCortexAuthPlugin,
     XaiAuthPlugin,
+    ...(hindsight ? [hindsight] : []),
   ]
 }
 

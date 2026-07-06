@@ -13,6 +13,7 @@ import { Provider } from "@/provider/provider"
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { SessionCompaction } from "./compaction"
+import { filterVolatile, stripAllVolatile } from "./volatile"
 // FORK FEATURE (9) stop-recovery — L1 premature-stop recovery decision shell.
 import { clearState, decide } from "./stop-recovery"
 import { Todo } from "./todo"
@@ -83,6 +84,12 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+
+// FORK FEATURE (12) volatile-injection — retrieved context is volatile: it is
+// present for the turn it was injected on and stripped from later turns. So
+// the reasoning that depended on it must survive in the reply itself.
+const RETRIEVED_CONTEXT_PERSISTENCE_PROMPT =
+  "When retrieved context materially informs your answer, state the underlying fact explicitly in your reply (e.g. \"since you're on Lucro Presumido…\"), so the reasoning persists after the retrieved block is dropped."
 
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
@@ -1292,17 +1299,13 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
-            // FORK FEATURE (12) volatile-injection — on turns after the first,
-            // strip text parts marked volatile: true so they were sent to the
-            // LLM once (first turn) but don't pollute context on subsequent
-            // turns. The parts remain in the DB (visible in TUI transcript).
-            if (step > 0) {
-              for (const msg of msgs) {
-                msg.parts = msg.parts.filter(
-                  (p) => !(p.type === "text" && (p as { volatile?: boolean }).volatile === true),
-                )
-              }
-            }
+            // FORK FEATURE (12) volatile-injection — strip volatile parts that
+            // don't belong to the active turn. Keyed on turn ownership (the most
+            // recent user message id) rather than the AI-SDK tool-loop `step`,
+            // so the predicate is invariant to tool-loop iterations: mid-turn
+            // tool calls keep the current turn's Tier-2 retrievals, prior
+            // turns' Tier-2 is gone. Parts remain in the DB (TUI-visible).
+            msgs = filterVolatile(msgs, lastUser.id)
 
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
@@ -1316,6 +1319,9 @@ const layer = Layer.effect(
               ...instructions,
               ...(mcpInstructions ? [mcpInstructions] : []),
               ...(skills ? [skills] : []),
+              // FORK FEATURE (12) volatile-injection — keep retrieved-context
+              // reasoning alive after the volatile block is dropped.
+              RETRIEVED_CONTEXT_PERSISTENCE_PROMPT,
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
