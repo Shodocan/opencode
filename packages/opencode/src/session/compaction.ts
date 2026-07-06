@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Session } from "./session"
+import { stripAllVolatile } from "./volatile"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
@@ -396,8 +397,12 @@ const layer = Layer.effect(
         { context: [], prompt: undefined },
       )
       const nextPrompt = compacting.prompt ?? buildPrompt({ previousSummary, context: compacting.context })
-      const msgs = structuredClone(selected.head)
-      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      const transformed = structuredClone(selected.head)
+      yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: transformed })
+      // FORK FEATURE (12) volatile-injection — never let ephemeral retrievals
+      // launder into a permanent summary. Strip every volatile part regardless
+      // of which turn it belongs to before feeding the summarizer.
+      const msgs = stripAllVolatile(transformed)
       const modelMessages = yield* MessageV2.toModelMessagesEffect(msgs, model, {
         stripMedia: true,
         toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,

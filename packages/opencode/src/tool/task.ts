@@ -478,6 +478,13 @@ export const TaskTool = Tool.define(
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
         const parts = yield* ops.resolvePromptParts(params.prompt)
+        // FORK FEATURE (12) volatile-injection — a sub-agent must retrieve its
+        // own context; never inherit a parent's volatile retrievals. Strip any
+        // volatile part from the parent-supplied prompt before it enters the
+        // child session. (resolvePromptParts builds fresh parts from the
+        // parent's authored prompt text, so volatile is normally absent — this
+        // is a defensive guard against future paths that forward DB parts.)
+        const stripped = parts.filter((p) => !(p as { volatile?: boolean }).volatile)
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -487,7 +494,7 @@ export const TaskTool = Tool.define(
           },
           variant: model.variant,
           agent: next.name,
-          parts,
+          parts: stripped,
         })
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
