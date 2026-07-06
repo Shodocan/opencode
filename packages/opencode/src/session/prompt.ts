@@ -1292,6 +1292,18 @@ const layer = Layer.effect(
 
             yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
 
+            // FORK FEATURE (12) volatile-injection — on turns after the first,
+            // strip text parts marked volatile: true so they were sent to the
+            // LLM once (first turn) but don't pollute context on subsequent
+            // turns. The parts remain in the DB (visible in TUI transcript).
+            if (step > 0) {
+              for (const msg of msgs) {
+                msg.parts = msg.parts.filter(
+                  (p) => !(p.type === "text" && (p as { volatile?: boolean }).volatile === true),
+                )
+              }
+            }
+
             const [skills, env, instructions, mcpInstructions, modelMsgs] = yield* Effect.all([
               sys.skills(agent),
               sys.environment(model),

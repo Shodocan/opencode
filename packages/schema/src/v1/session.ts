@@ -112,6 +112,11 @@ export const TextPart = Schema.Struct({
   type: Schema.Literal("text"),
   text: Schema.String,
   synthetic: Schema.optional(Schema.Boolean),
+  // FORK FEATURE (12) volatile-injection — when true, the part is sent to the
+  // LLM on the first turn it appears, then stripped from subsequent turns'
+  // context to avoid polluting long-running sessions. Plugins set this on
+  // injected parts (e.g. Hindsight memory context) via the chat.message hook.
+  volatile: Schema.optional(Schema.Boolean),
   ignored: Schema.optional(Schema.Boolean),
   time: Schema.optional(
     Schema.Struct({

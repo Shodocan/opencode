@@ -229,7 +229,26 @@ export interface Hooks {
   auth?: AuthHook
   provider?: ProviderHook
   /**
-   * Called when a new message is received
+   * Called when a new message is received.
+   *
+   * Parts added here are persisted to the user message. To inject context that
+   * is sent to the LLM only on the first turn (avoids polluting long-running
+   * sessions), set `volatile: true` on the text part:
+   *
+   * ```ts
+   * output.parts.unshift({
+   *   id: "prt_my-injection",
+   *   sessionID: input.sessionID,
+   *   messageID: output.message.id,
+   *   type: "text",
+   *   text: "injected context",
+   *   synthetic: true,
+   *   volatile: true,
+   * })
+   * ```
+   *
+   * Volatile parts remain in the DB (visible in transcript) but are stripped
+   * from the LLM context on turns after the first.
    */
   "chat.message"?: (
     input: {

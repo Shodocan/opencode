@@ -164,6 +164,7 @@ export type TextPart = {
   type: "text"
   text: string
   synthetic?: boolean
+  volatile?: boolean
   ignored?: boolean
   time?: {
     start: number
@@ -1417,6 +1418,7 @@ export type TextPartInput = {
   type: "text"
   text: string
   synthetic?: boolean
+  volatile?: boolean
   ignored?: boolean
   time?: {
     start: number

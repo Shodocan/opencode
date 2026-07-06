@@ -396,6 +396,7 @@ export type TextPart = {
   type: "text"
   text: string
   synthetic?: boolean
+  volatile?: boolean
   ignored?: boolean
   time?: {
     start: number
@@ -417,6 +418,7 @@ export type SubtaskPart = {
   model?: {
     providerID: string
     modelID: string
+    variant?: string
   }
   command?: string
 }
@@ -1775,6 +1777,8 @@ export type AgentConfig = {
   stopRecovery?: boolean
   can_spawn_subagents?: boolean
   subagents?: Array<string>
+  gates?: unknown
+  disableModelOverride?: boolean
   [key: string]:
     | unknown
     | string
@@ -2447,6 +2451,8 @@ export type Agent = {
   canSpawnSubagents?: boolean
   subagents?: Array<string>
   stopRecovery?: boolean
+  gates?: unknown
+  disableModelOverride?: boolean
   model?: {
     modelID: string
     providerID: string
@@ -2681,6 +2687,7 @@ export type SubtaskPartInput = {
   model?: {
     providerID: string
     modelID: string
+    variant?: string
   }
   command?: string
 }
@@ -4090,6 +4097,7 @@ export type AgentV2Info = {
   color?: AgentColor
   steps?: number
   permissions: PermissionV2Ruleset
+  disableModelOverride?: boolean
 }
 
 export type SessionV2Info = {
