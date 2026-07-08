@@ -2,6 +2,14 @@ import type { AssistantMessage, Part, Provider, UserMessage } from "@opencode-ai
 import { Locale } from "./locale"
 import * as Model from "./model"
 
+const TRANSCRIPT_BLOCK_MAX = 4000
+
+function truncateTranscriptBlock(content: string, max: number): string {
+  if (content.length <= max) return content
+  const omitted = content.length - max
+  return content.slice(0, max) + `\n[truncated: ${omitted} characters omitted]`
+}
+
 export type TranscriptOptions = {
   thinking: boolean
   toolDetails: boolean
@@ -96,13 +104,14 @@ export function formatPart(part: Part, options: TranscriptOptions): string {
   if (part.type === "tool") {
     let result = `**Tool: ${part.tool}**\n`
     if (options.toolDetails && part.state.input) {
-      result += `\n**Input:**\n\`\`\`json\n${JSON.stringify(part.state.input, null, 2)}\n\`\`\`\n`
+      const inputJson = JSON.stringify(part.state.input, null, 2)
+      result += `\n**Input:**\n\`\`\`json\n${truncateTranscriptBlock(inputJson, TRANSCRIPT_BLOCK_MAX)}\n\`\`\`\n`
     }
     if (options.toolDetails && part.state.status === "completed" && part.state.output) {
-      result += `\n**Output:**\n\`\`\`\n${part.state.output}\n\`\`\`\n`
+      result += `\n**Output:**\n\`\`\`\n${truncateTranscriptBlock(part.state.output, TRANSCRIPT_BLOCK_MAX)}\n\`\`\`\n`
     }
     if (options.toolDetails && part.state.status === "error" && part.state.error) {
-      result += `\n**Error:**\n\`\`\`\n${part.state.error}\n\`\`\`\n`
+      result += `\n**Error:**\n\`\`\`\n${truncateTranscriptBlock(part.state.error, TRANSCRIPT_BLOCK_MAX)}\n\`\`\`\n`
     }
     result += `\n`
     return result

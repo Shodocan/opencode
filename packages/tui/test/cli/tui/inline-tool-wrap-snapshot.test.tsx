@@ -209,6 +209,28 @@ function FailedCompleteToolFixture() {
   )
 }
 
+function OversizedLabelFixture() {
+  const longLabel = "Grep \"" + "x".repeat(200) + "\" in packages/opencode/src (99999 matches)"
+  return (
+    <box flexDirection="column" width={200}>
+      <InlineToolRow icon="✱" complete={true} pending="">
+        {longLabel}
+      </InlineToolRow>
+    </box>
+  )
+}
+
+function OversizedFailureFixture() {
+  const longFailure = "Failed: " + "e".repeat(200)
+  return (
+    <box flexDirection="column" width={200}>
+      <InlineToolRow icon="%" complete={false} pending="Working..." failed={true} failure={longFailure}>
+        Patch
+      </InlineToolRow>
+    </box>
+  )
+}
+
 async function renderFrame(component: () => JSX.Element, options: { width: number; height: number }) {
   testSetup = await testRender(component, options)
   await testSetup.renderOnce()
@@ -289,6 +311,30 @@ describe("TUI inline tool wrapping", () => {
 
   test("keeps retry status ahead of wrapping messages", () => {
     expect(formatSubagentRetry(2, "Rate limited by provider")).toBe("Retrying (attempt 2) · Rate limited by provider")
+  })
+
+  test("truncates an oversized tool label at the inline display bound", async () => {
+    const frame = await renderFrame(() => <OversizedLabelFixture />, { width: 200, height: 3 })
+    // The label (200+ chars) must be truncated to INLINE_TOOL_LABEL_MAX (120 chars)
+    expect(frame).toContain("…")
+    // The truncated line should be bounded (not 200+ chars)
+    const firstLine = frame.split("\n")[0]
+    expect(firstLine.length).toBeLessThan(130)
+  })
+
+  test("truncates an oversized failure string at the inline display bound", async () => {
+    const frame = await renderFrame(() => <OversizedFailureFixture />, { width: 200, height: 3 })
+    expect(frame).toContain("…")
+    const firstLine = frame.split("\n")[0]
+    expect(firstLine.length).toBeLessThan(130)
+  })
+
+  test("leaves normal-size tool labels untruncated", async () => {
+    const frame = await renderFrame(() => <Fixture />, { width: 72, height: 12 })
+    // All fixture labels are under INLINE_TOOL_LABEL_MAX (120 chars), so no truncation marker
+    // Verify the short labels are fully visible
+    expect(frame).toContain('Glob "**/*db*" in packages/opencode (6 matches)')
+    expect(frame).toContain("Read packages/opencode/src/index.ts [offset=1, limit=100]")
   })
 
   test("snapshots consecutive grep, glob, and read rows at a narrow width", async () => {

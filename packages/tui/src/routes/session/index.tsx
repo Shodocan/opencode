@@ -1606,6 +1606,13 @@ const PART_MAPPING = {
 }
 
 const INLINE_TOOL_ICON_WIDTH = 2
+const INLINE_TOOL_LABEL_MAX = 120
+const INLINE_TOOL_ERROR_MAX = 200
+
+function truncateDisplay(str: string, max: number): string {
+  if (str.length <= max) return str
+  return str.slice(0, max - 1) + "…"
+}
 
 function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: AssistantMessage }) {
   const { theme } = useTheme()
@@ -1953,11 +1960,29 @@ export function InlineToolRow(props: {
   failure?: string
   spinner?: boolean
   separate?: boolean
+  maxWidth?: number
   children: JSX.Element
   onMouseOver?: () => void
   onMouseOut?: () => void
   onMouseUp?: () => void
 }) {
+  const labelMax = props.maxWidth ?? INLINE_TOOL_LABEL_MAX
+
+  const truncatedLabel = createMemo(() => {
+    const content = props.failed && !props.complete ? (props.failure ?? props.children) : props.children
+    if (typeof content === "string") {
+      // For multi-line strings, truncate only if a single line exceeds the bound
+      if (content.includes("\n")) {
+        const lines = content.split("\n")
+        const needsTruncation = lines.some((line) => line.length > labelMax)
+        if (!needsTruncation) return content
+        return lines.map((line) => truncateDisplay(line, labelMax)).join("\n")
+      }
+      return truncateDisplay(content, labelMax)
+    }
+    return content
+  })
+
   return (
     <box
       paddingLeft={3}
@@ -2004,7 +2029,7 @@ export function InlineToolRow(props: {
                 fg={props.failed ? props.errorColor : props.color}
                 attributes={props.denied ? TextAttributes.STRIKETHROUGH : undefined}
               >
-                {props.failed && !props.complete ? (props.failure ?? props.children) : props.children}
+                {truncatedLabel()}
               </text>
             </box>
           </Show>
@@ -2012,7 +2037,7 @@ export function InlineToolRow(props: {
       </Switch>
       <Show when={props.failed && props.errorExpanded}>
         <box paddingLeft={INLINE_TOOL_ICON_WIDTH}>
-          <text fg={props.errorColor}>{props.error}</text>
+          <text fg={props.errorColor}>{truncateDisplay(props.error ?? "", INLINE_TOOL_ERROR_MAX)}</text>
         </box>
       </Show>
     </box>

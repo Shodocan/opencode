@@ -29,8 +29,32 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { errorMessage } from "@/util/error"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+
+// Pure helper: construct a bounded warning payload for a tool call that could not
+// be repaired. The same normalized error string feeds both the invalid-args
+// model-facing text (constructed at the call site) and this structured payload.
+export function formatRepairFailureWarningPayload(
+  failedError: unknown,
+  toolName: string,
+  available: string[],
+  sessionID: string,
+) {
+  const toolError = errorMessage(failedError)
+  const boundedError = toolError.length > 200 ? toolError.slice(0, 197) + "..." : toolError
+  const shown = available.slice(0, 15)
+  return {
+    "tool.name": toolName,
+    "tool.error": boundedError,
+    "tool.error_truncated": toolError.length > 200,
+    "tool.available": shown,
+    "tool.available_count": available.length,
+    "tool.available_truncated": available.length > 15,
+    "session.id": sessionID,
+  }
+}
 
 export type StreamInput = {
   user: SessionV1.User
@@ -314,6 +338,10 @@ const live: Layer.Layer<
             // of a generic args-error that hides the real cause.
             const available = Object.keys(prepared.tools).filter((x) => x !== "invalid")
             const isUnknownTool = !(failed.toolCall.toolName in prepared.tools)
+            // One normalized error string feeds both invalid-args model-facing text
+            // and the structured warning payload — avoids unsafe `failed.error.message`
+            // access for non-Error/nullish values and guarantees consistency.
+            const toolError = errorMessage(failed.error)
             // Cap the available-tools hint so the tool input stored in state.input
             // doesn't overflow the TUI render grid with 60+ tool names. The full
             // list is logged above for diagnostics.
@@ -321,16 +349,15 @@ const live: Layer.Layer<
             const hint = available.length
               ? ` Available tools: ${shown.join(", ")}${available.length > shown.length ? `, ... (${available.length - shown.length} more)` : ""}.`
               : " No tools are available in this turn."
+            const boundedError = toolError.length > 200 ? toolError.slice(0, 197) + "..." : toolError
             const error = isUnknownTool
               ? `Unknown tool: ${failed.toolCall.toolName}.${hint}`
-              : `Tool "${failed.toolCall.toolName}" failed: ${failed.error.message.length > 200 ? failed.error.message.slice(0, 197) + "..." : failed.error.message}`
+              : `Tool "${failed.toolCall.toolName}" failed: ${boundedError}`
             Effect.runFork(
-              Effect.logWarning("tool call could not be repaired", {
-                "tool.name": failed.toolCall.toolName,
-                "tool.error": failed.error.message,
-                "tool.available": available,
-                "session.id": input.sessionID,
-              }),
+              Effect.logWarning(
+                "tool call could not be repaired",
+                formatRepairFailureWarningPayload(failed.error, failed.toolCall.toolName, available, input.sessionID),
+              ),
             )
             return {
               ...failed.toolCall,
