@@ -252,6 +252,96 @@ describe("transcript", () => {
       expect(result).toContain("**Error:**")
       expect(result).toContain("Command failed")
     })
+
+    test("truncates oversized tool input to 4000 chars with omitted count", () => {
+      const oversizedInput = { command: "x".repeat(5000) }
+      const part: Part = {
+        id: "part_1",
+        sessionID: "ses_123",
+        messageID: "msg_123",
+        type: "tool",
+        callID: "call_1",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: oversizedInput,
+          output: "ok",
+          title: "Test",
+          metadata: {},
+          time: { start: 1000, end: 1100 },
+        },
+      }
+      const result = formatPart(part, options)
+      expect(result).toContain("[truncated:")
+      expect(result).toContain("characters omitted]")
+      expect(result).toContain("**Input:**")
+    })
+
+    test("truncates oversized tool output to 4000 chars with omitted count", () => {
+      const part: Part = {
+        id: "part_1",
+        sessionID: "ses_123",
+        messageID: "msg_123",
+        type: "tool",
+        callID: "call_1",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "ls" },
+          output: "x".repeat(5000),
+          title: "Test",
+          metadata: {},
+          time: { start: 1000, end: 1100 },
+        },
+      }
+      const result = formatPart(part, options)
+      expect(result).toContain("[truncated:")
+      expect(result).toContain("characters omitted]")
+      expect(result).toContain("**Output:**")
+    })
+
+    test("truncates oversized tool error to 4000 chars with omitted count", () => {
+      const part: Part = {
+        id: "part_1",
+        sessionID: "ses_123",
+        messageID: "msg_123",
+        type: "tool",
+        callID: "call_1",
+        tool: "bash",
+        state: {
+          status: "error",
+          input: { command: "fail" },
+          error: "e".repeat(5000),
+          time: { start: 1000, end: 1100 },
+        },
+      }
+      const result = formatPart(part, options)
+      expect(result).toContain("[truncated:")
+      expect(result).toContain("characters omitted]")
+      expect(result).toContain("**Error:**")
+    })
+
+    test("leaves normal-size tool blocks untruncated", () => {
+      const part: Part = {
+        id: "part_1",
+        sessionID: "ses_123",
+        messageID: "msg_123",
+        type: "tool",
+        callID: "call_1",
+        tool: "bash",
+        state: {
+          status: "completed",
+          input: { command: "ls" },
+          output: "file1.txt\nfile2.txt",
+          title: "List files",
+          metadata: {},
+          time: { start: 1000, end: 1100 },
+        },
+      }
+      const result = formatPart(part, options)
+      expect(result).not.toContain("[truncated:")
+      expect(result).not.toContain("characters omitted]")
+    })
   })
 
   describe("formatMessage", () => {
