@@ -20,8 +20,8 @@
 #      Cloudflare edge cache bug that previously served stale RC tarballs)
 #   5. write + upload manifest.json; flip install.sh DEFAULT_SHA256
 #   6. verify: re-fetch each object, confirm sha matches manifest + install.sh
-#   7. push fork/main; write .release-monitor-state
-#   8. self-test: fresh curl of install.sh | sh in a temp PREFIX (smoke)
+#   7. self-test: fresh curl of install.sh | sh in a temp PREFIX (smoke)
+#   8. push fork/main; write .release-monitor-state
 #
 # No step is skipped. If verify (step 6) fails, the Makefile exits non-zero
 # BEFORE pushing or updating state — so a broken publish never records as done.
@@ -50,7 +50,7 @@ Y := $(shell tput setaf 3 2>/dev/null || true)
 B := $(shell tput setaf 4 2>/dev/null || true)
 N := $(shell tput sgr0 2>/dev/null || true)
 
-.PHONY: help release release-clean release-dry check-env
+.PHONY: help release release-clean release-dry check-env resolve-version build package upload flip-manifest verify selftest push record purge-cache
 
 help: ## show this help
 	@awk 'BEGIN{FS=":.*##";printf "$(B)opencode fork release targets$(N)\n"} /^[a-zA-Z0-9_-]+:.*##/ {printf "  $(G)%-16s$(N) %s\n",$$1,$$2}' $(MAKEFILE_LIST)
@@ -97,7 +97,7 @@ release-dry: check-env resolve-version
 	rm -f .release-version.env
 
 # --- the real target --------------------------------------------------------
-release: check-env resolve-version build package upload flip-manifest verify push record selftest
+release: check-env resolve-version build package upload flip-manifest verify selftest push record
 	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	echo "$(G)=== RELEASE $$V PUBLISHED ===$(N)"; \
 	rm -f .release-version.env
@@ -176,18 +176,7 @@ verify:
 	case "$$install_url" in *opencode-custom-$$V-linux-x64.tar.gz) ;; *) echo "$(R)VERIFY FAILED — install.sh DEFAULT_URL does not point at the versioned key$(N)"; exit 1 ;; esac; \
 	echo "$(G)verify ok$(N)"
 
-# --- step 7: push ----------------------------------------------------------
-push:
-	@git push origin fork/main | tail -2; \
-	echo "$(G)push ok$(N)"
-
-# --- step 8: record state --------------------------------------------------
-record:
-	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
-	echo "$$V" > $(STATE_FILE); \
-	echo "$(G)recorded $(STATE_FILE)=$$V$(N)"
-
-# --- step 9: self-test (fresh install.sh in a throwaway PREFIX) ------------
+# --- step 7: self-test (fresh install.sh in a throwaway PREFIX) ------------
 selftest:
 	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	tmp_prefix="/tmp/och-selftest-$$V-$$$$"; \
@@ -199,6 +188,17 @@ selftest:
 	  [ "$$v" = "$$V" ] && echo "$(G)self-test ok: installed binary reports $$V$(N)" || { echo "$(R)self-test version mismatch: got '$$v' expected '$$V'$(N)"; rtk read /tmp/och-selftest.log; exit 1; }; \
 	} || { echo "$(R)self-test install failed$(N)"; rtk read /tmp/och-selftest.log; exit 1; }; \
 	rm -rf "$$tmp_prefix" /tmp/och-selftest.log /tmp/och-selftest-install.sh
+
+# --- step 8: push ----------------------------------------------------------
+push:
+	@git push origin fork/main | tail -2; \
+	echo "$(G)push ok$(N)"
+
+# --- step 9: record state --------------------------------------------------
+record:
+	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
+	echo "$$V" > $(STATE_FILE); \
+	echo "$(G)recorded $(STATE_FILE)=$$V$(N)"
 
 # --- optional: purge Cloudflare cache for the tarball (needs CF creds) ------
 .PHONY: purge-cache
