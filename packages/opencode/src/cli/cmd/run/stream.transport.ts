@@ -645,33 +645,42 @@ function createLayer(input: StreamInput) {
         const bootstrapSubagentHistory = Effect.fn("RunStreamTransport.bootstrapSubagentHistory")(function* (
           sessions: string[],
         ) {
-          yield* Effect.forEach(
-            sessions,
-            (sessionID) =>
-              messages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
-                Effect.tap((messagesList) =>
-                  Effect.sync(() => {
-                    if (
-                      !bootstrapSubagentCalls({
-                        data: state.subagent,
-                        sessionID,
-                        messages: messagesList,
-                        thinking: input.thinking,
-                        limits: input.limits(),
-                      })
-                    ) {
-                      return
-                    }
+          const loaded = new Set<string>()
+          let pending = sessions.filter((id) => !loaded.has(id))
+          while (pending.length > 0) {
+            const batch = pending
+            for (const id of batch) loaded.add(id)
+            yield* Effect.forEach(
+              batch,
+              (sessionID) =>
+                messages(sessionID, SUBAGENT_CALL_BOOTSTRAP_LIMIT).pipe(
+                  Effect.tap((messagesList) =>
+                    Effect.sync(() => {
+                      if (
+                        !bootstrapSubagentCalls({
+                          data: state.subagent,
+                          sessionID,
+                          messages: messagesList,
+                          thinking: input.thinking,
+                          limits: input.limits(),
+                        })
+                      ) {
+                        return
+                      }
 
-                    syncFooter([], undefined, currentSubagentState())
-                  }),
+                      syncFooter([], undefined, currentSubagentState())
+                    }),
+                  ),
                 ),
-              ),
-            {
-              concurrency: 4,
-              discard: true,
-            },
-          )
+              {
+                concurrency: 4,
+                discard: true,
+              },
+            )
+            // After loading subagent history, new grandchild tabs may have been
+            // discovered from task tool calls. Load their history too.
+            pending = [...state.subagent.tabs.keys()].filter((id) => !loaded.has(id))
+          }
         })
 
         const bootstrap = Effect.fn("RunStreamTransport.bootstrap")(function* () {
@@ -686,7 +695,7 @@ function createLayer(input: StreamInput) {
                   : SUBAGENT_BOOTSTRAP_LIMIT,
               ),
               Effect.promise(() =>
-                input.sdk.session.children({
+                input.sdk.session.descendants({
                   sessionID: input.sessionID,
                 }),
               ).pipe(

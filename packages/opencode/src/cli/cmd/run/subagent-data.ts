@@ -786,7 +786,20 @@ export function bootstrapSubagentCalls(input: {
     limits: input.limits,
   })
 
-  return changed || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
+  // Discover grandchild sessions from task tool calls within this subagent's
+  // messages so the TUI tracks them even before live events arrive.
+  let grandchildChanged = false
+  for (const message of input.messages) {
+    for (const part of message.parts) {
+      if (part.type !== "tool" || part.tool !== "task") continue
+      const childSessionID = taskSessionID(part)
+      if (childSessionID && !input.data.tabs.has(childSessionID)) {
+        grandchildChanged = syncTaskTab(input.data, part) || grandchildChanged
+      }
+    }
+  }
+
+  return changed || grandchildChanged || beforeCallCount !== detail.data.call.size || queueChanged(detail.data, before)
 }
 
 export function reduceSubagentData(input: {
@@ -805,6 +818,12 @@ export function reduceSubagentData(input: {
         return false
       }
 
+      return syncTaskTab(input.data, part)
+    }
+
+    // When a known subagent session makes a task tool call, discover its child
+    // (grandchild from the primary's perspective) so the TUI tracks it too.
+    if (part.type === "tool" && part.tool === "task" && knownSession(input.data, part.sessionID)) {
       return syncTaskTab(input.data, part)
     }
   }

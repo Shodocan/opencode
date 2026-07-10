@@ -449,6 +449,7 @@ export interface Interface {
   readonly diff: (sessionID: SessionID) => Effect.Effect<Snapshot.FileDiff[]>
   readonly messages: (input: { sessionID: SessionID; limit?: number }) => Effect.Effect<SessionV1.WithParts[], NotFound>
   readonly children: (parentID: SessionID) => Effect.Effect<Info[]>
+  readonly descendants: (parentID: SessionID) => Effect.Effect<Info[]>
   readonly remove: (sessionID: SessionID) => Effect.Effect<void, NotFound>
   readonly updateMessage: <T extends SessionV1.Info>(msg: T) => Effect.Effect<T>
   readonly removeMessage: (input: { sessionID: SessionID; messageID: MessageID }) => Effect.Effect<MessageID>
@@ -603,6 +604,32 @@ const layer: Layer.Layer<
         .all()
         .pipe(Effect.orDie)
       return rows.map(fromRow)
+    })
+
+    // Recursively collect all descendant sessions (children, grandchildren, etc.)
+    // so the TUI can discover and track nested subagent sessions. Without this,
+    // questions from grandchildren never reach the primary session's render loop.
+    const descendants = Effect.fn("Session.descendants")(function* (parentID: SessionID) {
+      const results: Info[] = []
+      const visited = new Set<SessionID>([parentID])
+      const queue: SessionID[] = [parentID]
+      while (queue.length > 0) {
+        const current = queue.shift()!
+        const rows = yield* db
+          .select()
+          .from(SessionTable)
+          .where(and(eq(SessionTable.parent_id, current)))
+          .all()
+          .pipe(Effect.orDie)
+        for (const row of rows) {
+          const info = fromRow(row)
+          if (visited.has(info.id)) continue
+          visited.add(info.id)
+          results.push(info)
+          queue.push(info.id)
+        }
+      }
+      return results
     })
 
     const remove: Interface["remove"] = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -925,6 +952,7 @@ const layer: Layer.Layer<
       diff,
       messages,
       children,
+      descendants,
       remove,
       updateMessage,
       removeMessage,

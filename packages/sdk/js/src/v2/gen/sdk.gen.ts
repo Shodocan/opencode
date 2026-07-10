@@ -189,6 +189,8 @@ import type {
   SessionDeleteMessageErrors,
   SessionDeleteMessageResponses,
   SessionDeleteResponses,
+  SessionDescendantsErrors,
+  SessionDescendantsResponses,
   SessionDiffErrors,
   SessionDiffResponses,
   SessionForkErrors,
@@ -3629,6 +3631,38 @@ export class Session2 extends HeyApiClient {
     )
     return (options?.client ?? this.client).get<SessionChildrenResponses, SessionChildrenErrors, ThrowOnError>({
       url: "/session/{sessionID}/children",
+      ...options,
+      ...params,
+    })
+  }
+
+  /**
+   * Get session descendants
+   *
+   * Recursively retrieve all descendant sessions (children, grandchildren, etc.) of the specified parent session.
+   */
+  public descendants<ThrowOnError extends boolean = false>(
+    parameters: {
+      sessionID: string
+      directory?: string
+      workspace?: string
+    },
+    options?: Options<never, ThrowOnError>,
+  ) {
+    const params = buildClientParams(
+      [parameters],
+      [
+        {
+          args: [
+            { in: "path", key: "sessionID" },
+            { in: "query", key: "directory" },
+            { in: "query", key: "workspace" },
+          ],
+        },
+      ],
+    )
+    return (options?.client ?? this.client).get<SessionDescendantsResponses, SessionDescendantsErrors, ThrowOnError>({
+      url: "/session/{sessionID}/descendants",
       ...options,
       ...params,
     })

@@ -80,6 +80,7 @@ export const SessionPaths = {
   status: `${root}/status`,
   get: `${root}/:sessionID`,
   children: `${root}/:sessionID/children`,
+  descendants: `${root}/:sessionID/descendants`,
   todo: `${root}/:sessionID/todo`,
   diff: `${root}/:sessionID/diff`,
   messages: `${root}/:sessionID/message`,
@@ -151,6 +152,19 @@ export const SessionApi = HttpApi.make("session")
             identifier: "session.children",
             summary: "Get session children",
             description: "Retrieve all child sessions that were forked from the specified parent session.",
+          }),
+        ),
+        HttpApiEndpoint.get("descendants", SessionPaths.descendants, {
+          params: { sessionID: SessionID },
+          query: WorkspaceRoutingQuery,
+          success: described(Schema.Array(Session.Info), "List of descendants"),
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
+        }).annotateMerge(
+          OpenApi.annotations({
+            identifier: "session.descendants",
+            summary: "Get session descendants",
+            description:
+              "Recursively retrieve all descendant sessions (children, grandchildren, etc.) of the specified parent session.",
           }),
         ),
         HttpApiEndpoint.get("todo", SessionPaths.todo, {

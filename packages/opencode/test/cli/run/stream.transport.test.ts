@@ -424,6 +424,7 @@ function sdk(
     status?: OpencodeClient["session"]["status"]
     messages?: OpencodeClient["session"]["messages"]
     children?: OpencodeClient["session"]["children"]
+    descendants?: OpencodeClient["session"]["descendants"]
     permissions?: OpencodeClient["permission"]["list"]
     questions?: OpencodeClient["question"]["list"]
   } = {},
@@ -437,6 +438,7 @@ function sdk(
   const status: OpencodeClient["session"]["status"] = input.status ?? (() => ok({}))
   const messages: OpencodeClient["session"]["messages"] = input.messages ?? (() => ok([]))
   const children: OpencodeClient["session"]["children"] = input.children ?? (() => ok([]))
+  const descendants: OpencodeClient["session"]["descendants"] = input.descendants ?? children
   const permissions: OpencodeClient["permission"]["list"] = input.permissions ?? (() => ok([]))
   const questions: OpencodeClient["question"]["list"] = input.questions ?? (() => ok([]))
 
@@ -446,6 +448,7 @@ function sdk(
   spyOn(client.session, "status").mockImplementation(status)
   spyOn(client.session, "messages").mockImplementation(messages)
   spyOn(client.session, "children").mockImplementation(children)
+  spyOn(client.session, "descendants").mockImplementation(descendants)
   spyOn(client.permission, "list").mockImplementation(permissions)
   spyOn(client.question, "list").mockImplementation(questions)
 
