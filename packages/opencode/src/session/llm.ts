@@ -320,7 +320,7 @@ const live: Layer.Layer<
           async experimental_repairToolCall(failed) {
             const lower = failed.toolCall.toolName.toLowerCase()
             if (lower !== failed.toolCall.toolName && prepared.tools[lower]) {
-              Effect.runFork(
+              bridge.fork(
                 Effect.logWarning("tool call repaired: case mismatch", {
                   "tool.original": failed.toolCall.toolName,
                   "tool.repaired": lower,
@@ -353,7 +353,7 @@ const live: Layer.Layer<
             const error = isUnknownTool
               ? `Unknown tool: ${failed.toolCall.toolName}.${hint}`
               : `Tool "${failed.toolCall.toolName}" failed: ${boundedError}`
-            Effect.runFork(
+            bridge.fork(
               Effect.logWarning(
                 "tool call could not be repaired",
                 formatRepairFailureWarningPayload(failed.error, failed.toolCall.toolName, available, input.sessionID),

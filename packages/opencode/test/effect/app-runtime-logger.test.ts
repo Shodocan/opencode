@@ -99,3 +99,34 @@ it.instance(
     }).pipe(Effect.provide(observabilityLayer)),
   { git: true },
 )
+
+it.instance(
+  "EffectBridge fork preserves the captured logger across async callbacks",
+  () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const messages: unknown[] = []
+      const logger = Logger.make((options) => {
+        messages.push(...(Array.isArray(options.message) ? options.message : [options.message]))
+      })
+
+      const result = yield* Effect.gen(function* () {
+        const bridge = yield* EffectBridge.make()
+        const fiber = yield* Effect.promise(() =>
+          Promise.resolve().then(() =>
+            bridge.fork(
+              Effect.gen(function* () {
+                yield* Effect.logWarning("bridge-warning")
+                return (yield* InstanceRef)?.directory
+              }),
+            ),
+          ),
+        )
+        return yield* Fiber.join(fiber)
+      }).pipe(Effect.provide(Logger.layer([logger])))
+
+      expect(result).toBe(test.directory)
+      expect(messages).toContain("bridge-warning")
+    }),
+  { git: true },
+)
