@@ -102,8 +102,14 @@ release: check-env resolve-version build package upload flip-manifest verify sel
 	echo "$(G)=== RELEASE $$V PUBLISHED ===$(N)"; \
 	rm -f .release-version.env
 
-release-clean: UPSTREAM := $(shell gh release list --repo anomalyco/opencode --limit 20 2>/dev/null | awk '{print $$3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1)
-release-clean: release  # clean upstream release: auto-picks latest upstream stable tag
+# release-clean: clean upstream release build (version matches latest upstream stable).
+# Implemented as a recursive `make release UPSTREAM=<tag>` so UPSTREAM reaches the
+# parse-time `ifeq` in resolve-version. A target-specific UPSTREAM assignment would NOT
+# be visible at parse time (Make evaluates `ifeq` during the first parse, before
+# target-specific variables apply), which would silently route to the auto-RC branch
+# and publish <last_manifest_version>-RCn instead of a clean upstream release.
+release-clean:
+	@$(MAKE) release UPSTREAM=$(shell gh release list --repo anomalyco/opencode --limit 20 2>/dev/null | awk '{print $$3}' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$$' | sort -V | tail -1)
 
 # --- step 2: build ---------------------------------------------------------
 build:
