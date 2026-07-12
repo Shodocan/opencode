@@ -843,8 +843,19 @@ export function reduceSubagentData(input: {
         ? event.properties.part.sessionID
         : undefined
 
-  if (!sessionID || !knownSession(input.data, sessionID)) {
+  if (!sessionID) {
     return false
+  }
+
+  // When a question or permission event arrives from an unknown session (e.g. a
+  // grandchild not yet discovered via a task tool call), create a blocker tab
+  // so the event is tracked and surfaced in the TUI footer.
+  if (!knownSession(input.data, sessionID)) {
+    if (event.type === "question.asked" || event.type === "permission.asked") {
+      ensureBlockerTab(input.data, sessionID, undefined, event.type === "question.asked" ? "question" : "permission")
+    } else {
+      return false
+    }
   }
 
   const detail = ensureDetail(input.data, sessionID)

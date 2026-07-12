@@ -459,8 +459,14 @@ function createLayer(input: StreamInput) {
         const buffered: Event[] = []
         const replayedParts = new Set<string>()
         const recovering = new Set<string>()
-        const tracked = (sessionID: string | undefined) =>
-          sessionID === input.sessionID || (!!sessionID && state.subagent.tabs.has(sessionID))
+        const isBlockerAsked = (event: Event): boolean =>
+          (event.type === "permission.asked" || event.type === "question.asked") &&
+          event.properties.sessionID !== input.sessionID
+
+        const tracked = (sessionID: string | undefined, event?: Event) =>
+          sessionID === input.sessionID ||
+          (!!sessionID && state.subagent.tabs.has(sessionID)) ||
+          (!!event && isBlockerAsked(event))
         const currentSubagentState = () => {
           if (state.selectedSubagent && !state.subagent.tabs.has(state.selectedSubagent)) {
             state.selectedSubagent = undefined
@@ -483,7 +489,14 @@ function createLayer(input: StreamInput) {
             return
           }
 
-          if (event.properties.sessionID !== input.sessionID && !state.subagent.tabs.has(event.properties.sessionID)) {
+          // Allow blocker events from any descendant session, not just known
+          // tabs. Grandchild sessions may not have a tab yet — reduceSubagentData
+          // will create one from the event itself.
+          if (
+            event.properties.sessionID !== input.sessionID &&
+            !state.subagent.tabs.has(event.properties.sessionID) &&
+            !isBlockerAsked(event)
+          ) {
             return
           }
 
@@ -966,7 +979,7 @@ function createLayer(input: StreamInput) {
             const next: Event[] = []
             let changed = false
             for (const event of pending) {
-              if (!tracked(sid(event))) {
+              if (!tracked(sid(event), event)) {
                 next.push(event)
                 continue
               }
@@ -1166,7 +1179,7 @@ function createLayer(input: StreamInput) {
                   return
                 }
 
-                if (!tracked(sessionID)) {
+                if (!tracked(sessionID, event)) {
                   if (sessionID) {
                     input.trace?.write("recv.event", event)
                     buffered.push(event)
