@@ -1180,6 +1180,15 @@ function createLayer(input: StreamInput) {
                 }
 
                 if (!tracked(sessionID, event)) {
+                  if (event.type === "question.asked" || event.type === "permission.asked") {
+                    yield* Effect.logWarning("DEBUG: blocker event not tracked", {
+                      type: event.type,
+                      sessionID,
+                      primarySessionID: input.sessionID,
+                      knownTabs: [...state.subagent.tabs.keys()],
+                      isBlockerAsked: isBlockerAsked(event),
+                    })
+                  }
                   if (sessionID) {
                     input.trace?.write("recv.event", event)
                     buffered.push(event)
