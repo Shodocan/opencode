@@ -1167,7 +1167,21 @@ function createLayer(input: StreamInput) {
 
                 const event = globalPayloadEvent(item)
                 if (!event) {
+                  const payload = Reflect.get(item as object, "payload") as object | undefined
+                  if (payload && Reflect.get(payload, "type") === "question.asked") {
+                    yield* Effect.logWarning("DEBUG: question.asked failed globalPayloadEvent", { item })
+                  }
                   return
+                }
+
+                // DEBUG: log every question/permission event arriving via SSE
+                if (event.type === "question.asked" || event.type === "permission.asked" || event.type === "question.replied" || event.type === "question.rejected") {
+                  yield* Effect.logWarning("DEBUG: SSE received blocker event", {
+                    type: event.type,
+                    sessionID: sid(event),
+                    booting,
+                    replaying,
+                  })
                 }
 
                 const sessionID = sid(event)
