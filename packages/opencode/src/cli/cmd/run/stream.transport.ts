@@ -1159,15 +1159,6 @@ function createLayer(input: StreamInput) {
                   return
                 }
 
-                // DEBUG: write every SSE item to a debug file
-                try {
-                  const itemType = Reflect.get(item as object, "payload") ? Reflect.get(Reflect.get(item as object, "payload"), "type") : "?"
-                  if (typeof itemType === "string" && (itemType.includes("question") || itemType.includes("permission") || itemType.includes("session.status") || itemType.includes("message.part"))) {
-                    const fs = require("fs")
-                    fs.appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] SSE item type=${itemType}\n`)
-                  }
-                } catch {}
-
                 if (isMatchingDisposeEvent(item, input.directory)) {
                   yield* fail(new Error("instance disposed"))
                   yield* closeScope()
@@ -1176,32 +1167,7 @@ function createLayer(input: StreamInput) {
 
                 const event = globalPayloadEvent(item)
                 if (!event) {
-                  const payload = Reflect.get(item as object, "payload") as object | undefined
-                  if (payload && Reflect.get(payload, "type") === "question.asked") {
-                    yield* Effect.logWarning("DEBUG: question.asked failed globalPayloadEvent", { item })
-                  }
                   return
-                }
-
-                // DEBUG: log every question/permission event arriving via SSE
-                if (event.type === "question.asked" || event.type === "permission.asked" || event.type === "question.replied" || event.type === "question.rejected") {
-                  yield* Effect.logWarning("DEBUG: SSE received blocker event", {
-                    type: event.type,
-                    sessionID: sid(event),
-                    booting,
-                    replaying,
-                  })
-                  // Also write to a debug file synchronously
-                  try {
-                    require("fs").appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] SSE received: type=${event.type} sessionID=${sid(event)} booting=${booting} replaying=${replaying}\n`)
-                  } catch {}
-                }
-
-                // DEBUG: log ALL events to see if any question events arrive at all
-                if (event.type?.includes("question") || event.type?.includes("permission")) {
-                  try {
-                    require("fs").appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] EVENT: ${JSON.stringify(event).slice(0, 500)}\n`)
-                  } catch {}
                 }
 
                 const sessionID = sid(event)
@@ -1214,15 +1180,6 @@ function createLayer(input: StreamInput) {
                 }
 
                 if (!tracked(sessionID, event)) {
-                  if (event.type === "question.asked" || event.type === "permission.asked") {
-                    yield* Effect.logWarning("DEBUG: blocker event not tracked", {
-                      type: event.type,
-                      sessionID,
-                      primarySessionID: input.sessionID,
-                      knownTabs: [...state.subagent.tabs.keys()],
-                      isBlockerAsked: isBlockerAsked(event),
-                    })
-                  }
                   if (sessionID) {
                     input.trace?.write("recv.event", event)
                     buffered.push(event)
