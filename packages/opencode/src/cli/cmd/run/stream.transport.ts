@@ -1159,6 +1159,15 @@ function createLayer(input: StreamInput) {
                   return
                 }
 
+                // DEBUG: write every SSE item to a debug file
+                try {
+                  const itemType = Reflect.get(item as object, "payload") ? Reflect.get(Reflect.get(item as object, "payload"), "type") : "?"
+                  if (typeof itemType === "string" && (itemType.includes("question") || itemType.includes("permission") || itemType.includes("session.status") || itemType.includes("message.part"))) {
+                    const fs = require("fs")
+                    fs.appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] SSE item type=${itemType}\n`)
+                  }
+                } catch {}
+
                 if (isMatchingDisposeEvent(item, input.directory)) {
                   yield* fail(new Error("instance disposed"))
                   yield* closeScope()
@@ -1182,6 +1191,17 @@ function createLayer(input: StreamInput) {
                     booting,
                     replaying,
                   })
+                  // Also write to a debug file synchronously
+                  try {
+                    require("fs").appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] SSE received: type=${event.type} sessionID=${sid(event)} booting=${booting} replaying=${replaying}\n`)
+                  } catch {}
+                }
+
+                // DEBUG: log ALL events to see if any question events arrive at all
+                if (event.type?.includes("question") || event.type?.includes("permission")) {
+                  try {
+                    require("fs").appendFileSync("/tmp/opencode-grandchild-debug.log", `[${new Date().toISOString()}] EVENT: ${JSON.stringify(event).slice(0, 500)}\n`)
+                  } catch {}
                 }
 
                 const sessionID = sid(event)
