@@ -48,6 +48,13 @@ export interface TaskMetadata {
   [key: string]: unknown
 }
 
+export interface TaskSessionOriginV1 {
+  version: 1
+  parentSessionID: string
+  tool: "task"
+  callID: string
+}
+
 const id = "task"
 const BACKGROUND_DESCRIPTION = [
   "Background mode: background=true launches the subagent asynchronously and returns immediately.",
@@ -436,6 +443,9 @@ export const TaskTool = Tool.define(
                 ),
             ),
           ],
+          ...(ctx.callID !== undefined
+            ? { metadata: { "opencode.task.origin": { version: 1, parentSessionID: ctx.sessionID, tool: "task", callID: ctx.callID } satisfies TaskSessionOriginV1 } }
+            : {}),
         }))
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(

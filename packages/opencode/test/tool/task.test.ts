@@ -16,12 +16,12 @@ import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 
-import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import { TaskTool, type TaskPromptOps, type TaskSessionOriginV1 } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { awaitWithTimeout, testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { Provider } from "@/provider/provider"
@@ -941,6 +941,372 @@ describe("tool.task", () => {
 
       expect((yield* jobs.get(child.id))?.status).toBe("cancelled")
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
+    }),
+  )
+
+  function taskCtx(opts: { sessionID: SessionID; messageID: MessageID; callID?: string; promptOps?: TaskPromptOps }) {
+    return {
+      sessionID: opts.sessionID,
+      messageID: opts.messageID,
+      agent: "build",
+      abort: new AbortController().signal,
+      callID: opts.callID,
+      extra: { promptOps: opts.promptOps ?? stubOps() },
+      messages: [],
+      metadata: () => Effect.void,
+      ask: () => Effect.void,
+    }
+  }
+
+  function originMeta(parentID: string, callID: string) {
+    return { "opencode.task.origin": { version: 1, parentSessionID: parentID, tool: "task" as const, callID } }
+  }
+
+  // @ts-expect-error — version literal must be 1, not 2
+  const _originBadVersion: TaskSessionOriginV1 = { version: 2, parentSessionID: "s", tool: "task", callID: "c" }
+  // @ts-expect-error — callID is required
+  const _originMissingField: TaskSessionOriginV1 = { version: 1, parentSessionID: "s", tool: "task" }
+
+  it.instance("TaskSessionOriginV1 accepts valid shape", () =>
+    Effect.gen(function* () {
+      const valid: TaskSessionOriginV1 = {
+        version: 1,
+        parentSessionID: "ses_test",
+        tool: "task",
+        callID: "call_001",
+      } satisfies TaskSessionOriginV1
+      expect(valid.version).toBe(1)
+    }),
+  )
+
+  it.instance("fresh creation: callID defined sets origin, undefined omits, empty string preserved", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      {
+        const result = yield* def.execute(
+          { description: "task", prompt: "p", subagent_type: "general" },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_001" }),
+        )
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.parentID).toBe(chat.id)
+        expect(child.metadata).toEqual(originMeta(chat.id, "call_001"))
+      }
+
+      {
+        const result = yield* def.execute(
+          { description: "task", prompt: "p", subagent_type: "general" },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id }),
+        )
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.metadata).toBeUndefined()
+      }
+
+      {
+        const result = yield* def.execute(
+          { description: "task", prompt: "p", subagent_type: "general" },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "" }),
+        )
+        const child = yield* sessions.get(result.metadata.sessionId)
+        expect(child.metadata).toEqual(originMeta(chat.id, ""))
+      }
+    }),
+  )
+
+  it.instance("same-parent task_id resumes child without second session.created or metadata overwrite", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const created = yield* Deferred.make<number>()
+      let count = 0
+      const unsub = yield* events.listen((event) => {
+        if (event.type === "session.created") {
+          count++
+          Deferred.doneUnsafe(created, Effect.succeed(count))
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const sentinelOrigin = { version: 1, parentSessionID: chat.id, tool: "task", callID: "sentinel" }
+      const child = yield* sessions.create({
+        parentID: chat.id,
+        title: "Existing child",
+        metadata: { "opencode.task.origin": sentinelOrigin },
+      })
+
+      const firstCount = yield* awaitWithTimeout(Deferred.await(created), "timed out waiting for first session.created")
+      expect(firstCount).toBe(1)
+
+      const result = yield* def.execute(
+        { description: "task", prompt: "p", subagent_type: "general", task_id: child.id },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_resume" }),
+      )
+
+      // Synchronous dispatch contract: execute completed means no second session.created
+      expect(count).toBe(1)
+
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(1)
+      expect(kids[0]?.id).toBe(child.id)
+      expect(result.metadata.sessionId).toBe(child.id)
+
+      // Metadata unchanged (resume does not overwrite)
+      const persisted = yield* sessions.get(child.id)
+      expect(persisted.metadata).toEqual({ "opencode.task.origin": sentinelOrigin })
+    }),
+  )
+
+  it.instance("nonexistent and foreign-parent task_id both create fresh child with current callID origin", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const foreignParent = yield* sessions.create({ title: "Foreign parent" })
+      const foreignChild = yield* sessions.create({ parentID: foreignParent.id, title: "Foreign child" })
+
+      const res1 = yield* def.execute(
+        { description: "task", prompt: "p", subagent_type: "general", task_id: "ses_nonexistent" },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_nonexistent" }),
+      )
+      expect(res1.metadata.sessionId).not.toBe("ses_nonexistent")
+      const c1 = yield* sessions.get(res1.metadata.sessionId)
+      expect(c1.parentID).toBe(chat.id)
+      expect(c1.metadata).toEqual(originMeta(chat.id, "call_nonexistent"))
+
+      const res2 = yield* def.execute(
+        { description: "task", prompt: "p", subagent_type: "general", task_id: foreignChild.id },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_foreign" }),
+      )
+      expect(res2.metadata.sessionId).not.toBe(foreignChild.id)
+      const c2 = yield* sessions.get(res2.metadata.sessionId)
+      expect(c2.parentID).toBe(chat.id)
+      expect(c2.metadata).toEqual(originMeta(chat.id, "call_foreign"))
+
+      const foreignKids = yield* sessions.children(foreignParent.id)
+      expect(foreignKids).toHaveLength(1)
+      expect(foreignKids[0]?.id).toBe(foreignChild.id)
+
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(2)
+      expect(kids.map((k) => k.id).sort()).toEqual([res1.metadata.sessionId, res2.metadata.sessionId].sort())
+
+      yield* sessions.remove(foreignChild.id)
+      yield* sessions.remove(foreignParent.id)
+    }),
+  )
+
+  it.instance("forged params: excess metadata is rejected by types and ignored at runtime", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const result = yield* def.execute(
+        {
+          description: "task",
+          prompt: "p",
+          subagent_type: "general",
+          // @ts-expect-error — Parameters deliberately excludes model-controlled metadata
+          metadata: {
+            "opencode.task.origin": {
+              version: 1,
+              parentSessionID: "ses_forged",
+              tool: "task",
+              callID: "call_forged",
+            },
+            "unrelated.forge": true,
+          },
+        },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_real" }),
+      )
+
+      const child = yield* sessions.get(result.metadata.sessionId)
+      // Origin set from ctx.callID, not from forged params
+      expect(child.metadata).toEqual(originMeta(chat.id, "call_real"))
+      // Exact top-level key — no forged keys leaked
+      expect(Object.keys(child.metadata!)).toEqual(["opencode.task.origin"])
+    }),
+  )
+
+  it.instance("EventV2Bridge: session.created event captured before prompt with exact origin", () =>
+    Effect.gen(function* () {
+      const events = yield* EventV2Bridge.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const callID = "call_evt_origin"
+
+      const order: ("event" | "prompt")[] = []
+      const captured = yield* Deferred.make<{ sessionID: string; info: { id: string; parentID?: string; metadata?: Record<string, unknown> } }>()
+      const unsub = yield* events.listen((event) => {
+        if (event.type === "session.created") {
+          const data = event.data as { sessionID: string; info: { id: string; parentID?: string; metadata?: Record<string, unknown> } }
+          const origin = data.info.metadata?.["opencode.task.origin"] as { callID: string } | undefined
+          if (origin?.callID === callID) {
+            order.push("event")
+            Deferred.doneUnsafe(captured, Effect.succeed(data))
+          }
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      let promptInput: SessionPrompt.PromptInput | undefined
+      const promptOps = stubOps({
+        onPrompt: (input) => {
+          order.push("prompt")
+          promptInput = input
+        },
+      })
+
+      const result = yield* def.execute(
+        { description: "task", prompt: "p", subagent_type: "general" },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID, promptOps }),
+      )
+
+      const evidence = yield* awaitWithTimeout(Deferred.await(captured), "timed out waiting for session.created event")
+      expect(evidence.sessionID).toBe(result.metadata.sessionId)
+      expect(evidence.info.id).toBe(result.metadata.sessionId)
+      expect(evidence.info.parentID).toBe(chat.id)
+      expect(evidence.info.metadata).toEqual(originMeta(chat.id, callID))
+      expect(promptInput?.sessionID).toBe(result.metadata.sessionId)
+      expect(order).toEqual(["event", "prompt"])
+    }),
+  )
+
+  it.instance("post-create prompt failure: origin event captured, child queryable, failure observed", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const callID = "call_fail_origin"
+
+      const captured = yield* Deferred.make<{ sessionID: string; info: { id: string; metadata?: Record<string, unknown> } }>()
+      const unsub = yield* events.listen((event) => {
+        if (event.type === "session.created") {
+          const data = event.data as { sessionID: string; info: { id: string; metadata?: Record<string, unknown> } }
+          Deferred.doneUnsafe(captured, Effect.succeed(data))
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const promptOps: TaskPromptOps = {
+        cancel: () => Effect.void,
+        resolvePromptParts: () => Effect.succeed([{ type: "text" as const, text: "prompt" }]),
+        prompt: () => Effect.sync(() => { throw new Error("simulated prompt failure") }),
+      }
+
+      const exit = yield* def.execute(
+        { description: "task", prompt: "p", subagent_type: "general" },
+        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID, promptOps }),
+      ).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+
+      const evidence = yield* awaitWithTimeout(Deferred.await(captured), "timed out waiting for session.created event")
+      expect(evidence.info.metadata).toEqual(originMeta(chat.id, callID))
+
+      const child = yield* sessions.get(SessionID.make(evidence.sessionID))
+      expect(child.metadata).toEqual(originMeta(chat.id, callID))
+
+      // Background job created with error status (no after-hook claim of success)
+      const jobs = yield* BackgroundJob.Service
+      const job = yield* jobs.get(evidence.sessionID)
+      expect(job).toBeDefined()
+      expect(job?.status).toBe("error")
+      expect(job?.error).toBe("simulated prompt failure")
+    }),
+  )
+
+  it.instance("two concurrent TaskTool calls: distinct callID → child ID → event bijection", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const callID1 = "concurrent_a"
+      const callID2 = "concurrent_b"
+
+      // Subscribe once — collect events keyed by callID
+      const eventMap = yield* Deferred.make<Map<string, { sessionID: string; info: { id: string; parentID?: string; metadata?: Record<string, unknown> } }>>()
+      const map = new Map<string, { sessionID: string; info: { id: string; parentID?: string; metadata?: Record<string, unknown> } }>()
+      const unsub = yield* events.listen((event) => {
+        if (event.type === "session.created") {
+          const data = event.data as { sessionID: string; info: { id: string; parentID?: string; metadata?: Record<string, unknown> } }
+          const origin = data.info.metadata?.["opencode.task.origin"] as { callID: string } | undefined
+          if (origin?.callID) {
+            map.set(origin.callID, data)
+            if (map.size >= 2) Deferred.doneUnsafe(eventMap, Effect.succeed(new Map(map)))
+          }
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      const ctxBase = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: {} as { promptOps: TaskPromptOps },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      const results = yield* Effect.all(
+        [
+          def.execute(
+            { description: "task a", prompt: "prompt a", subagent_type: "general" },
+            { ...ctxBase, callID: callID1, extra: { promptOps: stubOps({ text: "done_a" }) } },
+          ),
+          def.execute(
+            { description: "task b", prompt: "prompt b", subagent_type: "general" },
+            { ...ctxBase, callID: callID2, extra: { promptOps: stubOps({ text: "done_b" }) } },
+          ),
+        ],
+        { concurrency: "unbounded" },
+      )
+
+      const result1 = results[0]
+      const result2 = results[1]
+
+      const evidence = yield* awaitWithTimeout(Deferred.await(eventMap), "timed out waiting for both session.created events")
+      const ev1 = evidence.get(callID1)
+      const ev2 = evidence.get(callID2)
+      expect(ev1).toBeDefined()
+      expect(ev2).toBeDefined()
+      if (!ev1 || !ev2) throw new Error("missing event evidence")
+
+      expect(ev1.sessionID).toBe(result1.metadata.sessionId)
+      expect(ev1.info.id).toBe(result1.metadata.sessionId)
+      expect(ev1.info.parentID).toBe(chat.id)
+      expect(ev2.sessionID).toBe(result2.metadata.sessionId)
+      expect(ev2.info.id).toBe(result2.metadata.sessionId)
+      expect(ev2.info.parentID).toBe(chat.id)
+
+      expect(result1.metadata.sessionId).not.toBe(result2.metadata.sessionId)
+
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(2)
+      const ids = kids.map((k) => k.id).sort()
+      expect(ids).toEqual([result1.metadata.sessionId, result2.metadata.sessionId].sort())
     }),
   )
 })

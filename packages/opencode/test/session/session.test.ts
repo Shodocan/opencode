@@ -130,6 +130,71 @@ describe("session.created event", () => {
       yield* session.remove(info.id)
     }),
   )
+
+  it.instance("propagates parent origin metadata through durable create/projector/notification seam", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+
+      // Create parent session before registering the listener
+      const parent = yield* session.create({})
+
+      // Define the exact approved origin object
+      const origin = { version: 1, parentSessionID: parent.id, tool: "task", callID: "test-call-id-001" }
+
+      // Register listener; capture event data + listener-time persisted row
+      const received = yield* Deferred.make<{
+        data: typeof SessionNs.Event.Created.data.Type
+        persisted: SessionNs.Info
+      }>()
+      const unsub = yield* events.listen((event) => {
+        if (event.type === SessionNs.Event.Created.type) {
+          const data = event.data as typeof SessionNs.Event.Created.data.Type
+          // Filter to only child events by checking parentID
+          if (data.info.parentID === parent.id) {
+            return Effect.gen(function* () {
+              const persisted = yield* session.get(data.info.id)
+              yield* Deferred.succeed(received, { data, persisted })
+            }).pipe(Effect.orDie)
+          }
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => unsub)
+
+      // Create child session with parent origin metadata
+      const created = yield* session.create({
+        parentID: parent.id,
+        metadata: { "opencode.task.origin": origin },
+      })
+
+      // Await listener evidence
+      const { data, persisted } = yield* awaitDeferred(
+        received,
+        "timed out waiting for child session.created with persisted row",
+      )
+
+      // Assert event.sessionID === event.info.id === created.id
+      expect(data.sessionID).toBe(created.id)
+      expect(data.info.id).toBe(created.id)
+      expect(data.info.id).toBe(data.sessionID)
+
+      // Assert info.parentID === parent.id
+      expect(data.info.parentID).toBe(parent.id)
+
+      // Assert exact event metadata
+      expect(data.info.metadata).toEqual({ "opencode.task.origin": origin })
+
+      // Assert listener-time persisted row from Deferred
+      expect(persisted.id).toBe(created.id)
+      expect(persisted.parentID).toBe(parent.id)
+      expect(persisted.metadata).toEqual({ "opencode.task.origin": origin })
+
+      // Clean up child and parent
+      yield* session.remove(created.id)
+      yield* session.remove(parent.id)
+    }),
+  )
 })
 
 describe("step-finish token propagation via event", () => {
