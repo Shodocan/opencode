@@ -142,7 +142,8 @@ package:
 
 # --- step 4: upload (Cache-Control defeats the Cloudflare cache bug) --------
 upload:
-	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
+	@set -o pipefail; \
+	V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	stage=$(STAGE)-$$V; \
 	cf="Cache-Control=max-age=0,must-revalidate"; \
 	echo "$(B)=== uploading $$V (Cache-Control: no-cache) ===$(N)"; \
@@ -155,7 +156,8 @@ upload:
 
 # --- step 5: flip install.sh (url + sha point at the versioned key) ---------
 flip-manifest:
-	@V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
+	@set -o pipefail; \
+	V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	stage=$(STAGE)-$$V; \
 	ver_sha=$$(rtk read "$$stage/opencode-custom-$$V-linux-x64.tar.gz.sha256"); \
 	mc cat $(REMOTE)/$(BUCKET_PATH)/$(INSTALL_KEY) > "$$stage/install.sh.cur"; \
@@ -197,7 +199,8 @@ selftest:
 
 # --- step 8: push ----------------------------------------------------------
 push:
-	@git push origin fork/main | tail -2; \
+	@set -o pipefail; \
+	git push origin fork/main | tail -2; \
 	echo "$(G)push ok$(N)"
 
 # --- step 9: record state --------------------------------------------------
