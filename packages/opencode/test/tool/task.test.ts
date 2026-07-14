@@ -944,6 +944,130 @@ describe("tool.task", () => {
     }),
   )
 
+  // FORK REGRESSION TRIPWIRES — TaskTool model/variant resolution through public execute path.
+  // These tests exercise resolveTaskModel transitively via TaskTool.execute and assert
+  // the resulting PromptInput variant and TaskMetadata modelSource/modelOverride.
+
+  it.instance(
+    "model-resolution: valid caller model+variant selects variant and records caller source",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+        const result = yield* def.execute(
+          {
+            description: "task",
+            prompt: "p",
+            subagent_type: "general",
+            model: { id: ref.modelID, providerID: ref.providerID, variant: "max" },
+          },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, promptOps }),
+        )
+
+        // The variant from the caller model is selected
+        expect(seen?.variant).toBe("max")
+        expect(seen?.model?.modelID).toBe(ref.modelID)
+        expect(seen?.model?.providerID).toBe(ref.providerID)
+
+        // Metadata records caller source and override
+        expect(result.metadata.modelSource).toBe("caller")
+        expect(result.metadata.model.modelID).toBe(ref.modelID)
+        expect(result.metadata.model.variant).toBe("max")
+        expect(result.metadata.modelOverride?.applied).toBe(true)
+        expect(result.metadata.modelOverride?.requested).toEqual({
+          providerID: ref.providerID,
+          id: ref.modelID,
+          variant: "max",
+        })
+      }),
+  )
+
+  it.instance(
+    "model-resolution: variant-only binds to parent/session model and records caller-variant source",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+        // The general agent has no pinned model, so variant-only binds to the
+        // parent session's model (from the assistant message in seed).
+        const result = yield* def.execute(
+          {
+            description: "task",
+            prompt: "p",
+            subagent_type: "general",
+            variant: "max",
+          },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, promptOps }),
+        )
+
+        // The variant binds to the parent's model
+        expect(seen?.variant).toBe("max")
+        expect(seen?.model?.modelID).toBe(ref.modelID)
+        expect(seen?.model?.providerID).toBe(ref.providerID)
+
+        // Metadata records caller-variant source
+        expect(result.metadata.modelSource).toBe("caller-variant")
+        expect(result.metadata.model.modelID).toBe(ref.modelID)
+        expect(result.metadata.model.variant).toBe("max")
+        expect(result.metadata.modelOverride?.applied).toBe(true)
+        expect(result.metadata.modelOverride?.requested).toEqual({ variant: "max" })
+      }),
+  )
+
+  it.instance(
+    "model-resolution: invalid caller model/variant falls back atomically without stale variant",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const promptOps = stubOps({ onPrompt: (input) => (seen = input) })
+
+        // Provide an invalid model+variant pair. The resolver should fall back
+        // to the agent's default (general agent has no pinned model) or the
+        // parent session's model, stripping the stale variant.
+        const result = yield* def.execute(
+          {
+            description: "task",
+            prompt: "p",
+            subagent_type: "general",
+            model: { id: "nonexistent-model", providerID: "nonexistent-provider", variant: "bogus" },
+          },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, promptOps }),
+        )
+
+        // The fallback resolves to the parent session's model (ref), not the invalid one
+        expect(seen?.model?.modelID).toBe(ref.modelID)
+        expect(seen?.model?.providerID).toBe(ref.providerID)
+
+        // The stale caller variant "bogus" is removed; the parent's variant
+        // ("xhigh" from seed assistant message) is used instead.
+        expect(seen?.variant).toBe("xhigh")
+
+        // Metadata records the fallback with warning and non-applied override
+        expect(result.metadata.modelSource).toBe("session")
+        expect(result.metadata.model.modelID).toBe(ref.modelID)
+        expect(result.metadata.model.variant).toBe("xhigh")
+        expect(result.metadata.modelOverride?.applied).toBe(false)
+        expect(result.metadata.modelOverride?.requested).toEqual({
+          providerID: "nonexistent-provider",
+          id: "nonexistent-model",
+          variant: "bogus",
+        })
+        expect(result.metadata.modelOverride?.warning).toBeDefined()
+        expect(typeof result.metadata.modelOverride?.warning).toBe("string")
+      }),
+  )
+
   function taskCtx(opts: { sessionID: SessionID; messageID: MessageID; callID?: string; promptOps?: TaskPromptOps }) {
     return {
       sessionID: opts.sessionID,

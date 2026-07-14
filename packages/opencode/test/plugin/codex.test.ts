@@ -164,7 +164,7 @@ describe("plugin.codex", () => {
       resolveRefresh = resolve
     })
     let refreshRequests = 0
-    const apiRequests: { authorization: string | null; accountId: string | null }[] = []
+    const apiRequests: { pathname: string; body: object; authorization: string | null; accountId: string | null }[] = []
 
     using server = Bun.serve({
       port: 0,
@@ -183,7 +183,10 @@ describe("plugin.codex", () => {
         }
 
         if (url.pathname === "/backend-api/codex/responses") {
+          const body = await request.json()
           apiRequests.push({
+            pathname: url.pathname,
+            body,
             authorization: request.headers.get("authorization"),
             accountId: request.headers.get("ChatGPT-Account-Id"),
           })
@@ -226,8 +229,23 @@ describe("plugin.codex", () => {
     )
     const loaded = await hooks.auth!.loader!(async () => auth as never, {} as never)
 
-    const first = loaded.fetch!("https://api.openai.com/v1/responses")
-    const second = loaded.fetch!("https://api.openai.com/v1/responses")
+    const representativeBody = { model: "gpt-5.4", input: "test prompt" }
+    const first = loaded.fetch!("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer stale-token",
+      },
+      body: JSON.stringify(representativeBody),
+    })
+    const second = loaded.fetch!("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer stale-token",
+      },
+      body: JSON.stringify(representativeBody),
+    })
 
     await waitFor(() => refreshRequests === 1)
     expect(apiRequests).toHaveLength(0)
@@ -240,10 +258,15 @@ describe("plugin.codex", () => {
     expect(authUpdates[0]?.body.refresh).toBe("refresh-new")
     expect(authUpdates[0]?.body.access).toBe("access-new")
     expect(authUpdates[0]?.body.accountId).toBe("acc-123")
-    expect(apiRequests).toEqual([
-      { authorization: "Bearer access-new", accountId: "acc-123" },
-      { authorization: "Bearer access-new", accountId: "acc-123" },
-    ])
+
+    // AC-3: endpoint remap, body preservation, auth replacement, account header
+    expect(apiRequests).toHaveLength(2)
+    for (const req of apiRequests) {
+      expect(req.pathname).toBe("/backend-api/codex/responses")
+      expect(req.body).toEqual(representativeBody)
+      expect(req.authorization).toBe("Bearer access-new")
+      expect(req.accountId).toBe("acc-123")
+    }
   })
 })
 

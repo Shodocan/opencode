@@ -1,139 +1,413 @@
-import { describe, expect, test } from "bun:test"
+import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { EventV2Bridge } from "@/event-v2-bridge"
+import { describe, expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import path from "path"
+import type { Agent } from "@/agent/agent"
+import { Provider } from "@/provider/provider"
+import { Session } from "@/session/session"
+import { SessionProcessor } from "@/session/processor"
+import { MessageID, PartID, SessionID } from "@/session/schema"
+import { SessionStatus } from "@/session/status"
+import { SessionSummary } from "@/session/summary"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { provideTmpdirServer } from "./fixture/fixture"
+import { testEffect } from "./lib/effect"
+import { TestLLMServer } from "./lib/llm-server"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 
-// FORK FEATURE (9) stop-recovery — L0 per-field delivery capture test (A1).
+// FORK FEATURE (9) stop-recovery — L0 per-field delivery capture test.
 //
-// The local vLLM provider is served via @ai-sdk/openai-compatible. This test
-// exercises the extra-body delivery mechanism (`collectExtraBody` + the fetch
-// wrapper installed in provider.ts) at the request-boundary seam: a stubbed
-// fetch records the outgoing JSON body, and we assert each L0 field arrives
-// verbatim. This mirrors the spec §L0.1 A1 acceptance row.
+// Exercises the actual production Provider SDK resolution path: a local
+// dynamic-port TestLLMServer captures the real @ai-sdk/openai-compatible
+// request, and we assert each L0 field arrives verbatim in the outgoing
+// JSON body. This replaces the copied collectExtraBody / fetch mirror tests
+// with assertions that traverse production resolveSDK().
 //
-// Path scoping (spec §L0.1): the live path for the local vLLM provider is the
-// AI SDK @ai-sdk/openai-compatible protocol (the fork's bundled loader). The
-// native @opencode-ai/llm protocol is NOT the live path for local OpenAI-
-// compatible providers, so its gaps (penalties absent from RequestInput) are
-// documented, not closed, in v1.
-//
-// Baseline fields (temperature/top_p/presence_penalty/frequency_penalty) are
-// emitted by the AI SDK openai-chat protocol itself; the extra-body mechanism
-// is additive and does NOT re-emit them (avoids duplication). The known-gap
-// fields (top_k, min_p, thinking_token_budget, repetition_detection) are the
-// ones the fork's extra-body wrapper delivers.
+// The production gate in provider.ts resolveSDK() is:
+//   model.api.npm.includes("@ai-sdk/openai-compatible")
+// Only models whose npm string contains that prefix get the extraBody
+// fetch wrapper. Hosted / non-compatible providers do not.
 
-const VLLM_EXTRA_BODY_KEYS = new Set([
-  "min_p",
-  "top_k",
-  "thinking_token_budget",
-  "repetition_detection",
-  "repetition_penalty",
-  "frequency_penalty",
-  "presence_penalty",
-])
+const summary = Layer.succeed(
+  SessionSummary.Service,
+  SessionSummary.Service.of({
+    summarize: () => Effect.void,
+    diff: () => Effect.succeed([]),
+    computeDiff: () => Effect.succeed([]),
+  }),
+)
 
-function collectExtraBody(modelOptions: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
-  if (!modelOptions) return undefined
-  const out: Record<string, unknown> = {}
-  for (const [key, value] of Object.entries(modelOptions)) {
-    if (VLLM_EXTRA_BODY_KEYS.has(key)) out[key] = value
+const ref = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("test-model"),
+}
+
+function agent(): Agent.Info {
+  return {
+    name: "build",
+    mode: "primary",
+    options: {},
+    permission: [{ permission: "*", pattern: "*", action: "allow" }],
   }
-  const extra = (modelOptions as Record<string, unknown> | undefined)?.extraBody
-  if (extra && typeof extra === "object") Object.assign(out, extra)
-  return out
 }
 
-// Mirrors the provider.ts fetch-wrapper: deep-merges extraBody into the JSON
-// request body before dispatch. This is the exact mechanism installed in
-// packages/opencode/src/provider/provider.ts resolveSDK().
-function withExtraBodyFetch(
-  extraBody: Record<string, unknown> | undefined,
-  capture: { body: unknown },
-): typeof fetch {
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
-    if (extraBody && Object.keys(extraBody).length > 0 && init?.body && typeof init.body === "string") {
-      const parsed = JSON.parse(init.body)
-      capture.body = { ...parsed, ...extraBody }
-    } else {
-      capture.body = init?.body ? JSON.parse(init.body as string) : undefined
-    }
-    return new Response(JSON.stringify({ choices: [] }), {
-      status: 200,
-      headers: { "content-type": "application/json" },
+function findChatInput(inputs: readonly Record<string, unknown>[]) {
+  return inputs.find((body) => {
+    if (body.model !== ref.modelID || !Array.isArray(body.messages)) return false
+    return body.messages.some((message) => {
+      if (!message || typeof message !== "object" || Reflect.get(message, "role") !== "user") return false
+      return containsText(Reflect.get(message, "content"), "hi")
     })
-  }) as typeof fetch
+  })
 }
 
-const MODEL_OPTIONS = {
-  temperature: 0.6,
-  topP: 0.95,
-  topK: 20,
-  presencePenalty: 0.5,
-  frequencyPenalty: 0.1,
-  min_p: 0.0,
-  thinking_token_budget: 8192,
-  repetition_detection: { min_pattern_size: 1, max_pattern_size: 40, min_count: 4 },
+function containsText(input: unknown, expected: string): boolean {
+  if (input === expected) return true
+  if (Array.isArray(input)) return input.some((item) => containsText(item, expected))
+  if (!input || typeof input !== "object") return false
+  return Object.values(input).some((item) => containsText(item, expected))
 }
 
-describe("L0 per-field delivery to OpenAI-compatible body (spec A1)", () => {
-  test("A1 baseline: AI SDK emits temperature/top_p/penalties; extra-body adds the gap fields", async () => {
-    const capture: { body: any } = { body: undefined }
-    // Simulate the AI SDK body (which already emits temperature/top_p/penalties)
-    // plus the fork's extra-body merge for the gap fields.
-    const aiSdkBody = {
-      temperature: MODEL_OPTIONS.temperature,
-      top_p: MODEL_OPTIONS.topP,
-      presence_penalty: MODEL_OPTIONS.presencePenalty,
-      frequency_penalty: MODEL_OPTIONS.frequencyPenalty,
-      model: "qwen-test",
-      messages: [],
-    }
-    const extraBody = collectExtraBody({
-      min_p: MODEL_OPTIONS.min_p,
-      top_k: 20,
-      thinking_token_budget: MODEL_OPTIONS.thinking_token_budget,
-      repetition_detection: MODEL_OPTIONS.repetition_detection,
-    })
-    const fetchFn = withExtraBodyFetch(extraBody, capture)
-    await fetchFn("https://vllm.local/v1/chat/completions", {
-      method: "POST",
-      body: JSON.stringify(aiSdkBody),
-    })
-    // Baseline fields — emitted by the AI SDK openai-chat path:
-    expect(capture.body.temperature).toBe(0.6)
-    expect(capture.body.top_p).toBe(0.95)
-    expect(capture.body.presence_penalty).toBe(0.5)
-    expect(capture.body.frequency_penalty).toBe(0.1)
-    // Known-gap fields — delivered verbatim by the fork's extra-body wrapper:
-    expect(capture.body.top_k).toBe(20)
-    expect(capture.body.min_p).toBe(0.0)
-    expect(capture.body.thinking_token_budget).toBe(8192)
-    expect(capture.body.repetition_detection).toEqual(MODEL_OPTIONS.repetition_detection)
-  })
+const root = LayerNode.group([
+  SessionProcessor.node,
+  Session.node,
+  SessionProjector.node,
+  Provider.node,
+  Database.node,
+  EventV2Bridge.node,
+  SessionStatus.node,
+  CrossSpawnSpawner.node,
+])
+const replacements = [
+  [SessionSummary.node, summary],
+  [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+] as const
+const env = LayerNode.compile(
+  LayerNode.group([root, LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })]),
+  replacements,
+)
 
-  test("A2: model-level temperature wins over qwen default 0.55", () => {
-    // The merge order (request.ts) is base < model.options < agent.options < variant.
-    // model.options.temperature=0.6 overrides the transform default 0.55.
-    const merged = { temperature: 0.55, top_p: 1 }
-    const modelOptions = { temperature: 0.6, top_p: 0.95 }
-    const result = { ...merged, ...modelOptions }
-    expect(result.temperature).toBe(0.6)
-    expect(result.top_p).toBe(0.95)
-  })
+const it = testEffect(env)
 
-  test("A3 hosted regression: hosted qwen provider with no extras emits no extra-body keys", () => {
-    // Hosted providers are NOT @ai-sdk/openai-compatible with the fork wrapper,
-    // so collectExtraBody is not applied. Hosted qwen defaults (0.55/1) stay.
-    const extraBody = collectExtraBody(undefined)
-    expect(extraBody).toBeUndefined()
-  })
+// ---------------------------------------------------------------------------
+// Provider configs — extra body keys live in model.options so that
+// production resolveSDK() -> collectExtraBody(model.options) picks them up.
+// ---------------------------------------------------------------------------
 
-  test("collectExtraBody ignores non-recognized keys", () => {
-    const out = collectExtraBody({ temperature: 0.6, unrelated: "x", min_p: 0.1 })
-    expect(out).toEqual({ min_p: 0.1 })
-    expect(out?.temperature).toBeUndefined()
-  })
+function extraBodyConfig(baseURL: string) {
+  return {
+    provider: {
+      test: {
+        name: "Test vLLM",
+        id: "test",
+        env: [],
+        npm: "@ai-sdk/openai-compatible",
+        models: {
+          "test-model": {
+            id: "test-model",
+            name: "Test Model",
+            attachment: false,
+            reasoning: false,
+            temperature: false,
+            tool_call: true,
+            release_date: "2025-01-01",
+            limit: { context: 100_000, output: 10_000 },
+            cost: { input: 0, output: 0 },
+            options: {
+              min_p: 0.05,
+              top_k: 50,
+              thinking_token_budget: 4096,
+              repetition_detection: {
+                min_pattern_size: 1,
+                max_pattern_size: 40,
+                min_count: 4,
+              },
+              extraBody: {
+                custom_extra_field: "fork-tripwire",
+              },
+            },
+          },
+        },
+        options: { apiKey: "test-key", baseURL },
+      },
+    },
+  }
+}
 
-  test("collectExtraBody merges caller-supplied extraBody record", () => {
-    const out = collectExtraBody({ min_p: 0.1, extraBody: { custom_field: 42 } })
-    expect(out).toEqual({ min_p: 0.1, custom_field: 42 })
+function nonCompatibleConfig(baseURL: string) {
+  return {
+    provider: {
+      test: {
+        name: "Test OpenAI",
+        id: "test",
+        env: [],
+        npm: "@ai-sdk/openai",
+        models: {
+          "test-model": {
+            id: "test-model",
+            name: "Test Model",
+            attachment: false,
+            reasoning: false,
+            temperature: false,
+            tool_call: true,
+            release_date: "2025-01-01",
+            limit: { context: 100_000, output: 10_000 },
+            cost: { input: 0, output: 0 },
+            options: {
+              min_p: 0.05,
+              top_k: 50,
+              thinking_token_budget: 4096,
+              repetition_detection: {
+                min_pattern_size: 1,
+                max_pattern_size: 40,
+                min_count: 4,
+              },
+              extraBody: {
+                custom_extra_field: "fork-tripwire",
+              },
+            },
+          },
+        },
+        options: { apiKey: "test-key", baseURL },
+      },
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const user = Effect.fn("TestSession.user")(function* (sessionID: SessionID, text: string) {
+  const session = yield* Session.Service
+  const msg = yield* session.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID,
+    agent: "build",
+    model: ref,
+    time: { created: Date.now() },
   })
+  yield* session.updatePart({
+    id: PartID.ascending(),
+    messageID: msg.id,
+    sessionID,
+    type: "text",
+    text,
+  })
+  return msg
+})
+
+const assistant = Effect.fn("TestSession.assistant")(function* (
+  sessionID: SessionID,
+  parentID: MessageID,
+  root: string,
+) {
+  const session = yield* Session.Service
+  const msg = {
+    id: MessageID.ascending(),
+    role: "assistant" as const,
+    sessionID,
+    mode: "build" as const,
+    agent: "build",
+    path: { cwd: root, root },
+    cost: 0,
+    tokens: {
+      total: 0,
+      input: 0,
+      output: 0,
+      reasoning: 0,
+      cache: { read: 0, write: 0 },
+    },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    parentID,
+    time: { created: Date.now() },
+    finish: "end_turn" as const,
+  }
+  yield* session.updateMessage(msg)
+  return msg
+})
+
+const boot = Effect.fn("test.boot")(function* () {
+  const processors = yield* SessionProcessor.Service
+  const session = yield* Session.Service
+  const provider = yield* Provider.Service
+  return { processors, session, provider }
+})
+
+// ---------------------------------------------------------------------------
+// Tests — production SDK resolution path
+// ---------------------------------------------------------------------------
+
+describe("L0 extra-body delivery through production Provider SDK resolution", () => {
+  it.live("recognized vLLM keys reach outgoing OpenAI-compatible request body", () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          yield* llm.text("ok")
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            },
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "hi" }],
+            tools: {},
+          }
+
+          yield* handle.process(input)
+          yield* llm.wait(1)
+
+          const inputs = yield* llm.inputs
+          // Select the user chat request independently from the fields under test.
+          const body = findChatInput(inputs)
+
+          expect(body).toBeDefined()
+          // Recognized vLLM keys — delivered by production collectExtraBody +
+          // resolveSDK fetch wrapper:
+          expect(body?.min_p).toBe(0.05)
+          expect(body?.top_k).toBe(50)
+          expect(body?.thinking_token_budget).toBe(4096)
+          expect(body?.repetition_detection).toEqual({
+            min_pattern_size: 1,
+            max_pattern_size: 40,
+            min_count: 4,
+          })
+        }),
+      { config: (url) => extraBodyConfig(url) },
+    ),
+  )
+
+  it.live("caller-supplied extraBody record reaches outgoing request body", () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          yield* llm.text("ok")
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            },
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "hi" }],
+            tools: {},
+          }
+
+          yield* handle.process(input)
+          yield* llm.wait(1)
+
+          const inputs = yield* llm.inputs
+          const body = findChatInput(inputs)
+
+          expect(body).toBeDefined()
+          // Caller-supplied extraBody record — merged by production
+          // collectExtraBody into the outgoing request:
+          expect(body?.custom_extra_field).toBe("fork-tripwire")
+        }),
+      { config: (url) => extraBodyConfig(url) },
+    ),
+  )
+
+  it.live("non-compatible provider npm bypasses extra-body fetch wrapper", () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+
+          yield* llm.text("ok")
+
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: mdl,
+          })
+
+          const input = {
+            user: {
+              id: parent.id,
+              sessionID: chat.id,
+              role: "user" as const,
+              time: parent.time,
+              agent: parent.agent,
+              model: { providerID: ref.providerID, modelID: ref.modelID },
+            },
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user" as const, content: "hi" }],
+            tools: {},
+          }
+
+          yield* handle.process(input)
+          yield* llm.wait(1)
+
+          const inputs = yield* llm.inputs
+          // For a non-compatible provider (npm: "@ai-sdk/openai"), the
+          // production resolveSDK gate
+          //   model.api.npm.includes("@ai-sdk/openai-compatible")
+          // evaluates to false, so NO extraBody fetch wrapper is installed.
+          // The model.options keys MUST NOT appear in the outgoing request.
+          expect(inputs.length).toBeGreaterThan(0)
+          for (const body of inputs) {
+            expect(body.min_p).toBeUndefined()
+            expect(body.top_k).toBeUndefined()
+            expect(body.thinking_token_budget).toBeUndefined()
+            expect(body.repetition_detection).toBeUndefined()
+            expect(body.custom_extra_field).toBeUndefined()
+          }
+        }),
+      { config: (url) => nonCompatibleConfig(url) },
+    ),
+  )
 })

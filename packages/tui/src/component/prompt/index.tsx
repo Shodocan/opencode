@@ -52,6 +52,7 @@ import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
 import { createPromptEventHandlers } from "./events"
+import { createHiddenPromptQueue } from "./hidden-prompt-queue"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
@@ -235,63 +236,41 @@ export function Prompt(props: PromptProps) {
   const event = useEvent()
 
   // Hidden work-tracker messages are delivered as synthetic model prompts.
-  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean; caller?: string }>>()
-  const hiddenPromptInFlight = new Set<string>()
+  const hiddenPromptQueue = createHiddenPromptQueue()
 
-  const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
+  const drainHiddenPromptQueue = (sessionID: string | undefined) => {
     if (!sessionID) return
-    if (hiddenPromptInFlight.has(sessionID)) return
+    void hiddenPromptQueue.drain(sessionID, async (item) => {
+      const agent = local.agent.current()
+      const model = local.model.current()
+      if (!agent) return
 
-    const queue = hiddenPromptQueue.get(sessionID)
-    if (!queue || queue.length === 0) return
-
-    hiddenPromptInFlight.add(sessionID)
-    try {
-      while (queue.length > 0) {
-        const item = queue.shift()
-        if (!item) continue
-
-        const agent = local.agent.current()
-        const model = local.model.current()
-        if (!agent) continue
-
-        await sdk.client.session
-          .prompt({
-            sessionID,
-            agent: agent.name,
-            ...(model ? { model } : {}),
-            variant: local.model.variant.current(),
-            parts: [
-              {
-                type: "text",
-                text: item.text,
-                synthetic: true,
-                ...(item.visible !== false
-                  ? {
-                      metadata: {
-                        [MCP_VISIBLE_METADATA.visible]: true,
-                        ...(item.caller ? { [MCP_VISIBLE_METADATA.caller]: item.caller } : {}),
-                      },
-                    }
-                  : {}),
-              },
-            ],
-          })
-          .catch((error) => {
-            console.error("failed to deliver hidden model prompt", error)
-          })
-      }
-    } finally {
-      hiddenPromptInFlight.delete(sessionID)
-
-      if (queue.length === 0) {
-        hiddenPromptQueue.delete(sessionID)
-      }
-
-      if (queue.length > 0) {
-        void drainHiddenPromptQueue(sessionID)
-      }
-    }
+      await sdk.client.session
+        .prompt({
+          sessionID,
+          agent: agent.name,
+          ...(model ? { model } : {}),
+          variant: local.model.variant.current(),
+          parts: [
+            {
+              type: "text",
+              text: item.text,
+              synthetic: true,
+              ...(item.visible !== false
+                ? {
+                    metadata: {
+                      [MCP_VISIBLE_METADATA.visible]: true,
+                      ...(item.caller ? { [MCP_VISIBLE_METADATA.caller]: item.caller } : {}),
+                    },
+                  }
+                : {}),
+            },
+          ],
+        })
+        .catch((error) => {
+          console.error("failed to deliver hidden model prompt", error)
+        })
+    })
   }
 
   createEffect(() => {
@@ -326,10 +305,8 @@ export function Prompt(props: PromptProps) {
       })
     },
     onSynthetic(evt) {
-      const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
-      queue.push({ text: evt.text, visible: evt.visible, caller: evt.caller })
-      hiddenPromptQueue.set(evt.sessionID, queue)
-      void drainHiddenPromptQueue(evt.sessionID)
+      hiddenPromptQueue.enqueue(evt.sessionID, { text: evt.text, visible: evt.visible, caller: evt.caller })
+      drainHiddenPromptQueue(evt.sessionID)
     },
   })
 
