@@ -653,7 +653,20 @@ const layer = Layer.effect(
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
-      const agentName = input.agent
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      const persisted = session.model
+        ? {
+            providerID: ProviderV2.ID.make(session.model.providerID),
+            modelID: ModelV2.ID.make(session.model.id),
+            ...(session.model.variant && session.model.variant !== "default" ? { variant: session.model.variant } : {}),
+          }
+        : undefined
+      const latestUser = yield* sessions.findMessage(input.sessionID, (m) => m.info.role === "user").pipe(Effect.orDie)
+      const latestUserAgent = Option.isSome(latestUser) ? latestUser.value.info.agent : undefined
+      const latestUserModel = Option.isSome(latestUser) && latestUser.value.info.role === "user"
+        ? latestUser.value.info.model
+        : undefined
+      const agentName = input.agent ?? session.agent ?? latestUserAgent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -663,15 +676,22 @@ const layer = Layer.effect(
         throw error
       }
 
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
-      const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
-      const full =
-        !input.variant && ag.variant && same
-          ? yield* provider
-              .getModel(model.providerID, model.modelID)
-              .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
-          : undefined
-      const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
+      const source = input.model
+        ? "input"
+        : persisted
+          ? "persisted"
+          : latestUserModel
+            ? "latest"
+            : ag.model
+              ? "agent"
+              : "provider"
+      const model =
+        input.model ?? persisted ?? latestUserModel ?? ag.model ?? (yield* provider.defaultModel().pipe(Effect.orDie))
+      const agentModel = source === "agent" ? yield* getModel(model.providerID, model.modelID, input.sessionID) : undefined
+      const agentVariant = ag.variant && agentModel?.variants?.[ag.variant] ? ag.variant : undefined
+      const variant =
+        input.variant ??
+        (source === "persisted" ? persisted?.variant : source === "latest" ? latestUserModel?.variant : agentVariant)
 
       const info: SessionV1.User = {
         id: input.messageID ?? MessageID.ascending(),
@@ -689,12 +709,11 @@ const layer = Layer.effect(
         format: input.format,
       }
 
-      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
       if (
-        current.agent !== info.agent ||
-        current.model?.providerID !== info.model.providerID ||
-        current.model?.id !== info.model.modelID ||
-        (current.model?.variant === "default" ? undefined : current.model?.variant) !== info.model.variant
+        session.agent !== info.agent ||
+        session.model?.providerID !== info.model.providerID ||
+        session.model?.id !== info.model.modelID ||
+        (session.model?.variant === "default" ? undefined : session.model?.variant) !== info.model.variant
       ) {
         yield* sessions.setAgentModel({
           sessionID: input.sessionID,

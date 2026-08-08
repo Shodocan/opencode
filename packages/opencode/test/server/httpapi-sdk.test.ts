@@ -255,6 +255,43 @@ function withFakeLlm<A, E>(serverPath: ServerPath, run: (input: LlmProjectFixtur
   }).pipe(Effect.provide(TestLLMServer.layer))
 }
 
+function withRoutedFakeLlm<A, E>(
+  serverPath: ServerPath,
+  run: (input: LlmProjectFixture) => Effect.Effect<A, E, TestScope>,
+) {
+  return Effect.gen(function* () {
+    const llm = yield* TestLLMServer
+    const config = testProviderConfig(llm.url)
+    return yield* withProject(
+      serverPath,
+      {
+        config: {
+          ...config,
+          provider: {
+            test: {
+              ...config.provider.test,
+              models: {
+                ...config.provider.test.models,
+                "selected-model": {
+                  ...config.provider.test.models["test-model"],
+                  id: "selected-model",
+                  name: "Selected Model",
+                  variants: { max: {} },
+                },
+              },
+            },
+          },
+          agent: {
+            build: { model: "test/test-model" },
+            plan: { model: "test/test-model" },
+          },
+        },
+      },
+      (input) => run({ ...input, llm }),
+    )
+  }).pipe(Effect.provide(TestLLMServer.layer))
+}
+
 function withFakeLlmProject<A, E>(
   serverPath: ServerPath,
   options: { setup?: (dir: string) => Effect.Effect<void, E, TestServices> },
@@ -767,6 +804,66 @@ describe("HttpApi SDK", () => {
             .filter((text): text is string => typeof text === "string")
             .sort(),
         }
+      }),
+    ),
+  )
+
+  serverPathParity("preserves selected routes for sync and async prompts", (serverPath) =>
+    withRoutedFakeLlm(serverPath, ({ sdk, llm }) =>
+      Effect.gen(function* () {
+        const selected = { id: "selected-model", providerID: "test", variant: "max" }
+        const syncSession = yield* capture(() =>
+          sdk.session.create({ title: "sync route", agent: "plan", model: selected }),
+        )
+        const syncID = String(record(syncSession.data).id)
+        const syncPrompt = yield* capture(() =>
+          sdk.session.prompt({
+            sessionID: syncID,
+            noReply: true,
+            parts: [{ type: "text", text: "sync resume" }],
+          }),
+        )
+
+        const syncInfo = record(record(syncPrompt.data).info)
+        expect(syncInfo.agent).toBe("plan")
+        expect(record(syncInfo.model)).toEqual({ providerID: "test", modelID: "selected-model", variant: "max" })
+
+        const asyncSession = yield* capture(() =>
+          sdk.session.create({ title: "async route", agent: "plan", model: selected }),
+        )
+        const asyncID = String(record(asyncSession.data).id)
+        yield* llm.text("continued", { usage: { input: 5, output: 3 } })
+        const asyncPrompt = yield* capture(() =>
+          sdk.session.promptAsync({
+            sessionID: asyncID,
+            parts: [{ type: "text", text: "async resume" }],
+          }),
+        )
+        yield* awaitWithTimeout(llm.wait(1), "timed out waiting for async routed prompt", "10 seconds")
+
+        const messages = yield* capture(() => sdk.session.messages({ sessionID: asyncID }))
+        const routed = array(messages.data).map((item) => record(item).info)
+        const asyncUser = routed.find((info) => record(info).role === "user")
+        const asyncAssistant = routed.find((info) => record(info).role === "assistant")
+        expect(record(asyncUser).agent).toBe("plan")
+        expect(record(record(asyncUser).model)).toEqual({
+          providerID: "test",
+          modelID: "selected-model",
+          variant: "max",
+        })
+        expect(record(asyncAssistant)).toMatchObject({
+          agent: "plan",
+          providerID: "test",
+          modelID: "selected-model",
+          variant: "max",
+        })
+        expect(statuses({ syncSession, syncPrompt, asyncSession, asyncPrompt, messages })).toEqual({
+          syncSession: 200,
+          syncPrompt: 200,
+          asyncSession: 200,
+          asyncPrompt: 204,
+          messages: 200,
+        })
       }),
     ),
   )

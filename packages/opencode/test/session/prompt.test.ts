@@ -2276,7 +2276,7 @@ it.instance("records aborted errors when prompt is cancelled mid-stream", () =>
   }),
 )
 
-// Agent variant
+// Agent route and variant
 
 noLLMServer.instance(
   "applies agent variant only when using agent model",
@@ -2286,8 +2286,9 @@ noLLMServer.instance(
       const sessions = yield* Session.Service
       const session = yield* sessions.create({})
 
+      const otherSession = yield* sessions.create({})
       const other = yield* prompt.prompt({
-        sessionID: session.id,
+        sessionID: otherSession.id,
         agent: "build",
         model: { providerID: ProviderV2.ID.make("opencode"), modelID: ModelV2.ID.make("kimi-k2.5-free") },
         noReply: true,
@@ -2320,6 +2321,7 @@ noLLMServer.instance(
       if (override.info.role !== "user") throw new Error("expected user message")
       expect(override.info.model.variant).toBe("high")
 
+      yield* sessions.remove(otherSession.id)
       yield* sessions.remove(session.id)
     }),
   {
@@ -2433,4 +2435,236 @@ noLLMServer.instance(
       }
     }),
   30_000,
+)
+
+const cfgWithPlanAgent = {
+  ...cfg,
+  provider: {
+    ...cfg.provider,
+    test: {
+      ...cfg.provider.test,
+      models: {
+        "test-model": {
+          ...cfg.provider.test.models["test-model"],
+          variants: { xhigh: {}, deep: {} },
+        },
+        "plan-model": {
+          id: "plan-model",
+          name: "Plan Model",
+          attachment: false,
+          reasoning: false,
+          temperature: false,
+          tool_call: true,
+          release_date: "2025-01-01",
+          limit: { context: 100000, output: 10000 },
+          cost: { input: 0, output: 0 },
+          options: {},
+          variants: { deep: {} },
+        },
+      },
+    },
+  },
+  agent: {
+    build: {
+      model: "test/test-model",
+      variant: "xhigh",
+    },
+    plan: {
+      model: "test/plan-model",
+      variant: "deep",
+    },
+  },
+}
+
+noLLMServer.instance(
+  "omitted route preserves persisted non-default agent/model/variant without emitting Session.Event.Updated",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+
+      const chat = yield* sessions.create({
+        title: "Persisted route",
+        agent: "plan",
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("plan-model"), variant: "deep" },
+      })
+      const before = yield* sessions.get(chat.id)
+
+      const routes: Array<{ agent?: string; model?: Session.Info["model"] }> = []
+      const off = yield* events.listen((event) => {
+        if (event.type !== Session.Event.Updated.type) return Effect.void
+        const data = event.data as typeof Session.Event.Updated.data.Type
+        if (data.sessionID === chat.id) routes.push({ agent: data.info.agent, model: data.info.model })
+        return Effect.void
+      })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        noReply: true,
+        parts: [{ type: "text", text: "continue" }],
+      })
+      yield* off
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("plan")
+      expect(msg.info.model.providerID).toBe(ProviderV2.ID.make("test"))
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("plan-model"))
+      expect(msg.info.model.variant).toBe("deep")
+
+      const after = yield* sessions.get(chat.id)
+      expect(after.agent).toBe(before.agent)
+      expect(after.model?.id).toBe(before.model?.id)
+      expect(after.model?.providerID).toBe(before.model?.providerID)
+      expect(after.model?.variant).toBe(before.model?.variant)
+
+      expect(routes).toEqual([{ agent: before.agent, model: before.model }])
+    }),
+  { config: cfgWithPlanAgent },
+)
+
+noLLMServer.instance(
+  "explicit model/variant override persists new route",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({
+        title: "Override route",
+        agent: "plan",
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("plan-model"), variant: "deep" },
+      })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+        variant: "xhigh",
+        noReply: true,
+        parts: [{ type: "text", text: "switch" }],
+      })
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("build")
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("test-model"))
+      expect(msg.info.model.variant).toBe("xhigh")
+
+      const after = yield* sessions.get(chat.id)
+      expect(after.agent).toBe("build")
+      expect(after.model?.id).toBe(ModelV2.ID.make("test-model"))
+      expect(after.model?.variant).toBe("xhigh")
+    }),
+  { config: cfgWithPlanAgent },
+)
+
+noLLMServer.instance(
+  "brand-new session uses default agent configured model and variant",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({ title: "Fresh" })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("build")
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("test-model"))
+      expect(msg.info.model.variant).toBe("xhigh")
+    }),
+  { config: cfgWithPlanAgent },
+)
+
+noLLMServer.instance(
+  "latest user-message fallback when session row has no route",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({ title: "User-msg fallback" })
+
+      yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: chat.id,
+        agent: "plan",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("plan-model"), variant: "deep" },
+        time: { created: Date.now() },
+      })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        noReply: true,
+        parts: [{ type: "text", text: "continue" }],
+      })
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("plan")
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("plan-model"))
+      expect(msg.info.model.variant).toBe("deep")
+    }),
+  { config: cfgWithPlanAgent },
+)
+
+noLLMServer.instance(
+  "explicit agent only preserves persisted model and variant",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({
+        title: "Agent only",
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("plan-model"), variant: "deep" },
+      })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "plan",
+        noReply: true,
+        parts: [{ type: "text", text: "switch agent" }],
+      })
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("plan")
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("plan-model"))
+      expect(msg.info.model.variant).toBe("deep")
+    }),
+  { config: cfgWithPlanAgent },
+)
+
+noLLMServer.instance(
+  "explicit model only preserves persisted agent and clears stale variant",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+
+      const chat = yield* sessions.create({
+        title: "Model only",
+        agent: "plan",
+        model: { providerID: ProviderV2.ID.make("test"), id: ModelV2.ID.make("plan-model"), variant: "deep" },
+      })
+
+      const msg = yield* prompt.prompt({
+        sessionID: chat.id,
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+        noReply: true,
+        parts: [{ type: "text", text: "switch model" }],
+      })
+
+      if (msg.info.role !== "user") throw new Error("expected user message")
+      expect(msg.info.agent).toBe("plan")
+      expect(msg.info.model.modelID).toBe(ModelV2.ID.make("test-model"))
+      expect(msg.info.model.variant).toBeUndefined()
+    }),
+  { config: cfgWithPlanAgent },
 )
