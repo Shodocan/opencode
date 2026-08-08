@@ -134,8 +134,8 @@ package:
 	( cd "$$stage" && \
 	  sha256sum $(STABLE_KEY) | awk '{print $$1}' > $(STABLE_KEY).sha256 && \
 	  sha256sum opencode-custom-$$V-linux-x64.tar.gz | awk '{print $$1}' > opencode-custom-$$V-linux-x64.tar.gz.sha256 ); \
-	stable_sha=$$(rtk read "$$stage/$(STABLE_KEY).sha256"); \
-	ver_sha=$$(rtk read "$$stage/opencode-custom-$$V-linux-x64.tar.gz.sha256"); \
+	stable_sha=$$(<"$$stage/$(STABLE_KEY).sha256"); \
+	ver_sha=$$(<"$$stage/opencode-custom-$$V-linux-x64.tar.gz.sha256"); \
 	[ "$$stable_sha" = "$$ver_sha" ] || { echo "$(R)internal sha mismatch$(N)"; exit 1; }; \
 	printf '{"version":"%s","url":"%s/opencode-custom-%s-linux-x64.tar.gz","sha256":"%s"}\n' "$$V" "$(BASE_URL)" "$$V" "$$ver_sha" > "$$stage/$(MANIFEST_KEY)"; \
 	echo "$(G)package ok: sha=$$stable_sha$(N)"
@@ -159,7 +159,7 @@ flip-manifest:
 	@set -o pipefail; \
 	V=$$(sed 's/RESOLVED_VERSION=//' .release-version.env); \
 	stage=$(STAGE)-$$V; \
-	ver_sha=$$(rtk read "$$stage/opencode-custom-$$V-linux-x64.tar.gz.sha256"); \
+	ver_sha=$$(<"$$stage/opencode-custom-$$V-linux-x64.tar.gz.sha256"); \
 	mc cat $(REMOTE)/$(BUCKET_PATH)/$(INSTALL_KEY) > "$$stage/install.sh.cur"; \
 	sed -i "s|^DEFAULT_URL=.*|DEFAULT_URL=\"$(BASE_URL)/opencode-custom-$$V-linux-x64.tar.gz\"|" "$$stage/install.sh.cur"; \
 	sed -i "s|^DEFAULT_SHA256=.*|DEFAULT_SHA256=\"$$ver_sha\"|" "$$stage/install.sh.cur"; \
