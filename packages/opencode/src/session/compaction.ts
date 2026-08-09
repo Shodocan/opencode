@@ -364,7 +364,29 @@ const layer = Layer.effect(
       }
 
       const agent = yield* agents.get("compaction")
-      const modelRef = agent.model ?? userMessage.model
+      // FORK: auto-compaction summarizes on the session's currently selected
+      // route. The route recorded on the triggering user message can be stale
+      // (pre-fix prompt_async wakeups persisted the default agent model), and
+      // the session row carries the user's current selection. Explicit/manual
+      // compactions keep the caller-provided route.
+      const current = yield* session.get(input.sessionID).pipe(Effect.orDie)
+      const sessionRoute =
+        compactionPart?.auto === true && current.model
+          ? {
+              providerID: ProviderV2.ID.make(current.model.providerID),
+              modelID: ModelV2.ID.make(current.model.id),
+              ...(current.model.variant && current.model.variant !== "default"
+                ? { variant: current.model.variant }
+                : {}),
+            }
+          : undefined
+      const sessionRouteModel = sessionRoute
+        ? yield* provider
+            .getModel(sessionRoute.providerID, sessionRoute.modelID)
+            .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
+        : undefined
+      const modelRef: { providerID: ProviderV2.ID; modelID: ModelV2.ID; variant?: string } =
+        agent.model ?? (sessionRouteModel ? sessionRoute : undefined) ?? userMessage.model
       const modelExit = yield* provider.getModel(modelRef.providerID, modelRef.modelID).pipe(Effect.exit)
       if (Exit.isFailure(modelExit)) {
         const err = Cause.squash(modelExit.cause)
@@ -415,7 +437,7 @@ const layer = Layer.effect(
         sessionID: input.sessionID,
         mode: "compaction",
         agent: "compaction",
-        variant: userMessage.model.variant,
+        variant: modelRef.variant ?? userMessage.model.variant,
         summary: true,
         path: {
           cwd: ctx.directory,
@@ -441,7 +463,7 @@ const layer = Layer.effect(
         model,
       })
       const result = yield* processor.process({
-        user: userMessage,
+        user: { ...userMessage, model: { ...modelRef, variant: modelRef.variant ?? userMessage.model.variant } },
         agent,
         sessionID: input.sessionID,
         tools: {},

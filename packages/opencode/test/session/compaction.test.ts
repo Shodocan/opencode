@@ -367,6 +367,54 @@ function autocontinue(enabled: boolean) {
   })
 }
 
+// Two-model provider so a session's selected route can differ from the route
+// recorded on the compaction parent message.
+const staleRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("stale-model"),
+}
+const selectedRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("selected-model"),
+}
+
+function dualModelProvider() {
+  const stale = ProviderTest.model({ id: staleRef.modelID, providerID: staleRef.providerID })
+  const selected = ProviderTest.model({ id: selectedRef.modelID, providerID: selectedRef.providerID })
+  const base = ProviderTest.fake({ model: stale })
+  const row: Provider.Info = { ...base.info, models: { [stale.id]: stale, [selected.id]: selected } }
+  return {
+    ...base,
+    info: row,
+    layer: Layer.succeed(
+      Provider.Service,
+      Provider.Service.of({
+        list: Effect.fn("TestProvider.list")(() => Effect.succeed({ [row.id]: row })),
+        getProvider: Effect.fn("TestProvider.getProvider")((providerID) =>
+          providerID === row.id ? Effect.succeed(row) : Effect.die(new Error(`Unknown test provider: ${providerID}`)),
+        ),
+        getModel: Effect.fn("TestProvider.getModel")(function* (providerID, modelID) {
+          if (providerID === row.id && modelID === stale.id) return stale
+          if (providerID === row.id && modelID === selected.id) return selected
+          return yield* new Provider.ModelNotFoundError({ providerID, modelID })
+        }),
+        getLanguage: Effect.fn("TestProvider.getLanguage")(() =>
+          Effect.die(new Error("ProviderTest.getLanguage not configured")),
+        ),
+        closest: Effect.fn("TestProvider.closest")((providerID) =>
+          Effect.succeed(providerID === row.id ? { providerID: row.id, modelID: stale.id } : undefined),
+        ),
+        getSmallModel: Effect.fn("TestProvider.getSmallModel")((providerID) =>
+          Effect.succeed(providerID === row.id ? stale : undefined),
+        ),
+        defaultModel: Effect.fn("TestProvider.defaultModel")(() =>
+          Effect.succeed({ providerID: row.id, modelID: stale.id }),
+        ),
+      }),
+    ),
+  }
+}
+
 describe("session.compaction.isOverflow", () => {
   it.live(
     "returns true when token count exceeds usable context",
@@ -1552,6 +1600,116 @@ describe("session.compaction.process", () => {
       expect(part?.type).toBe("compaction")
       expect(part?.tail_start_id).toBe(keep.id)
     }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 500 }) })),
+  )
+
+  itCompaction.instance(
+    "auto compaction summarizes on the session's selected route, not the stale parent route",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        // Session's currently selected route differs from the route recorded on
+        // the compaction parent message below.
+        yield* ssn.setAgentModel({
+          sessionID: session.id,
+          agent: "build",
+          model: { id: selectedRef.modelID, providerID: selectedRef.providerID, variant: "high" },
+          time: Date.now(),
+        })
+        yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: staleRef, auto: true })
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: true })
+
+        expect(captured?.model.id).toBe(selectedRef.modelID)
+        expect(captured?.model.providerID).toBe(selectedRef.providerID)
+        expect(captured?.user.model).toEqual({ ...selectedRef, variant: "high" })
+        const summary = (yield* ssn.messages({ sessionID: session.id })).find(
+          (msg) => msg.info.role === "assistant" && msg.info.summary,
+        )
+        expect(summary?.info.role === "assistant" && summary.info.modelID).toBe(selectedRef.modelID)
+        expect(summary?.info.role === "assistant" && summary.info.variant).toBe("high")
+      }).pipe(withCompaction({ llm: stub.llmLayer, provider: dualModelProvider() }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "manual compaction keeps the caller-provided route even when the session route differs",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* ssn.setAgentModel({
+          sessionID: session.id,
+          agent: "build",
+          model: { id: selectedRef.modelID, providerID: selectedRef.providerID, variant: "high" },
+          time: Date.now(),
+        })
+        yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: staleRef, auto: false })
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        expect(captured?.model.id).toBe(staleRef.modelID)
+        expect(captured?.model.providerID).toBe(staleRef.providerID)
+      }).pipe(withCompaction({ llm: stub.llmLayer, provider: dualModelProvider() }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "auto compaction falls back to the parent route when the session route model is unavailable",
+    () => {
+      const stub = llm()
+      let captured: LLM.StreamInput | undefined
+      stub.push(
+        reply("summary", (input) => {
+          captured = input
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* ssn.setAgentModel({
+          sessionID: session.id,
+          agent: "build",
+          model: { id: ModelV2.ID.make("removed-model"), providerID: staleRef.providerID },
+          time: Date.now(),
+        })
+        yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: staleRef, auto: true })
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: true })
+
+        expect(captured?.model.id).toBe(staleRef.modelID)
+        expect(captured?.model.providerID).toBe(staleRef.providerID)
+      }).pipe(withCompaction({ llm: stub.llmLayer, provider: dualModelProvider() }))
+    },
+    { git: true },
   )
 })
 
