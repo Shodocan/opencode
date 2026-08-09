@@ -1151,7 +1151,7 @@ const layer = Layer.effect(
             lastAssistant?.finish &&
             !["tool-calls"].includes(lastAssistant.finish) &&
             !hasToolCalls &&
-            lastUser.id < lastAssistant.id
+            lastAssistant.parentID === lastUser.id
           ) {
             // fork(stop-recovery): bounded premature-stop recovery — evaluates
             // once per would-be turn end; injects a synthetic continue/nudge and
