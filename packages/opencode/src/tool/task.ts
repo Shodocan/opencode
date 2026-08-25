@@ -77,6 +77,15 @@ const BACKGROUND_UPDATED = [
 const BaseParameterFields = {
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
   prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
+  // FORK FEATURE (13) autonomy-stack / C4 — typed subagent results. The
+  // structured-output machinery is already shipped in prompt.ts (StructuredOutput
+  // tool injected ~:1641, toolChoice "required" ~:1361, StructuredOutputError
+  // ~:1386); the child dispatch simply never passed `format`. Stands on its own
+  // merit -- it is NOT an L3 prerequisite (ralph drives children via promptOps).
+  outputSchema: Schema.optional(Schema.Unknown).annotate({
+    description:
+      "Optional JSON Schema. When set, the subagent must return a value matching it, delivered as structured output instead of prose.",
+  }),
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
@@ -519,6 +528,7 @@ export const TaskTool = Tool.define(
           variant: model.variant,
           agent: next.name,
           parts: stripped,
+          ...(params.outputSchema ? { format: { type: "json_schema" as const, schema: params.outputSchema } } : {}),
         })
         if (result.info.role === "assistant" && result.info.error) {
           const message =
@@ -530,6 +540,12 @@ export const TaskTool = Tool.define(
         const failed = result.parts.findLast((item) => item.type === "tool" && item.state.status === "error")
         if (failed?.type === "tool" && failed.state.status === "error") {
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
+        }
+        // A formatted turn ends on the StructuredOutput tool call, so there is no
+        // text part to read -- `parts.findLast(type==="text")` yields "". The
+        // payload lives on info.structured and survives the DB round-trip.
+        if (params.outputSchema && result.info.role === "assistant" && result.info.structured !== undefined) {
+          return JSON.stringify(result.info.structured)
         }
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
       })
