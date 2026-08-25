@@ -14,6 +14,7 @@ import { Timestamps } from "../database/schema.sql"
 import type { SystemContext } from "../system-context/index"
 import { AgentV2 } from "../agent"
 import type { Revert } from "@opencode-ai/schema/revert"
+import type { SessionGoal } from "./goal"
 
 type SessionMessageData = Omit<(typeof SessionMessage.Message)["Encoded"], "type" | "id">
 type V1MessageData = Omit<SessionV1.Info, "id" | "sessionID">
@@ -173,4 +174,26 @@ export const SessionContextEpochTable = sqliteTable("session_context_epoch", {
   baseline: text().notNull(),
   snapshot: text({ mode: "json" }).notNull().$type<SystemContext.Snapshot>(),
   baseline_seq: integer().notNull(),
+})
+
+// FORK FEATURE (13) autonomy-stack / L4 — projection of session.next.goal.changed.
+// NOT a second source of truth: the durable event log is authoritative and this
+// row is a materialised fold of it (projectors run inside the same transaction
+// as the event insert, and replay() goes through the identical path).
+// Deliberately absent (D-6): the live armed/disarmed bit and its disarmReason.
+export const SessionGoalTable = sqliteTable("session_goal", {
+  session_id: text()
+    .$type<SessionSchema.ID>()
+    .primaryKey()
+    .references(() => SessionTable.id, { onDelete: "cascade" }),
+  goal_id: text().notNull(),
+  revision: integer().notNull(),
+  objective: text().notNull(),
+  phase: text().$type<SessionGoal.Phase>().notNull(),
+  max_rounds: integer().notNull(),
+  max_tokens: integer().notNull(),
+  rounds_started: integer().notNull().default(0),
+  tokens_used: integer().notNull().default(0),
+  blocked_code: text().$type<SessionGoal.BlockedCode>(),
+  blocked_message: text(),
 })

@@ -47,6 +47,10 @@ export const Info = Schema.Struct({
   subagents: Schema.optional(Schema.Array(Schema.String)),
   // FORK FEATURE (9) stop-recovery — per-agent disable-only override.
   stopRecovery: Schema.optional(Schema.Boolean),
+  // FORK FEATURE (13) autonomy-stack — per-agent disable-only overrides,
+  // independent of stopRecovery (D-16).
+  goal: Schema.optional(Schema.Boolean),
+  ralph: Schema.optional(Schema.Boolean),
   // FORK FEATURE (10) gates — declarative dispatch gates. Validated at merge
   // time via parseGates (fail-fast with the agent name); kept loose as
   // Schema.Unknown here so the parse/validate logic lives in one place
@@ -308,6 +312,9 @@ const layer = Layer.effect(
           item.subagents = value.subagents ?? item.subagents
           // FORK FEATURE (9) stop-recovery — carry the disable-only override.
           item.stopRecovery = value.stopRecovery ?? item.stopRecovery
+          // FORK FEATURE (13) autonomy-stack — carry the disable-only overrides.
+          item.goal = value.goal ?? item.goal
+          item.ralph = value.ralph ?? item.ralph
           // FORK FEATURE (10) gates — parse/validate the declarative dispatch
           // gates at merge time. Fail fast at startup (with the agent name) on
           // a malformed block; undefined when absent (zero behavior change).

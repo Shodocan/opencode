@@ -22,6 +22,7 @@ import { ConfigPlugin } from "./config/plugin"
 import { ConfigProvider } from "./config/provider"
 import { ConfigReference } from "./config/reference"
 import { ConfigStopRecovery } from "./config/stop-recovery"
+import { ConfigGoal } from "./config/goal"
 import { ConfigToolOutput } from "./config/tool-output"
 import { ConfigWatcher } from "./config/watcher"
 import { ConfigV1 } from "./v1/config/config"
@@ -91,6 +92,14 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   // FORK FEATURE (9) stop-recovery — opt-in L1 premature-stop recovery.
   stopRecovery: ConfigStopRecovery.Info.pipe(Schema.optional).annotate({
     description: "Premature-stop recovery (length auto-continue, no-tool nudge, empty-after-thinking)",
+  }),
+  // FORK FEATURE (13) autonomy-stack — L4 goal + L3 ralph. Independent of
+  // stopRecovery (D-13): each carries its own enable flag.
+  goal: ConfigGoal.Info.pipe(Schema.optional).annotate({
+    description: "Durable objective with a bounded round/token budget (/goal)",
+  }),
+  ralph: ConfigGoal.Ralph.pipe(Schema.optional).annotate({
+    description: "Repeat-until-done loop with a fresh context each round",
   }),
   skills: Schema.String.pipe(Schema.Array, Schema.optional).annotate({
     description: "Additional paths or URLs to discover skills from",

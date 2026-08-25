@@ -1,0 +1,20 @@
+The user wants to set or manage a durable objective for this session.
+
+Their instruction: $ARGUMENTS
+
+Decide which goal verb applies and call the `goal` tool:
+
+- If they are describing something to achieve, call `goal` with verb `create` and a precise `objective`.
+  Write the objective as a checkable end state ("the autonomy stack is implemented and RC2 is published"),
+  not as an activity ("work on the autonomy stack") -- you will be asked to judge whether it is met.
+  Set `maxRounds` and `maxTokens` if they named a budget; otherwise let the config defaults apply.
+- If they are telling you the objective is done, call `goal` with verb `complete`.
+- If they are telling you to stop because something is in the way, call `goal` with verb `report-blocked`
+  and a `message` saying exactly what blocks you.
+- If they are asking you to pick a goal back up after an interruption, call `goal` with verb `resume`.
+
+While a goal is active the harness re-enters the loop after each turn until you mark it complete or
+blocked, or its budget runs out. Do not keep working past the point where the objective is actually met --
+call `complete` as soon as it is.
+
+After the tool call, tell the user in one line what is now in effect.

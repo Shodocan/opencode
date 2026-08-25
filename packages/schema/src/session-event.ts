@@ -105,6 +105,47 @@ export const StopRecovery = Event.define({
 })
 export type StopRecovery = typeof StopRecovery.Type
 
+// FORK FEATURE (13) autonomy-stack / L4 goal — durable objective state.
+// Event-sourced per spec §6: every event carries the COMPLETE post-mutation
+// snapshot, never a diff (research L4.3, dsh's snapshot-not-diff rule), so a
+// replay from an arbitrary offset reconstructs state without reading prior
+// events. `revision` is validated as current+1 on every non-create mutation
+// (D-3). Round accounting lives here and is NEVER derived by counting message
+// rows (D-4): a revert deletes session_message rows but not event rows.
+//
+// Deliberately NOT on this schema (D-6): the live armed/disarmed bit and its
+// E-14 `disarmReason`. Durable *intent*, ephemeral *authorization* — activation
+// resets to disarmed on every process load so a crash cannot silently resume
+// spending. See docs/artifacts/25-08-2026_autonomy-stack/spec.md §6.
+export namespace Goal {
+  export const Changed = Event.define({
+    type: "session.next.goal.changed",
+    ...options,
+    schema: {
+      ...Base,
+      goalID: Schema.String,
+      revision: NonNegativeInt,
+      objective: Schema.String,
+      phase: Schema.Literals(["active", "paused", "blocked", "complete"]),
+      // C2 dual budget: round count + token cap, whichever trips first (E-11).
+      maxRounds: NonNegativeInt,
+      maxTokens: NonNegativeInt,
+      roundsStarted: NonNegativeInt,
+      tokensUsed: NonNegativeInt,
+      // Closed 4-member enum (D-2 / [F4] / (P15)). Each code has exactly one
+      // producer: the two budget codes from E-11, `halted` from the frozen C3
+      // collision contract, `model_reported` from the report-blocked verb (S-1c).
+      blocked: Schema.optional(
+        Schema.Struct({
+          code: Schema.Literals(["round_budget_exceeded", "token_budget_exceeded", "halted", "model_reported"]),
+          message: Schema.String,
+        }),
+      ),
+    },
+  })
+  export type Changed = typeof Changed.Type
+}
+
 export const Moved = Event.define({
   type: "session.next.moved",
   ...options,
@@ -507,6 +548,10 @@ export const DurableDefinitions = Event.inventory(
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,
+  // FORK FEATURE (13) autonomy-stack — appended at the END deliberately: the manifest
+  // test asserts positional slices (event-manifest.test.ts:45), so a mid-list insertion
+  // would shift upstream indices and conflict on every merge.
+  Goal.Changed,
 )
 
 export const Definitions = Event.inventory(
@@ -543,6 +588,10 @@ export const Definitions = Event.inventory(
   RevertEvent.Staged,
   RevertEvent.Cleared,
   RevertEvent.Committed,
+  // FORK FEATURE (13) autonomy-stack — appended at the END deliberately: the manifest
+  // test asserts positional slices (event-manifest.test.ts:45), so a mid-list insertion
+  // would shift upstream indices and conflict on every merge.
+  Goal.Changed,
 )
 
 export const Durable = Schema.Union(DurableDefinitions, { mode: "oneOf" })

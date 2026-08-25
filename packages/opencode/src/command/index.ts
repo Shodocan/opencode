@@ -9,6 +9,7 @@ import { MCP } from "../mcp"
 import { Skill } from "../skill"
 import PROMPT_INITIALIZE from "./template/initialize.txt"
 import PROMPT_REVIEW from "./template/review.txt"
+import PROMPT_GOAL from "./goal.txt"
 import { LegacyEvent } from "@opencode-ai/schema/legacy-event"
 
 type State = {
@@ -46,6 +47,11 @@ export function hints(template: string) {
 export const Default = {
   INIT: "init",
   REVIEW: "review",
+  // FORK FEATURE (13) autonomy-stack — frozen C6: an ordinary TEMPLATE command.
+  // A built-in slash command cannot be zero-turn (Command.Info carries only a
+  // template, and SessionPrompt.command unconditionally calls prompt()), so
+  // /goal costs one cheap turn and reaches every client for free.
+  GOAL: "goal",
 } as const
 
 export interface Interface {
@@ -85,6 +91,16 @@ const layer = Layer.effect(
         },
         subtask: true,
         hints: hints(PROMPT_REVIEW),
+      }
+
+      commands[Default.GOAL] = {
+        name: Default.GOAL,
+        description: "set, complete, block or resume this session's durable objective",
+        source: "command",
+        get template() {
+          return PROMPT_GOAL
+        },
+        hints: hints(PROMPT_GOAL),
       }
 
       for (const [name, command] of Object.entries(cfg.command ?? {})) {

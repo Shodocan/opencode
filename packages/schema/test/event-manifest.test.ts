@@ -9,8 +9,8 @@ import { WorkspaceEvent } from "../src/workspace-event"
 
 describe("public event manifest", () => {
   test("owns the complete public event surface", () => {
-    expect(EventManifest.ServerDefinitions.length).toBe(59)
-    expect(EventManifest.Definitions.length).toBe(91)
+    expect(EventManifest.ServerDefinitions.length).toBe(60) // +1 fork: session.next.goal.changed
+    expect(EventManifest.Definitions.length).toBe(92) // +1 fork: session.next.goal.changed
     expect(SessionV1.Event.Definitions).toEqual([
       SessionV1.Event.Created,
       SessionV1.Event.Updated,
@@ -23,8 +23,8 @@ describe("public event manifest", () => {
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])
-    expect(EventManifest.Latest.size).toBe(91)
-    expect(EventManifest.Durable.size).toBe(36)
+    expect(EventManifest.Latest.size).toBe(92) // +1 fork: session.next.goal.changed
+    expect(EventManifest.Durable.size).toBe(37) // +1 fork: session.next.goal.changed
   })
 
   test("uses canonical definitions for current public events", () => {
@@ -42,7 +42,10 @@ describe("public event manifest", () => {
     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
-    expect(EventManifest.Definitions.slice(44, 47)).toEqual([
+    // FORK FEATURE (13) autonomy-stack: session.next.goal.changed is appended to the end of
+    // SessionEvent.Definitions, which sits immediately before the SessionV1 live events in the
+    // composed manifest -- so these three shift by exactly 1 (44..46 upstream -> 45..47 here).
+    expect(EventManifest.Definitions.slice(45, 48)).toEqual([
       SessionV1.Event.PartDelta,
       SessionV1.Event.Diff,
       SessionV1.Event.Error,

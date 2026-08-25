@@ -399,6 +399,12 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
       // synthetic nudge message is inserted directly by the loop (§5.0), not
       // projected here, so this handler is a no-op.
       "session.next.stop_recovery": () => Effect.void,
+      // FORK FEATURE (13) autonomy-stack — goal state is not a timeline message.
+      // SessionEvent.All.match is exhaustive over the durable union, so a durable
+      // event MUST have an entry here even when it contributes nothing to the
+      // message stream (same shape as stop_recovery above). Goal state is read
+      // from the session_goal projection, never rebuilt from the message list.
+      "session.next.goal.changed": () => Effect.void,
     })
   })
 }

@@ -215,6 +215,31 @@ export const Info = Schema.Struct({
       ),
     }),
   ),
+  // FORK FEATURE (13) autonomy-stack — L4 goal + L3 ralph. Default disabled;
+  // zero behavior change when absent. Independent of stopRecovery (D-13).
+  goal: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Master opt-in for goal rounds (default: false). The whole feature is dead when false.",
+      }),
+      maxRounds: Schema.optional(NonNegativeInt).annotate({
+        description: "Default round budget for a new goal (C2; per-goal, not per-turn)",
+      }),
+      maxTokens: Schema.optional(NonNegativeInt).annotate({
+        description: "Default cumulative token budget for a new goal (C2; whichever cap trips first)",
+      }),
+    }),
+  ),
+  ralph: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Master opt-in for the ralph repeat-until-done tool (default: false)",
+      }),
+      maxRounds: Schema.optional(NonNegativeInt).annotate({
+        description: "Default round budget for a ralph loop",
+      }),
+    }),
+  ),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

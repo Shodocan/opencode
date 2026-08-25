@@ -2736,3 +2736,69 @@ noLLMServer.instance(
     }),
   { config: cfgWithPlanAgent },
 )
+
+// ---------------------------------------------------------------------------
+// FORK FEATURE (9) stop-recovery — autonomy-stack Milestone 1 Step 4, spec T-1.
+//
+// Every other stop-recovery test calls `decide()` directly with mock services.
+// That is a false-green risk: the runLoop guard filters `finish` BEFORE calling
+// decide(), so a shell test can pass on a branch production never reaches (the
+// unknown-finish -> "observed" arm is exactly such a branch).
+//
+// This test drives the REAL guard in prompt.ts end-to-end. It is added now,
+// before any goal code exists, so the L4 goal branch has a live tripwire to
+// build on. If `decide()` is ever unplugged from the guard, the loop exits at
+// the first stop-finish, no synthetic continuation is injected, and the LLM is
+// called exactly once -- both assertions below go red.
+// ---------------------------------------------------------------------------
+
+const stopRecoveryCfg = (url: string) => ({
+  ...providerCfg(url),
+  // noToolNudge.limit 1 bounds the run: grace nudge, then one counted nudge, then halt.
+  stopRecovery: { enabled: true, noToolNudge: { limit: 1 } },
+})
+
+it.instance("T-1: runLoop guard invokes stop-recovery and injects a continuation", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(stopRecoveryCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const todo = yield* Todo.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "do the work" }],
+    })
+
+    // pendingTodos is stop-recovery's "work remains" signal: the model claiming
+    // it is done while a todo is still pending is the premature stop we recover.
+    yield* todo.update({
+      sessionID: chat.id,
+      todos: [{ id: "t1", content: "unfinished work", status: "pending", priority: "high" } as any],
+    })
+
+    // Queue enough turns for grace + one counted nudge + the halt turn.
+    yield* llm.text("done.")
+    yield* llm.text("still done.")
+    yield* llm.text("really done.")
+    yield* llm.text("truly done.")
+
+    yield* prompt.loop({ sessionID: chat.id })
+
+    // (1) The guard re-entered the loop at least once. With decide() unplugged
+    //     the loop breaks at the first stop-finish and this is exactly 1.
+    const hits = yield* llm.hits
+    expect(hits.length).toBeGreaterThan(1)
+
+    // (2) A synthetic continuation carrying the stop-recovery marker exists.
+    const msgs = yield* sessions.messages({ sessionID: chat.id })
+    const synthetic = msgs.flatMap((m) => m.parts).filter((p: any) => p.type === "text" && p.synthetic === true)
+    expect(synthetic.length).toBeGreaterThan(0)
+  }),
+)
