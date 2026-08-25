@@ -20,6 +20,7 @@ import { Todo } from "./todo"
 import type { EventV2 } from "@opencode-ai/core/event"
 import type { Config } from "@/config/config"
 import { SessionGoal } from "@opencode-ai/core/session/goal"
+import { SessionGoalShell } from "./goal-service"
 
 export const MARKER = "stop_recovery_continue" as const
 
@@ -279,23 +280,37 @@ export interface DecideServices {
 /** Resolved (defaults-applied) stop-recovery config; undefined => feature off. */
 function resolveConfig(cfg: ConfigV1.Info): Config | undefined {
   const block = cfg.stopRecovery
-  if (!block || block.enabled !== true) return undefined
+  const goalBlock = cfg.goal
+  const srEnabled = block?.enabled === true
+  const goalEnabled = goalBlock?.enabled === true
+  // D-13: either feature alone is enough to run the evaluator. Bailing on
+  // `!stopRecovery.enabled` would make /goal silently depend on it.
+  if (!srEnabled && !goalEnabled) return undefined
   return {
-    enabled: true,
+    enabled: srEnabled,
+    ...(goalEnabled
+      ? {
+          goal: {
+            enabled: true,
+            maxRounds: goalBlock?.maxRounds ?? 20,
+            maxTokens: goalBlock?.maxTokens ?? 1_000_000,
+          },
+        }
+      : {}),
     lengthContinue: {
-      enabled: block.lengthContinue?.enabled !== false,
-      max: block.lengthContinue?.max ?? 3,
-      text: block.lengthContinue?.text,
+      enabled: block?.lengthContinue?.enabled !== false,
+      max: block?.lengthContinue?.max ?? 3,
+      text: block?.lengthContinue?.text,
     },
     noToolNudge: {
-      enabled: block.noToolNudge?.enabled !== false,
-      limit: block.noToolNudge?.limit ?? 3,
-      graceRetry: block.noToolNudge?.graceRetry !== false,
-      text: block.noToolNudge?.text,
+      enabled: block?.noToolNudge?.enabled !== false,
+      limit: block?.noToolNudge?.limit ?? 3,
+      graceRetry: block?.noToolNudge?.graceRetry !== false,
+      text: block?.noToolNudge?.text,
     },
     emptyAfterThinking: {
-      enabled: block.emptyAfterThinking?.enabled !== false,
-      text: block.emptyAfterThinking?.text,
+      enabled: block?.emptyAfterThinking?.enabled !== false,
+      text: block?.emptyAfterThinking?.text,
     },
   }
 }
@@ -362,9 +377,37 @@ export const decide = Effect.fn("StopRecovery.decide")(function* (input: DecideI
   const todos = yield* svc.todo.get(input.sessionID).pipe(Effect.orElseSucceed(() => [] as Todo.Info[]))
   const pendingTodos = todos.some((t) => t.status === "pending" || t.status === "in_progress")
 
+  // FORK FEATURE (13) L4 — the goal projection and the context-pressure signal
+  // are pulled from the Effect ENVIRONMENT, not threaded through DecideServices.
+  // That is what keeps prompt.ts at zero added lines (E-7): decide() is an
+  // Effect.fn running in the same environment the runLoop assembled. Optional
+  // lookups, so the existing mock-based shell tests keep working unchanged.
+  const goalShell = yield* Effect.serviceOption(SessionGoalShell.Service).pipe(
+    Effect.map((o) => (o._tag === "Some" ? o.value : undefined)),
+    Effect.orElseSucceed(() => undefined),
+  )
+  const goalDisabled = agent.goal === false
+  const goalFacts =
+    cfg.goal?.enabled && goalShell && !goalDisabled
+      ? yield* goalShell.read(input.sessionID).pipe(Effect.orElseSucceed(() => undefined))
+      : undefined
+
+  // [F5] context pressure. DEFERRED, deliberately and visibly: the evaluator
+  // contract carries `isOverflow` (E-12) and evaluateGoal already consumes it,
+  // but `SessionCompaction.isOverflow` requires a fully-resolved Model and
+  // decide() only has `lastUser.model`, a {providerID, modelID} reference.
+  // Resolving it here would mean a Provider lookup on every turn end for a
+  // signal that currently only decorates the round decision.
+  // TODO(autonomy-stack Step 18): supply the real signal once the goal surface
+  // needs it to choose a fresh L3 round over another same-session nudge.
+  const isOverflow = false
+
   const turnKey = realUserTurnKey(input.msgs, input.lastUser)
   const facts: TurnFacts = {
     turnKey,
+    goalDisabled,
+    ...(goalFacts ? { goal: goalFacts } : {}),
+    isOverflow,
     finish: input.lastAssistant.finish,
     hasError: !!input.lastAssistant.error,
     hasToolCalls:
@@ -423,48 +466,44 @@ export const decide = Effect.fn("StopRecovery.decide")(function* (input: DecideI
       limit: decision.limit,
     })
     clearState(input.sessionID)
+    // Frozen C3: halt is terminal and wins. An active goal transitions to
+    // blocked with its own durable event and its own code, so a client sees a
+    // blocked goal rather than an idle session with a goal still reading active.
+    if (goalShell && goalFacts?.snapshot.phase === "active") {
+      yield* goalShell.block(input.sessionID, "halted", error.data.message ?? "Stop recovery halted the turn.")
+    }
     return "end" as const
   }
 
-  // FORK FEATURE (13) L4 — goal dispatch arm. MUST sit before the legacy tail
+  // FORK FEATURE (13) L4 — goal dispatch arms. MUST sit before the legacy tail
   // (D-11): that tail reads .trigger/.attempt/.text/.reasoningOnly unguarded for
-  // anything that is not none/observed/halt, so a goal decision reaching it
-  // would blow up on undefined fields.
-  //
-  // Step 12 lands this INERT on purpose: the branch and its invariants are
-  // testable as pure functions now, while dispatch (durable goal event, the
-  // synthetic round message, blocked persistence) is Step 13. Nothing fires in
-  // practice either way -- config.goal.enabled defaults false.
-  if (decision.action === "goal_round" || decision.action === "goal_blocked") {
-    // TODO(autonomy-stack Step 13): persist the round / blocked snapshot as a
-    // durable Goal.Changed event and inject the round message, reusing the
-    // MARKER below so compaction's isSyntheticContinuation still recognises it (T-6).
+  // anything that is not none/observed/halt.
+  if (decision.action === "goal_blocked") {
+    // The goal owns its OWN terminal event. It cannot piggyback on halt, which
+    // calls clearState() and publishes no Session.Event.Error (D-5).
+    if (goalShell) yield* goalShell.block(input.sessionID, decision.code, decision.message)
     return "end" as const
+  }
+
+  if (decision.action === "goal_round") {
+    if (goalShell) yield* goalShell.startRound(input.sessionID)
+    // C3a: reset the nudge family at the ROUND boundary, so "no progress"
+    // measures within a round instead of across the whole goal. Without this a
+    // long goal hits the shared nudge limit of 3 long before its own budget.
+    const st = sessionStates.get(input.sessionID)
+    if (st) sessionStates.set(input.sessionID, onProgress(st))
+    yield* injectSynthetic(input, svc, {
+      text: decision.text,
+      metadata: { goal: { roundsStarted: decision.roundsStarted, overflow: decision.overflow } },
+    })
+    return "injected" as const
   }
 
   // continue / nudge / nudge_grace: inject synthetic user message (compaction precedent).
-  const continueMsg = yield* svc.sessions.updateMessage({
-    id: MessageID.ascending(),
-    role: "user",
-    sessionID: input.sessionID,
-    time: { created: Date.now() },
-    agent: input.lastUser.agent,
-    model: input.lastUser.model,
-    ...(input.lastUser.format ? { format: input.lastUser.format } : {}),
-  } as SessionV1.User)
-  yield* svc.sessions.updatePart({
-    id: PartID.ascending(),
-    messageID: continueMsg.id,
-    sessionID: input.sessionID,
-    type: "text",
-    metadata: {
-      stop_recovery_continue: true,
-      stop_recovery: { trigger: decision.trigger, attempt: decision.attempt },
-    },
-    synthetic: true,
+  yield* injectSynthetic(input, svc, {
     text: decision.text,
-    time: { start: Date.now(), end: Date.now() },
-  } as unknown as SessionV1.TextPart)
+    metadata: { stop_recovery: { trigger: decision.trigger, attempt: decision.attempt } },
+  })
 
   yield* svc.events.publish(SessionEvent.StopRecovery, {
     timestamp: yield* DateTime.now,
@@ -482,6 +521,43 @@ export const decide = Effect.fn("StopRecovery.decide")(function* (input: DecideI
     agent: input.lastUser.agent,
   })
   return "injected" as const
+})
+
+/**
+ * ONE injection path for every branch. Factored out deliberately: the
+ * format/agent/model carry-forward below is load-bearing, and duplicating it
+ * per-branch is how a goal round would silently flip `isJsonSchemaTurn` from
+ * true to false and re-enable stop-recovery on a structured-output turn.
+ *
+ * Always stamps MARKER (`stop_recovery_continue`) so compaction's
+ * isSyntheticContinuation keeps recognising the message (T-6) -- goal rounds are
+ * differentiated by the `goal` metadata sub-object, not by a new marker.
+ */
+const injectSynthetic = Effect.fn("StopRecovery.injectSynthetic")(function* (
+  input: DecideInput,
+  svc: DecideServices,
+  part: { text: string; metadata: Record<string, unknown> },
+) {
+  const msg = yield* svc.sessions.updateMessage({
+    id: MessageID.ascending(),
+    role: "user",
+    sessionID: input.sessionID,
+    time: { created: Date.now() },
+    agent: input.lastUser.agent,
+    model: input.lastUser.model,
+    ...(input.lastUser.format ? { format: input.lastUser.format } : {}),
+  } as SessionV1.User)
+  yield* svc.sessions.updatePart({
+    id: PartID.ascending(),
+    messageID: msg.id,
+    sessionID: input.sessionID,
+    type: "text",
+    metadata: { [MARKER]: true, ...part.metadata },
+    synthetic: true,
+    text: part.text,
+    time: { start: Date.now(), end: Date.now() },
+  } as unknown as SessionV1.TextPart)
+  return msg
 })
 
 /** Clear state for a session (e.g. on halt / abort). */
