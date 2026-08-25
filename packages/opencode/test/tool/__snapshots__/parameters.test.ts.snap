@@ -313,6 +313,28 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "model": {
+      "description": "Override the model for this subagent (per-dispatch only). Shape: { id: string, providerID: string, variant?: string }. Does not change the subagent's configured model.",
+      "properties": {
+        "id": {
+          "type": "string",
+        },
+        "providerID": {
+          "type": "string",
+        },
+        "variant": {
+          "type": "string",
+        },
+      },
+      "required": [
+        "id",
+        "providerID",
+      ],
+      "type": "object",
+    },
+    "outputSchema": {
+      "description": "Optional JSON Schema. When set, the subagent must return a value matching it, delivered as structured output instead of prose.",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",
@@ -323,6 +345,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     },
     "task_id": {
       "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "type": "string",
+    },
+    "variant": {
+      "description": "Override only the variant/effort for this subagent. Binds to the resolved model.",
       "type": "string",
     },
   },
