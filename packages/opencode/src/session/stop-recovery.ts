@@ -19,12 +19,15 @@ import type { Permission } from "@/permission"
 import { Todo } from "./todo"
 import type { EventV2 } from "@opencode-ai/core/event"
 import type { Config } from "@/config/config"
+import { SessionGoal } from "@opencode-ai/core/session/goal"
 
 export const MARKER = "stop_recovery_continue" as const
 
 /** Resolved config (defaults applied). Feature is OFF unless `enabled: true`. */
 export interface Config {
   enabled: boolean
+  /** FORK FEATURE (13) L4 — independent of `enabled` (D-13). */
+  goal?: { enabled: boolean; maxRounds: number; maxTokens: number }
   lengthContinue: { enabled: boolean; max: number; text?: string }
   noToolNudge: { enabled: boolean; limit: number; graceRetry: boolean; text?: string }
   emptyAfterThinking: { enabled: boolean; text?: string }
@@ -54,6 +57,20 @@ export interface TurnFacts {
   agentDisabled: boolean
   doomLoopPending: boolean
   compactionPending: boolean
+  // FORK FEATURE (13) autonomy-stack — supplied via DecideServices, never via
+  // new prompt.ts plumbing (E-12/E-7). All optional so the existing pure test
+  // table compiles unmodified (Step 5's deliberately pinned tripwire).
+  /** Per-agent disable for goal rounds; split from `agentDisabled` (D-16). */
+  goalDisabled?: boolean
+  /** Read-only projection of durable goal state. Never mutated here. */
+  goal?: {
+    snapshot: SessionGoal.Snapshot
+    activation: SessionGoal.Activation
+    /** The model called `complete` or `report-blocked` on this turn. */
+    completionSignalled?: boolean
+  }
+  /** Context-pressure signal ([F5]); `compaction.isOverflow` at prompt.ts:1228. */
+  isOverflow?: boolean
 }
 
 export type Decision =
@@ -62,8 +79,16 @@ export type Decision =
   | { action: "continue"; trigger: "length"; attempt: number; text: string }
   | { action: "nudge_grace" | "nudge"; trigger: "no_tool" | "empty_after_thinking"; attempt: number; reasoningOnly: boolean; text: string }
   | { action: "halt"; trigger: "no_tool" | "empty_after_thinking"; attempts: number; limit: number }
+  // FORK FEATURE (13) L4. New variants need their own dispatch arm BEFORE the
+  // legacy tail (D-11) and their own Event.define -- never new literals on the
+  // StopRecovery event (D-12).
+  | { action: "goal_round"; text: string; roundsStarted: number; overflow: boolean }
+  | { action: "goal_blocked"; code: SessionGoal.BlockedCode; message: string }
 
 export const DEFAULT_CONTINUE_TEXT = "Continue from where you left off."
+export const GOAL_ROUND_TEXT =
+  "The objective is not yet complete. Continue working toward it: take the next concrete action, or call the goal tool to mark it complete or blocked. (Automated message from the harness - do not respond to it conversationally.)"
+
 export const DEFAULT_NUDGE_TEXT =
   "Your previous reply ended without completing the pending work. Continue with the task: execute the next required action (use a tool if one is needed), or state explicitly that everything is complete. (Automated message from the harness - do not respond to it conversationally.)"
 
@@ -76,8 +101,10 @@ export function initialState(turnKey: string): State {
  * not stop-recovery, and not the goal branch either (E-2). Split out precisely
  * so a new branch cannot accidentally bypass them by being added lower down.
  */
-export function hardGates(config: Config, f: TurnFacts): boolean {
-  if (!config.enabled || f.agentDisabled) return true
+export function hardGates(_config: Config, f: TurnFacts): boolean {
+  // NOTE: the stop-recovery master switch is deliberately NOT here. These are
+  // SAFETY gates and bind every branch; feature-enable is per-branch, because
+  // goal must not inherit a dependency on stopRecovery.enabled (D-13/D-16).
   if (f.isJsonSchemaTurn) return true
   if (f.compactionPending) return true
   if (f.doomLoopPending) return true
@@ -95,6 +122,9 @@ export function hardGates(config: Config, f: TurnFacts): boolean {
  * branch may intercept (E-2). Mutates `state` in place, exactly as before.
  */
 export function evaluateStopRecovery(config: Config, state: State, f: TurnFacts): Decision | undefined {
+  // Master switch for THIS family only (moved out of hardGates for D-13).
+  if (!config.enabled || f.agentDisabled) return undefined
+
   // Unknown finish: telemetry only (spec §5.6 — repetition-kill lands here today)
   if (f.finish === "unknown" || f.finish === undefined) {
     return { action: "observed", trigger: "unknown_finish" }
@@ -160,8 +190,41 @@ export function evaluateStopRecovery(config: Config, state: State, f: TurnFacts)
  *   - it therefore cannot reach the halt return above (frozen C3);
  *   - it must leave `lengthContinues` and `noProgressCount` untouched (C3a/T-2).
  */
-export function evaluateGoal(_config: Config, _state: State, _f: TurnFacts): Decision | undefined {
-  return undefined
+export function evaluateGoal(config: Config, state: State, f: TurnFacts): Decision | undefined {
+  // Feature-enable is per-branch (D-13/D-16): goal runs even when stop-recovery
+  // is off, and a per-agent stopRecovery:false must not disable goal rounds.
+  if (!config.goal?.enabled || f.goalDisabled) return undefined
+
+  const projection = f.goal
+  if (!projection) return undefined
+  const { snapshot } = projection
+
+  // Terminal phases fire nothing. `paused` likewise -- it is a human pause.
+  if (snapshot.phase !== "active") return undefined
+
+  // E-14 / [F1] / (P1): a turn clears a LOAD-disarm only. An abort-disarm is
+  // cleared solely by the `resume` verb (Steps 15/17) and never here -- that is
+  // what makes "abort + unrelated message fires no round" (S-9) hold.
+  if (!SessionGoal.rearm(projection.activation, "turn").armed) return undefined
+
+  // The model declared the objective met (or blocked) on this very turn.
+  // Its own goal-tool call is the authority; do not start another round.
+  if (projection.completionSignalled) return undefined
+
+  // C2 dual budget, per-goal-cumulative (E-11). Checked BEFORE starting a round
+  // so the cap is a ceiling on rounds STARTED, not on rounds finished.
+  const exceeded = SessionGoal.budgetExceeded(snapshot)
+  if (exceeded) return { action: "goal_blocked", code: exceeded.code, message: exceeded.message }
+
+  // E-13 [F13]: the count reported here is the round this decision STARTS.
+  // The shell persists it (Step 13); `state` is deliberately untouched -- goal
+  // round state is durable and must survive turnKey rotation and clearState.
+  return {
+    action: "goal_round",
+    text: GOAL_ROUND_TEXT,
+    roundsStarted: snapshot.roundsStarted + 1,
+    overflow: f.isOverflow === true,
+  }
 }
 
 /** Composition. The ONLY entry point; the three parts above are the contract. */
@@ -360,6 +423,22 @@ export const decide = Effect.fn("StopRecovery.decide")(function* (input: DecideI
       limit: decision.limit,
     })
     clearState(input.sessionID)
+    return "end" as const
+  }
+
+  // FORK FEATURE (13) L4 — goal dispatch arm. MUST sit before the legacy tail
+  // (D-11): that tail reads .trigger/.attempt/.text/.reasoningOnly unguarded for
+  // anything that is not none/observed/halt, so a goal decision reaching it
+  // would blow up on undefined fields.
+  //
+  // Step 12 lands this INERT on purpose: the branch and its invariants are
+  // testable as pure functions now, while dispatch (durable goal event, the
+  // synthetic round message, blocked persistence) is Step 13. Nothing fires in
+  // practice either way -- config.goal.enabled defaults false.
+  if (decision.action === "goal_round" || decision.action === "goal_blocked") {
+    // TODO(autonomy-stack Step 13): persist the round / blocked snapshot as a
+    // durable Goal.Changed event and inject the round message, reusing the
+    // MARKER below so compaction's isSyntheticContinuation still recognises it (T-6).
     return "end" as const
   }
 

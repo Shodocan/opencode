@@ -33,7 +33,6 @@ const facts = (over: Partial<StopRecovery.TurnFacts> = {}): StopRecovery.TurnFac
 
 describe("hardGates (E-2) — every gate blocks ALL branches", () => {
   const gated: Array<[string, Partial<StopRecovery.TurnFacts>]> = [
-    ["agentDisabled", { agentDisabled: true }],
     ["isJsonSchemaTurn", { isJsonSchemaTurn: true }],
     ["compactionPending", { compactionPending: true }],
     ["doomLoopPending", { doomLoopPending: true }],
@@ -50,8 +49,12 @@ describe("hardGates (E-2) — every gate blocks ALL branches", () => {
     })
   }
 
-  test("feature disabled gates", () => {
-    expect(StopRecovery.hardGates({ ...ON, enabled: false }, facts())).toBe(true)
+  test("the stop-recovery master switch is NOT a hard gate (D-13)", () => {
+    // It moved into evaluateStopRecovery in Step 12 so that goal rounds do not
+    // inherit a dependency on stopRecovery.enabled.
+    expect(StopRecovery.hardGates({ ...ON, enabled: false }, facts())).toBe(false)
+    expect(StopRecovery.evaluateStopRecovery({ ...ON, enabled: false }, StopRecovery.initialState("t1"), facts())).toBeUndefined()
+    expect(StopRecovery.evaluate({ ...ON, enabled: false }, undefined, facts()).decision.action).toBe("none")
   })
 
   test("a normal turn is not gated", () => {
