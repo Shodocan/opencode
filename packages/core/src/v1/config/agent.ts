@@ -49,6 +49,15 @@ const AgentSchema = Schema.StructWithRest(
     stopRecovery: Schema.optional(Schema.Boolean).annotate({
       description: "Disable stop-recovery for this agent (default: inherits root stopRecovery.enabled).",
     }),
+    // FORK FEATURE (13) autonomy-stack — per-agent disable-only overrides.
+    // Split per feature (D-16): disabling stop-recovery must not disable goal
+    // rounds for that agent, and vice versa.
+    goal: Schema.optional(Schema.Boolean).annotate({
+      description: "Disable goal rounds for this agent (default: inherits root goal.enabled).",
+    }),
+    ralph: Schema.optional(Schema.Boolean).annotate({
+      description: "Disable the ralph tool for this agent (default: inherits root ralph.enabled).",
+    }),
     can_spawn_subagents: Schema.optional(Schema.Boolean).annotate({
       description:
         "Allow this subagent to dispatch its own subagents via the task tool (default: false). When true, grants task-tool permission unless `permission.task` is already set (in which case your scoping wins). Primary agents can always spawn; this field is meaningful for `mode: subagent`.",
@@ -95,6 +104,8 @@ const KNOWN_KEYS = new Set([
   "can_spawn_subagents",
   "subagents",
   "stopRecovery",
+  "goal",
+  "ralph",
   "gates",
   "disableModelOverride",
 ])

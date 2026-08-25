@@ -20,6 +20,10 @@ export class Info extends Schema.Class<Info>("ConfigV2.Agent")({
   fallback: Schema.mutable(Schema.Array(Schema.String)).pipe(Schema.optional),
   // FORK FEATURE (9) stop-recovery — per-agent disable-only override.
   stopRecovery: Schema.Boolean.pipe(Schema.optional),
+  // FORK FEATURE (13) autonomy-stack — per-agent disable-only overrides,
+  // independent of stopRecovery (D-16).
+  goal: Schema.Boolean.pipe(Schema.optional),
+  ralph: Schema.Boolean.pipe(Schema.optional),
   // FORK FEATURE (11) subagent-model-override — per-agent opt-out. When true,
   // callers cannot override this agent's model or variant via the task tool.
   disableModelOverride: Schema.Boolean.pipe(Schema.optional),

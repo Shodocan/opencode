@@ -78,6 +78,16 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
         text: info.stopRecovery.emptyAfterThinking.text,
       },
     },
+    // FORK FEATURE (13) autonomy-stack — carry the goal/ralph blocks v1->v2.
+    goal: info.goal && {
+      enabled: info.goal.enabled,
+      maxRounds: info.goal.maxRounds,
+      maxTokens: info.goal.maxTokens,
+    },
+    ralph: info.ralph && {
+      enabled: info.ralph.enabled,
+      maxRounds: info.ralph.maxRounds,
+    },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,
     instructions: info.instructions,
@@ -149,6 +159,11 @@ export function migrateAgent(info: ConfigAgentV1.Info) {
     // override through v1->v2 migration. Root `stopRecovery` block is carried
     // separately below.
     ...(info.stopRecovery !== undefined ? { stopRecovery: info.stopRecovery } : {}),
+    // FORK FEATURE (13) autonomy-stack — carry the per-agent goal/ralph
+    // disable-only overrides through v1->v2. migrateAgent lists fields
+    // EXPLICITLY, so omitting these silently drops a per-agent `goal: false`.
+    ...(info.goal !== undefined ? { goal: info.goal } : {}),
+    ...(info.ralph !== undefined ? { ralph: info.ralph } : {}),
     // FORK FEATURE (10) gates — carry the declarative dispatch gates through
     // v1->v2 migration so legacy/frontmatter agents keep their gates block.
     // Parsed/validated at runtime agent-load (fail-fast with the agent name).
