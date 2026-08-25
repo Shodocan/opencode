@@ -39,6 +39,13 @@ export interface Interface {
     code: SessionGoal.BlockedCode,
     message: string,
   ) => Effect.Effect<void>
+  /**
+   * E-15 / [F2]: fold spend that happened in a CHILD session into this goal's
+   * cumulative tokensUsed. Without it C2's "honest cost ceiling" cannot hold for
+   * a ralph-driven goal, whose spend is almost entirely in child sessions that
+   * E-13's three origins never count.
+   */
+  readonly addTokens: (sessionID: SessionID, delta: number) => Effect.Effect<void>
   /** E-14: set a disarm reason. `abort` is cleared only by `resume`. */
   readonly disarm: (sessionID: SessionID, reason: SessionGoal.DisarmReason) => Effect.Effect<void>
   /** E-14 / S-1d: explicit re-arm, the only thing that clears an abort-disarm. */
@@ -153,6 +160,14 @@ const layer = Layer.effect(
       })
     })
 
+    const addTokens = Effect.fn("Goal.addTokens")(function* (sessionID: SessionID, delta: number) {
+      if (delta <= 0) return
+      const r = yield* row(sessionID)
+      if (!r) return
+      const prev = toSnapshot(r)
+      yield* emit(sessionID, { ...prev, revision: prev.revision + 1, tokensUsed: prev.tokensUsed + delta })
+    })
+
     const block = Effect.fn("Goal.block")(function* (
       sessionID: SessionID,
       code: SessionGoal.BlockedCode,
@@ -178,7 +193,7 @@ const layer = Layer.effect(
         return true
       })
 
-    return { read, create, complete, startRound, block, disarm, resume } satisfies Interface
+    return { read, create, complete, startRound, addTokens, block, disarm, resume } satisfies Interface
   }),
 )
 

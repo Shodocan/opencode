@@ -136,3 +136,50 @@ describe("E-13 / D-6 — rounds and activation", () => {
     }),
   )
 })
+
+describe("E-15 / [F2] — ralph child spend folds into the goal's cap", () => {
+  it.effect("addTokens accumulates into tokensUsed", () =>
+    Effect.gen(function* () {
+      const { db, goal } = yield* seed
+      yield* goal.create(sessionID, { objective: "grind", maxTokens: 1000 })
+      yield* goal.addTokens(sessionID, 400)
+      yield* goal.addTokens(sessionID, 350)
+      expect((yield* rowOf(db))?.tokens_used).toBe(750)
+    }),
+  )
+
+  it.effect("the token cap trips on spend that happened ENTIRELY in child sessions", () =>
+    Effect.gen(function* () {
+      // The C2 hazard [F2] exists to prevent: a ralph-driven goal spends almost
+      // all its tokens inside child sessions, which E-13's three turn origins
+      // never count and which session_goal is not keyed by.
+      const { db, goal } = yield* seed
+      yield* goal.create(sessionID, { objective: "grind", maxRounds: 100, maxTokens: 1000 })
+      yield* goal.addTokens(sessionID, 1200) // three ralph rounds' worth
+      const row = yield* rowOf(db)
+      expect(row?.tokens_used).toBe(1200)
+      const { SessionGoal } = yield* Effect.promise(() => import("@opencode-ai/core/session/goal"))
+      const exceeded = SessionGoal.budgetExceeded({
+        goalID: row!.goal_id,
+        revision: row!.revision,
+        objective: row!.objective,
+        phase: row!.phase,
+        maxRounds: row!.max_rounds,
+        maxTokens: row!.max_tokens,
+        roundsStarted: row!.rounds_started,
+        tokensUsed: row!.tokens_used,
+      })
+      expect(exceeded?.code).toBe("token_budget_exceeded")
+    }),
+  )
+
+  it.effect("a zero or negative delta is a no-op", () =>
+    Effect.gen(function* () {
+      const { db, goal } = yield* seed
+      yield* goal.create(sessionID, { objective: "grind" })
+      const before = (yield* rowOf(db))?.revision
+      yield* goal.addTokens(sessionID, 0)
+      expect((yield* rowOf(db))?.revision).toBe(before)
+    }),
+  )
+})
