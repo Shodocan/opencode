@@ -71,83 +71,109 @@ export function initialState(turnKey: string): State {
   return { turnKey, lengthContinues: 0, noProgressCount: 0, graceUsed: false }
 }
 
-export function evaluate(config: Config, prev: State | undefined, f: TurnFacts): { decision: Decision; state: State } {
-  // turnKey change or first evaluation -> fresh counters (spec §5.0 reset rules)
-  const state = prev && prev.turnKey === f.turnKey ? { ...prev } : initialState(f.turnKey)
-  const none = (): { decision: Decision; state: State } => ({ decision: { action: "none" }, state })
-
-  // Hard gates (spec §5.4/§5.5) — order matters
-  if (!config.enabled || f.agentDisabled) return none()
-  if (f.isJsonSchemaTurn) return none()
-  if (f.compactionPending) return none()
-  if (f.doomLoopPending) return none()
-  if (f.hasToolCalls) return none()
-  if (f.hasError) return none()
-  if (f.finish === "content-filter" || f.finish === "error") return none()
-
+/**
+ * Hard gates (spec §5.4/§5.5) — order matters. When any fires, NO branch runs:
+ * not stop-recovery, and not the goal branch either (E-2). Split out precisely
+ * so a new branch cannot accidentally bypass them by being added lower down.
+ */
+export function hardGates(config: Config, f: TurnFacts): boolean {
+  if (!config.enabled || f.agentDisabled) return true
+  if (f.isJsonSchemaTurn) return true
+  if (f.compactionPending) return true
+  if (f.doomLoopPending) return true
+  if (f.hasToolCalls) return true
+  if (f.hasError) return true
+  if (f.finish === "content-filter" || f.finish === "error") return true
   // Step eligibility (spec §5.5): injected turn runs at step+1; never enter MAX_STEPS regime
-  if (f.step + 1 >= f.maxSteps) return none()
+  if (f.step + 1 >= f.maxSteps) return true
+  return false
+}
 
+/**
+ * The three legacy recovery families. Returns `undefined` for a POLICY EXIT --
+ * meaning "stop-recovery has nothing to say", which is the only place a later
+ * branch may intercept (E-2). Mutates `state` in place, exactly as before.
+ */
+export function evaluateStopRecovery(config: Config, state: State, f: TurnFacts): Decision | undefined {
   // Unknown finish: telemetry only (spec §5.6 — repetition-kill lands here today)
   if (f.finish === "unknown" || f.finish === undefined) {
-    return { decision: { action: "observed", trigger: "unknown_finish" }, state }
+    return { action: "observed", trigger: "unknown_finish" }
   }
 
   const reasoningOnly = f.textEmpty && f.reasoningPresent
 
   // length + reasoning-only -> empty-after-thinking family (spec §5.1 routing, F4)
   if (f.finish === "length" && !reasoningOnly) {
-    if (!config.lengthContinue.enabled || config.lengthContinue.max === 0) return none()
-    if (state.lengthContinues >= config.lengthContinue.max) return none()
+    if (!config.lengthContinue.enabled || config.lengthContinue.max === 0) return undefined
+    if (state.lengthContinues >= config.lengthContinue.max) return undefined
     state.lengthContinues++
     return {
-      decision: {
-        action: "continue",
-        trigger: "length",
-        attempt: state.lengthContinues,
-        text: config.lengthContinue.text ?? DEFAULT_CONTINUE_TEXT,
-      },
-      state,
+      action: "continue",
+      trigger: "length",
+      attempt: state.lengthContinues,
+      text: config.lengthContinue.text ?? DEFAULT_CONTINUE_TEXT,
     }
   }
 
   // stop (or length routed here as reasoning-only): nudge family, shared counter + shared single grace
   const isEmptyAfterThinking = reasoningOnly
   const isNoTool = f.finish === "stop" && !f.textEmpty && !f.hasProviderExecutedTools && f.pendingTodos
-  if (!isEmptyAfterThinking && !isNoTool) return none()
+  if (!isEmptyAfterThinking && !isNoTool) return undefined
   const family = isEmptyAfterThinking ? ("empty_after_thinking" as const) : ("no_tool" as const)
   const familyEnabled = isEmptyAfterThinking ? config.emptyAfterThinking.enabled : config.noToolNudge.enabled
-  if (!familyEnabled) return none()
+  if (!familyEnabled) return undefined
 
   const limit = config.noToolNudge.limit // shared limit for the nudge family (spec §5.2/§5.3)
   const unlimited = limit === 0
   if (!state.graceUsed && config.noToolNudge.graceRetry) {
     state.graceUsed = true
     return {
-      decision: {
-        action: "nudge_grace",
-        trigger: family,
-        attempt: 0,
-        reasoningOnly,
-        text: nudgeText(config, family),
-      },
-      state,
+      action: "nudge_grace",
+      trigger: family,
+      attempt: 0,
+      reasoningOnly,
+      text: nudgeText(config, family),
     }
   }
   if (!unlimited && state.noProgressCount >= limit) {
-    return { decision: { action: "halt", trigger: family, attempts: state.noProgressCount, limit }, state }
+    // TERMINAL (frozen C3). A goal round may never override or resurrect this.
+    return { action: "halt", trigger: family, attempts: state.noProgressCount, limit }
   }
   state.noProgressCount++
   return {
-    decision: {
-      action: "nudge",
-      trigger: family,
-      attempt: state.noProgressCount,
-      reasoningOnly,
-      text: nudgeText(config, family),
-    },
-    state,
+    action: "nudge",
+    trigger: family,
+    attempt: state.noProgressCount,
+    reasoningOnly,
+    text: nudgeText(config, family),
   }
+}
+
+/**
+ * FORK FEATURE (13) autonomy-stack / L4 — the goal branch.
+ *
+ * Currently INERT: Step 11 is a pure refactor, so this returns `undefined` and
+ * `evaluate()` is byte-identical to before. Step 12 fills it in under these
+ * invariants, which the composition below enforces structurally:
+ *   - it runs only AFTER hardGates() passed and stop-recovery returned a policy
+ *     exit, so it can only ever upgrade `none -> action`, never rewrite one;
+ *   - it therefore cannot reach the halt return above (frozen C3);
+ *   - it must leave `lengthContinues` and `noProgressCount` untouched (C3a/T-2).
+ */
+export function evaluateGoal(_config: Config, _state: State, _f: TurnFacts): Decision | undefined {
+  return undefined
+}
+
+/** Composition. The ONLY entry point; the three parts above are the contract. */
+export function evaluate(config: Config, prev: State | undefined, f: TurnFacts): { decision: Decision; state: State } {
+  // turnKey change or first evaluation -> fresh counters (spec §5.0 reset rules)
+  const state = prev && prev.turnKey === f.turnKey ? { ...prev } : initialState(f.turnKey)
+  if (hardGates(config, f)) return { decision: { action: "none" }, state }
+  const recovery = evaluateStopRecovery(config, state, f)
+  if (recovery) return { decision: recovery, state }
+  const goal = evaluateGoal(config, state, f)
+  if (goal) return { decision: goal, state }
+  return { decision: { action: "none" }, state }
 }
 
 function nudgeText(config: Config, family: "no_tool" | "empty_after_thinking"): string {
