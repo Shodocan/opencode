@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer, Context } from "effect"
+import { DateTime, Effect, Layer, Context } from "effect"
 import { eq } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { SessionGoalTable } from "@opencode-ai/core/session/sql"
@@ -24,6 +24,13 @@ export interface Projection {
 
 export interface Interface {
   readonly read: (sessionID: SessionID) => Effect.Effect<Projection | undefined>
+  /** S-1a: open a goal. Starts armed — the human/model just asked for it. */
+  readonly create: (
+    sessionID: SessionID,
+    input: { objective: string; maxRounds?: number; maxTokens?: number },
+  ) => Effect.Effect<void>
+  /** S-1b: terminal success. */
+  readonly complete: (sessionID: SessionID) => Effect.Effect<void>
   /** Persist the start of a round (E-13). Returns the new snapshot. */
   readonly startRound: (sessionID: SessionID, tokensUsed?: number) => Effect.Effect<void>
   /** Terminal: persist a blocked phase with its code (D-2 / [F4]). */
@@ -39,6 +46,10 @@ export interface Interface {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/SessionGoalShell") {}
+
+/** Budget defaults when the caller does not supply them (mirrors resolveConfig). */
+const DEFAULT_MAX_ROUNDS = 20
+const DEFAULT_MAX_TOKENS = 1_000_000
 
 /** Process-local activation. Never persisted — that is the whole point (D-6). */
 const activations = new Map<string, SessionGoal.Activation>()
@@ -84,10 +95,10 @@ const layer = Layer.effect(
     })
 
     /** Every mutation republishes the FULL post-mutation snapshot (D-2). */
-    const emit = (sessionID: SessionID, next: SessionGoal.Snapshot) =>
-      events.publish(SessionEvent.Goal.Changed, {
+    const emit = Effect.fn("Goal.emit")(function* (sessionID: SessionID, next: SessionGoal.Snapshot) {
+      yield* events.publish(SessionEvent.Goal.Changed, {
         sessionID,
-        timestamp: Date.now() as never,
+        timestamp: yield* DateTime.now,
         goalID: next.goalID,
         revision: next.revision,
         objective: next.objective,
@@ -98,6 +109,36 @@ const layer = Layer.effect(
         tokensUsed: next.tokensUsed,
         ...(next.blocked ? { blocked: next.blocked } : {}),
       } as never)
+    })
+
+    const create = Effect.fn("Goal.create")(function* (
+      sessionID: SessionID,
+      init: { objective: string; maxRounds?: number; maxTokens?: number },
+    ) {
+      const r = yield* row(sessionID)
+      const revision = r ? r.revision + 1 : 1
+      // Creating a goal arms it: the request to start is itself the
+      // authorization. Only a RESTART or an abort disarms (D-6 / E-14).
+      setActivation(sessionID, { armed: true })
+      yield* emit(sessionID, {
+        goalID: `gol_${Date.now().toString(36)}`,
+        revision,
+        objective: init.objective,
+        phase: "active",
+        maxRounds: init.maxRounds ?? DEFAULT_MAX_ROUNDS,
+        maxTokens: init.maxTokens ?? DEFAULT_MAX_TOKENS,
+        roundsStarted: 0,
+        tokensUsed: 0,
+      })
+    })
+
+    const complete = Effect.fn("Goal.complete")(function* (sessionID: SessionID) {
+      const r = yield* row(sessionID)
+      if (!r) return
+      const prev = toSnapshot(r)
+      const { blocked: _drop, ...rest } = prev
+      yield* emit(sessionID, { ...rest, revision: prev.revision + 1, phase: "complete" })
+    })
 
     const startRound = Effect.fn("Goal.startRound")(function* (sessionID: SessionID, tokensUsed?: number) {
       const r = yield* row(sessionID)
@@ -137,7 +178,7 @@ const layer = Layer.effect(
         return true
       })
 
-    return { read, startRound, block, disarm, resume } satisfies Interface
+    return { read, create, complete, startRound, block, disarm, resume } satisfies Interface
   }),
 )
 
