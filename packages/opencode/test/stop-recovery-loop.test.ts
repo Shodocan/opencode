@@ -221,7 +221,10 @@ describe("StopRecovery shell `decide` (FORK FEATURE 9, B/C/E)", () => {
     expect(svc.published[0].data.reasoning_only).toBe(true)
   })
 
-  test("abort cleanup clears per-session counters before a later turn", async () => {
+  // autonomy-stack Step 5 [F3]: scoped to LEGACY per-session counters. clearState() must never be the
+  // storage for goal round state -- see spec §5.2 / research L2.2 (clearState fires on halt, cancel and
+  // interrupt). TODO(autonomy-stack Step 12/13): mirror row asserting durable goal state SURVIVES abort.
+  test("abort cleanup clears legacy per-session counters before a later turn", async () => {
     const textPart = { type: "text", text: "done." } as any
     const svc = makeServices({
       config: { stopRecovery: { enabled: true } },

@@ -208,8 +208,15 @@ describe("StopRecovery pure decision (FORK FEATURE 9)", () => {
     })
   })
 
-  describe("reset rules (§5.0)", () => {
-    test("turnKey change resets all counters", () => {
+  // FORK FEATURE (9) + autonomy-stack Step 5 [F3]: these rows are scoped to the LEGACY recovery
+  // families (length continue, no-tool nudge, empty-after-thinking) ONLY. They deliberately pin the
+  // wipe-on-turnKey-change / wipe-on-clearState behaviour, which a durable goal round counter must NOT
+  // share -- see spec §5.2 and research L2.2/L2.3 (turnKey rotates on compaction, which is L3's happy
+  // path). Do not widen them to cover goal state.
+  // TODO(autonomy-stack Step 12/13): add the mirror rows -- "goal round counter does NOT reset on
+  // turnKey change" and "durable goal state survives clearState" -- once evaluateGoal() exists.
+  describe("reset rules (§5.0) — legacy families only", () => {
+    test("legacy families reset on turnKey change", () => {
       let s = eval1(ON, undefined, facts({ finish: "stop" })).state
       s = eval1(ON, s, facts({ finish: "stop" })).state
       expect(s.noProgressCount).toBe(1)
@@ -220,7 +227,9 @@ describe("StopRecovery pure decision (FORK FEATURE 9)", () => {
       expect(r.decision.action).toBe("nudge_grace") // fresh grace available again
       expect(r.state.graceUsed).toBe(true) // consumed by this decision
     })
-    test("onProgress resets nudge counters but NOT lengthContinues", () => {
+    // NOTE: onProgress() is also the mechanism frozen choice C3a relies on -- the goal round boundary
+    // calls it so "no progress" measures within a round rather than across the whole goal.
+    test("onProgress resets legacy nudge counters but NOT lengthContinues", () => {
       let s = eval1(ON, undefined, facts({ finish: "length" })).state
       expect(s.lengthContinues).toBe(1)
       s = eval1(ON, s, facts({ finish: "stop" })).state
