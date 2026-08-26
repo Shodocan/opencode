@@ -20,6 +20,7 @@ import { Todo } from "./todo"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
+import { toolExecuteFinally } from "../plugin/tool-execute-finally"
 import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
 import { ToolRegistry } from "@/tool/registry"
 import { MCP } from "../mcp"
@@ -111,7 +112,7 @@ function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-  readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly prompt: (input: InternalPromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -157,7 +158,7 @@ const layer = Layer.effect(
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
-        prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
+        prompt: (input: InternalPromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
@@ -272,8 +273,9 @@ const layer = Layer.effect(
       sessionID: SessionID
       session: Session.Info
       msgs: SessionV1.WithParts[]
+      taskOrigin?: Tool.TaskOrigin
     }) {
-      const { task, model, lastUser, sessionID, session, msgs } = input
+      const { task, model, lastUser, sessionID, session, msgs, taskOrigin } = input
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
@@ -326,90 +328,113 @@ const layer = Layer.effect(
       }
       yield* plugin.trigger(
         "tool.execute.before",
-        { tool: TaskTool.id, sessionID, callID: part.id },
+        { tool: TaskTool.id, sessionID, callID: part.callID, taskOrigin },
         { args: taskArgs },
       )
 
-      const taskAgent = yield* agents.get(task.agent)
-      if (!taskAgent) {
-        const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
-        const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
-        const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
-        yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
-        throw error
-      }
-
       let error: Error | undefined
       const taskAbort = new AbortController()
-      const result = yield* taskTool
-        .execute(taskArgs, {
-          agent: task.agent,
-          messageID: assistantMessage.id,
+      // The finally wrapper covers everything between the before trigger and
+      // the after trigger (agent lookup, child execution, the after trigger
+      // itself) so exactly one finally fires for success, error, and
+      // interruption — and never when the before trigger itself dies.
+      const { r: result, attachments } = yield* toolExecuteFinally(
+        plugin,
+        {
+          tool: TaskTool.id,
           sessionID,
-          abort: taskAbort.signal,
           callID: part.callID,
-          extra: { bypassAgentCheck: true, promptOps },
-          messages: msgs,
-          metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
-            Effect.gen(function* () {
-              part = yield* sessions.updatePart({
-                ...part,
-                type: "tool",
-                state: { ...part.state, ...val },
-              } satisfies SessionV1.ToolPart)
-            }),
-          ask: (req: any) =>
-            permission
-              .ask({
-                ...req,
-                sessionID,
-                ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
-              })
-              .pipe(Effect.orDie),
-        })
-        .pipe(
-          Effect.catchCause((cause) => {
-            const defect = Cause.squash(cause)
-            error = defect instanceof Error ? defect : new Error(String(defect))
-            return Effect.logError("subtask execution failed", {
-              error,
+          args: taskArgs,
+          ...(taskOrigin ? { taskOrigin } : {}),
+          signal: taskAbort.signal,
+        },
+        Effect.gen(function* () {
+          const taskAgent = yield* agents.get(task.agent)
+          if (!taskAgent) {
+            const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
+            const hint = available.length ? ` Available agents: ${available.join(", ")}` : ""
+            const error = new NamedError.Unknown({ message: `Agent not found: "${task.agent}".${hint}` })
+            yield* events.publish(Session.Event.Error, { sessionID, error: error.toObject() })
+            throw error
+          }
+
+          const r = yield* taskTool
+            .execute(taskArgs, {
               agent: task.agent,
-              description: task.description,
+              messageID: assistantMessage.id,
+              sessionID,
+              abort: taskAbort.signal,
+              callID: part.callID,
+              taskOrigin,
+              extra: { bypassAgentCheck: true, promptOps },
+              messages: msgs,
+              metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
+                Effect.gen(function* () {
+                  part = yield* sessions.updatePart({
+                    ...part,
+                    type: "tool",
+                    state: { ...part.state, ...val },
+                  } satisfies SessionV1.ToolPart)
+                }),
+              ask: (req: any) =>
+                permission
+                  .ask({
+                    ...req,
+                    sessionID,
+                    ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
+                  })
+                  .pipe(Effect.orDie),
             })
-          }),
-          Effect.onInterrupt(() =>
-            Effect.gen(function* () {
-              taskAbort.abort()
-              assistantMessage.finish = "tool-calls"
-              assistantMessage.time.completed = Date.now()
-              yield* sessions.updateMessage(assistantMessage)
-              if (part.state.status === "running") {
-                yield* sessions.updatePart({
-                  ...part,
-                  state: {
-                    status: "error",
-                    error: "Cancelled",
-                    time: { start: part.state.time.start, end: Date.now() },
-                    metadata: part.state.metadata,
-                    input: part.state.input,
-                  },
-                } satisfies SessionV1.ToolPart)
-              }
-            }),
-          ),
-        )
+            .pipe(
+              Effect.catchCause((cause) => {
+                // Cancellation owns the unwind path: re-raise interrupts so
+                // the finally observation reports `cancelled` and no after
+                // fires; only genuine failures are logged-and-swallowed.
+                if (Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
+                const defect = Cause.squash(cause)
+                error = defect instanceof Error ? defect : new Error(String(defect))
+                return Effect.logError("subtask execution failed", {
+                  error,
+                  agent: task.agent,
+                  description: task.description,
+                })
+              }),
+              Effect.onInterrupt(() =>
+                Effect.gen(function* () {
+                  taskAbort.abort()
+                  assistantMessage.finish = "tool-calls"
+                  assistantMessage.time.completed = Date.now()
+                  yield* sessions.updateMessage(assistantMessage)
+                  if (part.state.status === "running") {
+                    yield* sessions.updatePart({
+                      ...part,
+                      state: {
+                        status: "error",
+                        error: "Cancelled",
+                        time: { start: part.state.time.start, end: Date.now() },
+                        metadata: part.state.metadata,
+                        input: part.state.input,
+                      },
+                    } satisfies SessionV1.ToolPart)
+                  }
+                }),
+              ),
+            )
 
-      const attachments = result?.attachments?.map((attachment) => ({
-        ...attachment,
-        id: PartID.ascending(),
-        sessionID,
-        messageID: assistantMessage.id,
-      }))
+          const attachments = r?.attachments?.map((attachment) => ({
+            ...attachment,
+            id: PartID.ascending(),
+            sessionID,
+            messageID: assistantMessage.id,
+          }))
 
-      yield* plugin.trigger(
-        "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
-        result,
+          yield* plugin.trigger(
+            "tool.execute.after",
+            { tool: TaskTool.id, sessionID, callID: part.callID, args: taskArgs, taskOrigin },
+            r,
+          )
+          return { r, attachments }
+        }),
       )
 
       assistantMessage.finish = "tool-calls"
@@ -1088,10 +1113,25 @@ const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
+    // Task children carry a durable origin record; public entry points may
+    // only drive them while that invocation's live origin is carried with the
+    // prompt. Fail closed before persisting anything when it is absent.
+    const requireTaskInvocationOrigin = Effect.fn("SessionPrompt.requireTaskInvocationOrigin")(function* (
+      session: Session.Info,
+      taskOrigin?: Tool.TaskOrigin,
+    ) {
+      if (session.parentID && session.metadata?.["opencode.task.origin"] !== undefined && taskOrigin === undefined) {
+        return yield* Effect.die(
+          new NamedError.Unknown({ message: "Task child sessions require an active invocation origin" }),
+        )
+      }
+    })
+
+    const prompt: (input: InternalPromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
       "SessionPrompt.prompt",
-    )(function* (input: PromptInput) {
+    )(function* (input: InternalPromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session, input.taskOrigin)
       yield* revert.cleanup(session)
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
@@ -1106,7 +1146,23 @@ const layer = Layer.effect(
       }
 
       if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
+      // A caller that dies while waiting (interrupted promise fiber) must not
+      // leave the forked run blocked forever: cancelling the session run lets
+      // the loop unwind through its own interrupt handling — including every
+      // tool.execute.finally observation — before this fiber terminates.
+      // Finalizers race the fiber's own pending interruption, so mask the
+      // teardown to guarantee it completes.
+      return yield* state
+        .ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID, input.taskOrigin))
+        .pipe(
+          Effect.onExit((exit) =>
+            // A succeeded Exit carries no cause in this Effect version; only
+            // failures can be interrupt-only.
+            exit._tag === "Failure" && Cause.hasInterruptsOnly(exit.cause)
+              ? Effect.uninterruptible(state.cancel(input.sessionID))
+              : Effect.void,
+          ),
+        )
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1117,8 +1173,13 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID) {
+    const runLoop: (
+      sessionID: SessionID,
+      taskOrigin?: Tool.TaskOrigin,
+    ) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(function* (
+      sessionID: SessionID,
+      taskOrigin?: Tool.TaskOrigin,
+    ) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1206,7 +1267,7 @@ const layer = Layer.effect(
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs, taskOrigin })
             continue
           }
 
@@ -1296,6 +1357,7 @@ const layer = Layer.effect(
               bypassAgentCheck,
               messages: msgs,
               promptOps,
+              taskOrigin,
             }).pipe(
               Effect.provideService(Plugin.Service, plugin),
               Effect.provideService(Permission.Service, permission),
@@ -1419,17 +1481,23 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       const ready = yield* Latch.make()
       return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       yield* Effect.logInfo("command", {
         "session.id": input.sessionID,
         command: input.command,
@@ -1595,6 +1663,9 @@ export const PromptInput = Schema.Struct({
   ),
 })
 export type PromptInput = Schema.Schema.Type<typeof PromptInput>
+
+/** Internal-only prompt carrier; HTTP payload schemas intentionally omit it. */
+export type InternalPromptInput = PromptInput & { taskOrigin?: Tool.TaskOrigin }
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,

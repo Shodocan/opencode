@@ -14,6 +14,7 @@ import type { Provider as ProviderV2, Model as ModelV2, Auth } from "@opencode-a
 
 import type { BunShell } from "./shell.js"
 import { type ToolDefinition } from "./tool.js"
+import type { TaskOrigin } from "./tool.js"
 
 export * from "./tool.js"
 
@@ -283,7 +284,7 @@ export interface Hooks {
     output: { parts: Part[] },
   ) => Promise<void>
   "tool.execute.before"?: (
-    input: { tool: string; sessionID: string; callID: string },
+    input: { tool: string; sessionID: string; callID: string; taskOrigin?: TaskOrigin },
     output: { args: any },
   ) => Promise<void>
   "shell.env"?: (
@@ -291,12 +292,24 @@ export interface Hooks {
     output: { env: Record<string, string> },
   ) => Promise<void>
   "tool.execute.after"?: (
-    input: { tool: string; sessionID: string; callID: string; args: any },
+    input: { tool: string; sessionID: string; callID: string; args: any; taskOrigin?: TaskOrigin },
     output: {
       title: string
       output: string
       metadata: any
     },
+  ) => Promise<void>
+  "tool.execute.finally"?: (
+    input: {
+      tool: string
+      sessionID: string
+      callID: string
+      args: any
+      taskOrigin?: TaskOrigin
+      outcome: "success" | "error" | "cancelled"
+      error?: { name: string; message: string }
+    },
+    output: {},
   ) => Promise<void>
   "experimental.chat.messages.transform"?: (
     input: {},

@@ -828,6 +828,45 @@ describe("tool.task", () => {
     }),
   )
 
+  background.instance("queued background task closures retain their own task origins", () =>
+    Effect.gen(function* () {
+      const jobs = yield* BackgroundJob.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const seen: string[] = []
+      const promptOps: TaskPromptOps = {
+        ...stubOps(),
+        prompt: (input) =>
+          Effect.sync(() => {
+            if (input.sessionID !== chat.id) seen.push(input.taskOrigin?.taskCallID ?? "missing")
+            return reply(input, "done")
+          }),
+      }
+      const execute = (callID: string, description: string) =>
+        def.execute(
+          { description, prompt: description, subagent_type: "general", background: true },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const a = yield* execute("call-A", "queued A")
+      const b = yield* execute("call-B", "queued B")
+      yield* jobs.wait({ id: a.metadata.sessionId, timeout: 1_000 })
+      yield* jobs.wait({ id: b.metadata.sessionId, timeout: 1_000 })
+      expect(seen.sort()).toEqual(["call-A", "call-B"])
+    }),
+  )
+
   background.instance("background task completion waits for running updates", () =>
     Effect.gen(function* () {
       const jobs = yield* BackgroundJob.Service
@@ -836,7 +875,8 @@ describe("tool.task", () => {
       const def = yield* tool.init()
       const first = defer<void>()
       const second = defer<void>()
-      const updated = defer<SessionPrompt.PromptInput>()
+      const updated = defer<SessionPrompt.InternalPromptInput>()
+      const startedPrompt = defer<SessionPrompt.InternalPromptInput>()
       const injected = defer<SessionPrompt.PromptInput>()
       let prompts = 0
       const promptOps: TaskPromptOps = {
@@ -847,21 +887,25 @@ describe("tool.task", () => {
             return Effect.succeed(reply(input, "done"))
           }
           prompts++
-          if (prompts === 1) return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
+          if (prompts === 1) {
+            startedPrompt.resolve(input)
+            return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
+          }
           updated.resolve(input)
           return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
         },
       }
-      const context = {
+      const context = (callID: string) => ({
         sessionID: chat.id,
         messageID: assistant.id,
+        callID,
         agent: "build",
         abort: new AbortController().signal,
         extra: { promptOps },
         messages: [],
         metadata: () => Effect.void,
         ask: () => Effect.void,
-      }
+      })
 
       const started = yield* def.execute(
         {
@@ -870,7 +914,7 @@ describe("tool.task", () => {
           subagent_type: "general",
           background: true,
         },
-        context,
+        context("call-A"),
       )
       const result = yield* def.execute(
         {
@@ -879,17 +923,20 @@ describe("tool.task", () => {
           subagent_type: "general",
           task_id: started.metadata.sessionId,
         },
-        context,
+        context("call-B"),
       )
 
       expect(result.metadata.sessionId).toBe(started.metadata.sessionId)
       expect(result.metadata.background).toBe(true)
       expect(result.output).toContain("Background task updated")
+      expect((yield* Effect.promise(() => startedPrompt.promise)).taskOrigin?.taskCallID).toBe("call-A")
       first.resolve()
       expect((yield* jobs.get(started.metadata.sessionId))?.status).toBe("running")
-      expect((yield* Effect.promise(() => updated.promise)).parts).toEqual([
+      const updatePrompt = yield* Effect.promise(() => updated.promise)
+      expect(updatePrompt.parts).toEqual([
         { type: "text", text: "also inspect cancellation" },
       ])
+      expect(updatePrompt.taskOrigin?.taskCallID).toBe("call-B")
 
       second.resolve()
       const waited = yield* jobs.wait({ id: started.metadata.sessionId, timeout: 1_000 })
@@ -1299,7 +1346,7 @@ describe("tool.task", () => {
     }),
   )
 
-  it.instance("fresh creation: callID defined sets origin, undefined omits, empty string preserved", () =>
+  it.instance("fresh creation: callID defined sets origin, undefined omits, blank rejected", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
@@ -1325,14 +1372,18 @@ describe("tool.task", () => {
         expect(child.metadata).toBeUndefined()
       }
 
-      {
-        const result = yield* def.execute(
-          { description: "task", prompt: "p", subagent_type: "general" },
-          taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "" }),
-        )
-        const child = yield* sessions.get(result.metadata.sessionId)
-        expect(child.metadata).toEqual(originMeta(chat.id, ""))
+      // A blank host call ID cannot mint a usable origin: the dispatch fails
+      // and no child session is created for it.
+      for (const callID of ["", "   "]) {
+        const exit = yield* def
+          .execute(
+            { description: "task", prompt: "p", subagent_type: "general" },
+            taskCtx({ sessionID: chat.id, messageID: assistant.id, callID }),
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
       }
+      expect(yield* sessions.children(chat.id)).toHaveLength(2)
     }),
   )
 
@@ -1355,10 +1406,13 @@ describe("tool.task", () => {
       })
       yield* Effect.addFinalizer(() => unsub)
 
-      const sentinelOrigin = { version: 1, parentSessionID: chat.id, tool: "task", callID: "sentinel" }
-      const child = yield* sessions.create({
+      const sentinelOrigin: TaskSessionOriginV1 = { version: 1, parentSessionID: chat.id, tool: "task", callID: "sentinel" }
+      // Host-owned origin metadata can only be minted through the internal host path.
+      const child = yield* sessions.createTaskChild({
         parentID: chat.id,
         title: "Existing child",
+        agent: "general",
+        permission: [],
         metadata: { "opencode.task.origin": sentinelOrigin },
       })
 
@@ -1381,6 +1435,42 @@ describe("tool.task", () => {
       // Metadata unchanged (resume does not overwrite)
       const persisted = yield* sessions.get(child.id)
       expect(persisted.metadata).toEqual({ "opencode.task.origin": sentinelOrigin })
+    }),
+  )
+
+  it.instance("preserves a child creation origin while a same-parent continuation carries its new call ID", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const seen: SessionPrompt.InternalPromptInput[] = []
+      const promptOps = stubOps({ onPrompt: (input) => seen.push(input) })
+      const execute = (callID: string, task_id?: string) =>
+        def.execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general", task_id },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const first = yield* execute("call-A")
+      const child = yield* sessions.get(first.metadata.sessionId)
+      expect(child.metadata).toEqual({
+        "opencode.task.origin": { version: 1, parentSessionID: chat.id, tool: "task", callID: "call-A" },
+      })
+
+      yield* execute("call-B", child.id)
+      expect(seen.map((input) => input.taskOrigin?.taskCallID)).toEqual(["call-A", "call-B"])
+      expect((yield* sessions.get(child.id)).metadata).toEqual(child.metadata)
     }),
   )
 

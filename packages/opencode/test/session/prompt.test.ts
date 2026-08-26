@@ -500,6 +500,74 @@ noLLMServer.instance(
   { config: cfg },
 )
 
+noLLMServer.instance(
+  "public loop fails closed for a task child without a live invocation origin",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ title: "parent" })
+      const child = yield* sessions.createTaskChild({
+        parentID: parent.id,
+        title: "task child",
+        agent: "general",
+        permission: [],
+        metadata: {
+          "opencode.task.origin": {
+            version: 1,
+            parentSessionID: parent.id,
+            tool: "task",
+            callID: "created-call",
+          },
+        },
+      })
+      yield* seed(child.id, { finish: "stop" })
+
+      const exit = yield* prompt.loop({ sessionID: child.id }).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  { config: cfg },
+)
+
+noLLMServer.instance(
+  "public prompt, shell, and command fail closed before persisting a task child message",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ title: "parent" })
+      const child = yield* sessions.createTaskChild({
+        parentID: parent.id,
+        title: "task child",
+        agent: "general",
+        permission: [],
+        metadata: {
+          "opencode.task.origin": {
+            version: 1,
+            parentSessionID: parent.id,
+            tool: "task",
+            callID: "created-call",
+          },
+        },
+      })
+      const before = yield* sessions.messages({ sessionID: child.id })
+
+      const promptExit = yield* prompt
+        .prompt({ sessionID: child.id, agent: "general", noReply: true, parts: [{ type: "text", text: "public" }] })
+        .pipe(Effect.exit)
+      const shellExit = yield* prompt.shell({ sessionID: child.id, agent: "general", command: "true" }).pipe(Effect.exit)
+      const commandExit = yield* prompt
+        .command({ sessionID: child.id, agent: "general", command: "missing", arguments: "" })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(promptExit)).toBe(true)
+      expect(Exit.isFailure(shellExit)).toBe(true)
+      expect(Exit.isFailure(commandExit)).toBe(true)
+      expect(yield* sessions.messages({ sessionID: child.id })).toEqual(before)
+    }),
+  { config: cfg },
+)
+
 it.instance("loop exits without an LLM request for interrupted orphan tool calls", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)

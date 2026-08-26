@@ -8,6 +8,7 @@ import { Agent } from "@/agent/agent"
 import { Session } from "@/session/session"
 import { Permission } from "@/permission"
 import { Plugin } from "@/plugin"
+import { toolExecuteFinally } from "@/plugin/tool-execute-finally"
 
 export const CODE_MODE_TOOL = "execute"
 
@@ -140,47 +141,64 @@ const invokeChildTool = Effect.fn("CodeMode.invokeChildTool")(function* (input: 
 }) {
   yield* input.plugin.trigger(
     "tool.execute.before",
-    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID },
+    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, taskOrigin: input.ctx.taskOrigin },
     { args: input.args },
   )
-  const result: CallToolResult = yield* Effect.gen(function* () {
-    yield* input.ctx.ask({ permission: input.entry.key, metadata: {}, patterns: ["*"], always: ["*"] })
-    // Deliberately mirrors McpCatalog.convertTool's transport call so the MCP service stays free of tool-loop concerns.
-    return yield* Effect.promise(async () => {
-      const raw = await input.entry.tool.client.callTool(
-        { name: input.entry.tool.def.name, arguments: input.args },
-        CallToolResultSchema,
-        {
-          resetTimeoutOnProgress: true,
-          signal: input.ctx.abort,
-          timeout: input.entry.tool.timeout,
-          // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
-          onprogress: () => {},
-        },
+  // The finally wrapper covers the child call and the after trigger so exactly
+  // one finally fires per child invocation (success, error, cancelled) and a
+  // dying before hook — fired above, outside the wrapper — fires no finally.
+  const result: CallToolResult = yield* toolExecuteFinally(
+    input.plugin,
+    {
+      tool: input.entry.key,
+      sessionID: input.ctx.sessionID,
+      callID: input.callID,
+      args: input.args,
+      ...(input.ctx.taskOrigin ? { taskOrigin: input.ctx.taskOrigin } : {}),
+      signal: input.ctx.abort,
+    },
+    Effect.gen(function* () {
+      const result: CallToolResult = yield* Effect.gen(function* () {
+        yield* input.ctx.ask({ permission: input.entry.key, metadata: {}, patterns: ["*"], always: ["*"] })
+        // Deliberately mirrors McpCatalog.convertTool's transport call so the MCP service stays free of tool-loop concerns.
+        return yield* Effect.promise(async () => {
+          const raw = await input.entry.tool.client.callTool(
+            { name: input.entry.tool.def.name, arguments: input.args },
+            CallToolResultSchema,
+            {
+              resetTimeoutOnProgress: true,
+              signal: input.ctx.abort,
+              timeout: input.entry.tool.timeout,
+              // The MCP SDK only sends a progress token when this hook is present, enabling timeout resets.
+              onprogress: () => {},
+            },
+          )
+          if (raw.isError)
+            throw new Error(
+              raw.content
+                .flatMap((item) => (item.type === "text" ? [item.text] : []))
+                .filter((text) => text.trim())
+                .join("\n\n") || "MCP tool returned an error",
+            )
+          return raw
+        })
+      }).pipe(
+        Effect.withSpan("Tool.execute", {
+          attributes: {
+            "tool.name": input.entry.key,
+            "tool.call_id": input.callID,
+            "session.id": input.ctx.sessionID,
+            "message.id": input.ctx.messageID,
+          },
+        }),
       )
-      if (raw.isError)
-        throw new Error(
-          raw.content
-            .flatMap((item) => (item.type === "text" ? [item.text] : []))
-            .filter((text) => text.trim())
-            .join("\n\n") || "MCP tool returned an error",
-        )
-      return raw
-    })
-  }).pipe(
-    Effect.withSpan("Tool.execute", {
-      attributes: {
-        "tool.name": input.entry.key,
-        "tool.call_id": input.callID,
-        "session.id": input.ctx.sessionID,
-        "message.id": input.ctx.messageID,
-      },
+      yield* input.plugin.trigger(
+        "tool.execute.after",
+        { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, args: input.args, taskOrigin: input.ctx.taskOrigin },
+        result,
+      )
+      return result
     }),
-  )
-  yield* input.plugin.trigger(
-    "tool.execute.after",
-    { tool: input.entry.key, sessionID: input.ctx.sessionID, callID: input.callID, args: input.args },
-    result,
   )
   return result
 })

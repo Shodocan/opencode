@@ -20,7 +20,7 @@ import { Database } from "@opencode-ai/core/database/database"
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+  prompt(input: SessionPrompt.InternalPromptInput): Effect.Effect<SessionV1.WithParts>
 }
 
 // FORK FEATURE (10) gates — metadata emitted by the task tool. `blocked`/`gate`/
@@ -261,6 +261,16 @@ function resolveTaskModel(input: {
         if (candidate.isCaller) {
           warning = `Override ${candidate.model.providerID}/${candidate.model.modelID}${candidate.model.variant ? `#${candidate.model.variant}` : ""} is invalid; fell back to ${candidate.source === "caller" ? "agent default" : "next candidate"}.`
         }
+        // An agent-pinned model is an explicit contract from the agent
+        // definition: falling back would run the subagent under a different
+        // model than its author intended, so the task fails instead.
+        if (candidate.source === "agent") {
+          return yield* Effect.fail(
+            new Error(
+              `Agent "${agentConfig.name}" model ${candidate.model.providerID}/${candidate.model.modelID} is not available on provider "${candidate.model.providerID}".`,
+            ),
+          )
+        }
         continue
       }
 
@@ -327,6 +337,15 @@ export const TaskTool = Tool.define(
       ctx: Tool.Context,
     ) {
       const cfg = yield* config.get()
+      // The runtime call ID identifies this invocation; never synthesize one.
+      // An absent call ID omits the origin; a blank one cannot mint a usable
+      // origin, so the dispatch fails before creating any child.
+      const taskCallID = ctx.callID?.trim()
+      if (ctx.callID !== undefined && !taskCallID)
+        return yield* Effect.fail(new Error("TaskTool requires a nonblank host callID"))
+      const taskOrigin = taskCallID
+        ? { version: 1 as const, parentSessionID: ctx.sessionID, taskCallID }
+        : undefined
       const runInBackground = params.background === true
       if (runInBackground && !flags.experimentalBackgroundSubagents) {
         return yield* Effect.fail(
@@ -450,26 +469,38 @@ export const TaskTool = Tool.define(
           action: "deny" as const,
         })) ?? []),
       ]
+      const permission = [
+        ...childPermission,
+        ...childToolDenies.filter(
+          (deny) =>
+            !childPermission.some(
+              (rule) => rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+            ),
+        ),
+      ]
       const nextSession =
         session ??
-        (yield* sessions.create({
-          parentID: ctx.sessionID,
-          title: params.description + ` (@${next.name} subagent)`,
-          agent: next.name,
-          permission: [
-            ...childPermission,
-            ...childToolDenies.filter(
-              (deny) =>
-                !childPermission.some(
-                  (rule) =>
-                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
-                ),
-            ),
-          ],
-          ...(ctx.callID !== undefined
-            ? { metadata: { "opencode.task.origin": { version: 1, parentSessionID: ctx.sessionID, tool: "task", callID: ctx.callID } satisfies TaskSessionOriginV1 } }
-            : {}),
-        }))
+        (taskCallID
+          ? yield* sessions.createTaskChild({
+              parentID: ctx.sessionID,
+              title: params.description + ` (@${next.name} subagent)`,
+              agent: next.name,
+              permission,
+              metadata: {
+                "opencode.task.origin": {
+                  version: 1,
+                  parentSessionID: ctx.sessionID,
+                  tool: id,
+                  callID: taskCallID,
+                } satisfies TaskSessionOriginV1,
+              },
+            })
+          : yield* sessions.create({
+              parentID: ctx.sessionID,
+              title: params.description + ` (@${next.name} subagent)`,
+              agent: next.name,
+              permission,
+            }))
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -528,6 +559,7 @@ export const TaskTool = Tool.define(
           variant: model.variant,
           agent: next.name,
           parts: stripped,
+          ...(taskOrigin ? { taskOrigin } : {}),
           ...(params.outputSchema ? { format: { type: "json_schema" as const, schema: params.outputSchema } } : {}),
         })
         if (result.info.role === "assistant" && result.info.error) {
@@ -554,13 +586,21 @@ export const TaskTool = Tool.define(
         state: "completed" | "error",
         text: string,
       ) {
-        const currentParent = yield* sessions.get(ctx.sessionID)
-        yield* ops
-          .prompt({
-            sessionID: ctx.sessionID,
-            agent: currentParent.agent ?? ctx.agent,
-            variant: parentVariant,
-            parts: [
+      const currentParent = yield* sessions.get(ctx.sessionID)
+      yield* ops
+        .prompt({
+          sessionID: ctx.sessionID,
+          agent: currentParent.agent ?? ctx.agent,
+          variant: parentVariant,
+          // The dispatching session may itself be an origin-marked nested task
+          // child; carry its own live invocation origin (the one its prompt is
+          // driving with, present on ctx) so the prompt passes the
+          // requireTaskInvocationOrigin gate (fail-closed on origin-marked
+          // children) instead of dying before persisting. The child's own
+          // origin (taskOrigin above) identifies the child, not the parent
+          // being prompted here.
+          ...(ctx.taskOrigin ? { taskOrigin: ctx.taskOrigin } : {}),
+          parts: [
               {
                 type: "text",
                 synthetic: true,

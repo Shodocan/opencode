@@ -75,14 +75,17 @@ const layer = Layer.effect(
     })
 
     const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
+      // Interrupt the live runner BEFORE sweeping background jobs: the runner
+      // unrolls the work fiber through its own interrupt handling (tool abort
+      // listeners, task-tool cleanup, tool.execute.finally observation), and
+      // its release handlers settle dependent jobs cleanly. Sweeping first
+      // would resolve a foreground `task` wait with a laundered
+      // status:"cancelled" value instead of delivering the real interrupt.
       const data = yield* InstanceState.get(state)
       const existing = data.runners.get(sessionID)
-      if (!existing) {
-        yield* status.set(sessionID, { type: "idle" })
-        return
-      }
-      yield* existing.cancel
+      if (existing) yield* existing.cancel
+      yield* cancelBackgroundJobs(background, sessionID)
+      if (!existing) yield* status.set(sessionID, { type: "idle" })
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
