@@ -230,15 +230,16 @@ function publicMetadata(input: Record<string, unknown> | undefined): Record<stri
   return Object.keys(result).length > 0 ? result : undefined
 }
 
-/** Public metadata updates replace the public half; host-owned keys survive untouched. */
+/** Public metadata updates replace the public half; host-owned keys survive untouched.
+ * An explicit update payload always rewrites the public half even when it is
+ * empty (a RESET), because the store treats an absent value as no-op. */
 function mergePublicMetadata(
   current: Record<string, unknown> | undefined,
   input: Record<string, unknown>,
-): Record<string, unknown> | undefined {
+): Record<string, unknown> {
   const host = Object.fromEntries(Object.entries(current ?? {}).filter(([key]) => key.startsWith(HostMetadataPrefix)))
-  const user = publicMetadata(input) ?? {}
-  const merged = { ...host, ...user }
-  return Object.keys(merged).length > 0 ? merged : undefined
+  const user = Object.fromEntries(Object.entries(input).filter(([key]) => !key.startsWith(HostMetadataPrefix)))
+  return { ...host, ...user }
 }
 
 export const Info = Schema.Struct({
