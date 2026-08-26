@@ -413,11 +413,15 @@ describe("code mode execute", () => {
     )
 
     expect(out.output).toBe("done")
+    // tool.execute.finally fires exactly once per child call, immediately
+    // after that child's after event (see code-mode-finally.test.ts).
     expect(events.map((e) => [e.name, e.input.tool, e.input.callID])).toEqual([
       ["tool.execute.before", "a_tool", "call_code_mode/1"],
       ["tool.execute.after", "a_tool", "call_code_mode/1"],
+      ["tool.execute.finally", "a_tool", "call_code_mode/1"],
       ["tool.execute.before", "b_tool", "call_code_mode/2"],
       ["tool.execute.after", "b_tool", "call_code_mode/2"],
+      ["tool.execute.finally", "b_tool", "call_code_mode/2"],
     ])
     const [before, after] = events
     expect(before!.input.sessionID).toBe(ctx.sessionID)
