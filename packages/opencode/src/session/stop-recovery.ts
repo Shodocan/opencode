@@ -275,6 +275,16 @@ export interface DecideServices {
   events: EventV2.Interface
   config: Config.Interface
   todo: Todo.Interface
+  /**
+   * FORK FEATURE (13) L4 — the goal shell, threaded from the runLoop's own
+   * environment. The ambient `serviceOption` is NOT reliable there: the runLoop
+   * effect does not see services that are only transitive deps of
+   * ToolRegistry, so an ambient-only lookup silently no-ops goal rounds in
+   * production while mock-based tests (which provide the service ambiently)
+   * stay green. Prefer the threaded service; keep the ambient fallback so the
+   * existing `Effect.provide(goal.layer)` test shape keeps working.
+   */
+  goal?: SessionGoalShell.Interface
 }
 
 /** Resolved (defaults-applied) stop-recovery config; undefined => feature off. */
@@ -377,15 +387,17 @@ export const decide = Effect.fn("StopRecovery.decide")(function* (input: DecideI
   const todos = yield* svc.todo.get(input.sessionID).pipe(Effect.orElseSucceed(() => [] as Todo.Info[]))
   const pendingTodos = todos.some((t) => t.status === "pending" || t.status === "in_progress")
 
-  // FORK FEATURE (13) L4 — the goal projection and the context-pressure signal
-  // are pulled from the Effect ENVIRONMENT, not threaded through DecideServices.
-  // That is what keeps prompt.ts at zero added lines (E-7): decide() is an
-  // Effect.fn running in the same environment the runLoop assembled. Optional
-  // lookups, so the existing mock-based shell tests keep working unchanged.
-  const goalShell = yield* Effect.serviceOption(SessionGoalShell.Service).pipe(
+  // FORK FEATURE (13) L4 — the goal projection and the context-pressure signal.
+  // The goal shell is threaded through DecideServices from the runLoop's own
+  // environment. The ambient `serviceOption` is kept ONLY as a fallback for the
+  // mock-based shell tests, which provide the service via `Effect.provide` rather
+  // than threading it. In production the runLoop effect does NOT see
+  // SessionGoalShell ambiently (it is only a transitive dep of ToolRegistry), so
+  // an ambient-only lookup silently no-ops every goal round.
+  const goalShell = svc.goal ?? (yield* Effect.serviceOption(SessionGoalShell.Service).pipe(
     Effect.map((o) => (o._tag === "Some" ? o.value : undefined)),
     Effect.orElseSucceed(() => undefined),
-  )
+  ))
   const goalDisabled = agent.goal === false
   const goalFacts =
     cfg.goal?.enabled && goalShell && !goalDisabled

@@ -16,6 +16,7 @@ import { SessionCompaction } from "./compaction"
 import { filterVolatile } from "./volatile"
 // FORK FEATURE (9) stop-recovery — L1 premature-stop recovery decision shell.
 import { clearState, decide } from "./stop-recovery"
+import { SessionGoalShell } from "./goal-service"
 import { Todo } from "./todo"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
@@ -136,6 +137,10 @@ const layer = Layer.effect(
     const permission = yield* Permission.Service
     // FORK FEATURE (9) stop-recovery — pending-work signal for the no-tool nudge.
     const todo = yield* Todo.Service
+    // FORK FEATURE (13) autonomy — goal shell, threaded into decide() (the
+    // runLoop effect cannot see it ambiently; it is only a transitive dep of
+    // ToolRegistry).
+    const goal = yield* SessionGoalShell.Service
     const fsys = yield* FSUtil.Service
     const mcp = yield* MCP.Service
     const lsp = yield* LSP.Service
@@ -1235,6 +1240,7 @@ const layer = Layer.effect(
                 events,
                 config,
                 todo,
+                goal,
               },
             )
             if (recovery === "injected") continue
@@ -1758,6 +1764,8 @@ export const node = LayerNode.make({
     Permission.node,
     // FORK FEATURE (9) stop-recovery — Todo.Service dependency.
     Todo.node,
+    // FORK FEATURE (13) autonomy — goal shell dependency.
+    SessionGoalShell.node,
     FSUtil.node,
     MCP.node,
     LSP.node,
