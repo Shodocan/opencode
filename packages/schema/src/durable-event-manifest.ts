@@ -7,4 +7,5 @@ import { SessionV1 } from "./session-v1"
 export const Durable = Event.durable([
   ...SessionV1.Event.Definitions.filter((definition) => definition.durable !== undefined),
   ...SessionEvent.DurableDefinitions,
+  ...SessionEvent.InternalDurableDefinitions,
 ])

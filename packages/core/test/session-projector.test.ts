@@ -23,6 +23,13 @@ import { SessionInputTable, SessionMessageTable, SessionTable } from "@opencode-
 import { testEffect } from "./lib/effect"
 import { Snapshot } from "@opencode-ai/core/snapshot"
 
+const InternalSessionEvent = SessionEvent as typeof SessionEvent & {
+  CompactionFinalized?: {
+    readonly type: string
+    readonly durable?: { readonly version: number; readonly aggregate: string }
+  }
+}
+
 const it = testEffect(Layer.mergeAll(Database.defaultLayer, EventV2.defaultLayer, SessionProjector.defaultLayer))
 const sessionID = SessionV2.ID.make("ses_projector_test")
 const created = DateTime.makeUnsafe(0)
@@ -538,6 +545,103 @@ describe("SessionProjector", () => {
           time: { created },
         }),
       ])
+    }),
+  )
+
+  it.effect("projects one complete CompactionFinalized state directly and idempotently", () =>
+    Effect.gen(function* () {
+      const finalized = InternalSessionEvent.CompactionFinalized
+      expect(finalized).toBeDefined()
+      if (!finalized) return
+
+      const { db } = yield* Database.Service
+      yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: Project.ID.global,
+          slug: "test",
+          directory: "/project",
+          title: "test",
+          version: "test",
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const userID = SessionMessage.ID.make("msg_compaction_user")
+      const assistantID = SessionMessage.ID.make("msg_compaction_assistant")
+      const textID = "text_compaction"
+      const user = SessionMessage.User.make({
+        id: userID,
+        type: "user",
+        text: "compact this",
+        time: { created },
+      })
+      const assistant = SessionMessage.Assistant.make({
+        id: assistantID,
+        type: "assistant",
+        agent: "compaction",
+        model,
+        content: [SessionMessage.AssistantText.make({ type: "text", id: textID, text: "anchored summary" })],
+        finish: "stop",
+        cost: 1,
+        tokens: { input: 2, output: 3, reasoning: 0, cache: { read: 4, write: 5 } },
+        time: { created, completed: DateTime.makeUnsafe(1) },
+      })
+      const marker = SessionMessage.Compaction.make({
+        id: SessionMessage.ID.make("msg_compaction_marker"),
+        type: "compaction",
+        reason: "auto",
+        summary: "anchored summary",
+        recent: "recent text",
+        time: { created },
+      })
+      const eventData = {
+        sessionID,
+        timestamp: DateTime.makeUnsafe(1),
+        compaction: {
+          message: user,
+          marker,
+          assistant,
+          parts: assistant.content,
+        },
+        recent: "recent text",
+        usage: { cost: 1, tokens: { input: 2, output: 3, reasoning: 0, cache: { read: 4, write: 5 } } },
+        before: { estimate: 100, budget: 200 },
+        after: { estimate: 50, budget: 200 },
+      }
+
+      const events = yield* EventV2.Service
+      const first = yield* events.publish(finalized as never, eventData as never)
+      expect((first as { type: string }).type).toBe(finalized.type)
+      expect((first as { durable?: { version: number } }).durable?.version).toBe(finalized.durable?.version)
+
+      const rows = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      expect(rows.map((row) => row.id)).toEqual([userID, marker.id, assistantID])
+      expect(rows.find((row) => row.id === assistantID)).toMatchObject({ seq: first.durable?.seq })
+      expect(JSON.stringify(rows)).toContain("anchored summary")
+      expect(JSON.stringify(rows)).toContain("recent text")
+
+      const snapshot = JSON.stringify(rows)
+      yield* events.replay({
+        id: first.id,
+        type: EventV2.versionedType(finalized.type, finalized.durable?.version ?? 1),
+        aggregateID: sessionID,
+        seq: first.durable?.seq ?? 0,
+        data: eventData,
+      })
+      expect(JSON.stringify(yield* db.select().from(SessionMessageTable).all())).toContain("anchored summary")
+      expect(JSON.stringify(yield* db.select().from(SessionMessageTable).all())).toBe(snapshot)
     }),
   )
 })

@@ -101,6 +101,37 @@ describe("session.created event", () => {
     }),
   )
 
+  it.instance("publishes the exact task-child origin in session.created", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const parent = yield* session.create({ title: "task-parent" })
+      const received = yield* Deferred.make<SessionNs.Info>()
+      const off = yield* events.listen((event) => {
+        if (event.type === SessionNs.Event.Created.type) {
+          const info = (event.data as typeof SessionNs.Event.Created.data.Type).info as SessionNs.Info
+          if (info.parentID === parent.id) Deferred.doneUnsafe(received, Effect.succeed(info))
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+      const child = yield* session.createTaskChild({
+        parentID: parent.id,
+        title: "task-child",
+        agent: "general",
+        permission: [],
+        metadata: {
+          "opencode.task.origin": { version: 1, parentSessionID: parent.id, tool: "task", callID: "call-1" },
+        },
+      })
+      expect((yield* awaitDeferred(received, "timed out waiting for child")).metadata).toEqual({
+        "opencode.task.origin": { version: 1, parentSessionID: parent.id, tool: "task", callID: "call-1" },
+      })
+      yield* session.remove(child.id)
+      yield* session.remove(parent.id)
+    }),
+  )
+
   it.instance("emits legacy global sync payload", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
@@ -230,6 +261,92 @@ describe("Session", () => {
       expect(saved.metadata).toEqual(meta)
       expect(fork.metadata).toEqual(meta)
       expect(fork.metadata).not.toBe(meta)
+    }),
+  )
+
+  it.instance("strips host-owned metadata when a session is forked", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const parent = yield* Effect.acquireRelease(session.create({ title: "parent" }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+      const created = yield* Effect.acquireRelease(
+        session.createTaskChild({
+          parentID: parent.id,
+          title: "with-host-origin",
+          agent: "general",
+          permission: [],
+          metadata: {
+            "opencode.task.origin": {
+              version: 1,
+              parentSessionID: parent.id,
+              tool: "task",
+              callID: "call-a",
+            },
+          },
+        }),
+        (info) => session.remove(info.id).pipe(Effect.ignore),
+      )
+      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+
+      expect(fork.metadata).toBeUndefined()
+    }),
+  )
+
+  it.instance("strips reserved metadata from public create and preserves host origin on public metadata updates", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const publicSession = yield* Effect.acquireRelease(
+        session.create({
+          title: "public-metadata",
+          metadata: { user: "first", "opencode.task.origin": { forged: true } },
+        }),
+        (info) => session.remove(info.id).pipe(Effect.ignore),
+      )
+      expect(publicSession.metadata).toEqual({ user: "first" })
+
+      const child = yield* Effect.acquireRelease(
+        session.createTaskChild({
+          parentID: publicSession.id,
+          title: "task child",
+          agent: "general",
+          permission: [],
+          metadata: {
+            "opencode.task.origin": {
+              version: 1,
+              parentSessionID: publicSession.id,
+              tool: "task",
+              callID: "call-a",
+            },
+          },
+        }),
+        (info) => session.remove(info.id).pipe(Effect.ignore),
+      )
+      expect(child.metadata).toEqual({
+        "opencode.task.origin": {
+          version: 1,
+          parentSessionID: publicSession.id,
+          tool: "task",
+          callID: "call-a",
+        },
+      })
+
+      yield* session.setMetadata({
+        sessionID: child.id,
+        metadata: { user: "second", "opencode.task.origin": { forged: true } },
+      })
+      yield* session.setMetadata({ sessionID: child.id, metadata: { other: "merged" } })
+      expect((yield* session.get(child.id)).metadata).toEqual({
+        "opencode.task.origin": {
+          version: 1,
+          parentSessionID: publicSession.id,
+          tool: "task",
+          callID: "call-a",
+        },
+        other: "merged",
+      })
     }),
   )
 

@@ -1,5 +1,11 @@
 import { z } from "zod"
 
+export type TaskOrigin = {
+  version: 1
+  parentSessionID: string
+  taskCallID: string
+}
+
 export type ToolContext = {
   sessionID: string
   messageID: string
@@ -15,6 +21,8 @@ export type ToolContext = {
    */
   worktree: string
   abort: AbortSignal
+  /** Host-minted child-task provenance; never supplied as tool arguments. */
+  taskOrigin?: TaskOrigin
   metadata(input: { title?: string; metadata?: { [key: string]: any } }): void
   ask(input: AskInput): Promise<void>
 }

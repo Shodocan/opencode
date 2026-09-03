@@ -44,6 +44,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   bypassAgentCheck: boolean
   messages: SessionV1.WithParts[]
   promptOps: TaskPromptOps
+  taskOrigin?: Tool.TaskOrigin
 }) {
   const tools: Record<string, AITool> = {}
   const run = yield* EffectBridge.make()
@@ -58,6 +59,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     abort: options.abortSignal!,
     messageID: input.processor.message.id,
     callID: options.toolCallId,
+    taskOrigin: input.taskOrigin,
     extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
     agent: input.agent.name,
     messages: input.messages,
@@ -101,7 +103,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             const ctx = context(args, options)
             yield* plugin.trigger(
               "tool.execute.before",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
+              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, taskOrigin: ctx.taskOrigin },
               { args },
             )
             const result = yield* item.execute(args, ctx)
@@ -116,7 +118,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args, taskOrigin: ctx.taskOrigin },
               output,
             )
             if (options.abortSignal?.aborted) {
@@ -170,7 +172,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               : resourceServers.map((server) => `mcp:${server}:*`)
             yield* plugin.trigger(
               "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId },
+              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, taskOrigin: ctx.taskOrigin },
               { args },
             )
             yield* ctx.ask({
@@ -203,7 +205,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+              { tool: MCP_RESOURCE_TOOLS.list, sessionID: ctx.sessionID, callID: opts.toolCallId, args, taskOrigin: ctx.taskOrigin },
               output,
             )
             if (opts.abortSignal?.aborted) {
@@ -253,7 +255,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
               : resourceServers.map((server) => `mcp:${server}:*`)
             yield* plugin.trigger(
               "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId },
+              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, taskOrigin: ctx.taskOrigin },
               { args },
             )
             yield* ctx.ask({
@@ -286,7 +288,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+              { tool: MCP_RESOURCE_TOOLS.listTemplates, sessionID: ctx.sessionID, callID: opts.toolCallId, args, taskOrigin: ctx.taskOrigin },
               output,
             )
             if (opts.abortSignal?.aborted) {
@@ -333,7 +335,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.before",
-              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId },
+              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, taskOrigin: ctx.taskOrigin },
               { args },
             )
             yield* ctx.ask({
@@ -368,7 +370,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+              { tool: MCP_RESOURCE_TOOLS.read, sessionID: ctx.sessionID, callID: opts.toolCallId, args, taskOrigin: ctx.taskOrigin },
               output,
             )
             if (opts.abortSignal?.aborted) {
@@ -394,7 +396,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           const ctx = context(args, opts)
           yield* plugin.trigger(
             "tool.execute.before",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId },
+            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, taskOrigin: ctx.taskOrigin },
             { args },
           )
           const result: Awaited<ReturnType<NonNullable<typeof execute>>> = yield* Effect.gen(function* () {
@@ -412,7 +414,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           )
           yield* plugin.trigger(
             "tool.execute.after",
-            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args },
+            { tool: key, sessionID: ctx.sessionID, callID: opts.toolCallId, args, taskOrigin: ctx.taskOrigin },
             result,
           )
 

@@ -223,6 +223,34 @@ const Model = Schema.Struct({
 
 export const Metadata = Schema.Record(Schema.String, Schema.Any)
 
+export type TaskOriginMetadata = {
+  "opencode.task.origin": {
+    version: 1
+    parentSessionID: string
+    tool: "task"
+    callID: string
+  }
+}
+
+const HostMetadataPrefix = "opencode."
+
+/** Public metadata cannot forge or erase host-owned correlation records. */
+function publicMetadata(input: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+  if (!input) return input
+  const result = Object.fromEntries(Object.entries(input).filter(([key]) => !key.startsWith(HostMetadataPrefix)))
+  return Object.keys(result).length > 0 ? result : undefined
+}
+
+function mergePublicMetadata(
+  current: Record<string, unknown> | undefined,
+  input: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const host = Object.fromEntries(Object.entries(current ?? {}).filter(([key]) => key.startsWith(HostMetadataPrefix)))
+  const user = publicMetadata(input) ?? {}
+  const merged = { ...host, ...user }
+  return Object.keys(merged).length > 0 ? merged : undefined
+}
+
 export const Info = Schema.Struct({
   id: SessionID,
   slug: Schema.String,
@@ -425,6 +453,14 @@ export interface Interface {
     metadata?: typeof Metadata.Type
     permission?: PermissionV1.Ruleset
     workspaceID?: WorkspaceV2.ID
+  }) => Effect.Effect<Info>
+  /** Internal host path for task children; public create strips opencode.* metadata. */
+  readonly createTaskChild: (input: {
+    parentID: SessionID
+    title: string
+    agent: string
+    permission: PermissionV1.Ruleset
+    metadata: TaskOriginMetadata
   }) => Effect.Effect<Info>
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
@@ -680,9 +716,24 @@ export const layer: Layer.Layer<
         title: input?.title,
         agent: input?.agent,
         model: input?.model,
-        metadata: input?.metadata,
+        metadata: publicMetadata(input?.metadata),
         permission: input?.permission,
         workspaceID: input?.workspaceID ?? workspace,
+      })
+    })
+
+    const createTaskChild: Interface["createTaskChild"] = Effect.fn("Session.createTaskChild")(function* (input) {
+      const ctx = yield* InstanceState.context
+      const workspace = yield* InstanceState.workspaceID
+      return yield* createNext({
+        parentID: input.parentID,
+        directory: ctx.directory,
+        path: sessionPath(ctx.worktree, ctx.directory),
+        title: input.title,
+        agent: input.agent,
+        permission: input.permission,
+        metadata: input.metadata,
+        workspaceID: workspace,
       })
     })
 
@@ -695,7 +746,8 @@ export const layer: Layer.Layer<
         path: sessionPath(ctx.worktree, ctx.directory),
         workspaceID: original.workspaceID,
         title,
-        metadata: structuredClone(original.metadata),
+        // Forks are a public operation and must not inherit host authority.
+        metadata: publicMetadata(structuredClone(original.metadata)),
       })
       const msgs = yield* messages({ sessionID: input.sessionID })
       const idMap = new Map<string, MessageID>()
@@ -757,7 +809,11 @@ export const layer: Layer.Layer<
     })
 
     const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
-      yield* patch(input.sessionID, { metadata: input.metadata, time: { updated: Date.now() } }).pipe(Effect.orDie)
+        const current = yield* get(input.sessionID).pipe(Effect.orDie)
+        yield* patch(input.sessionID, {
+          metadata: mergePublicMetadata(current.metadata, input.metadata),
+          time: { updated: Date.now() },
+        }).pipe(Effect.orDie)
     })
 
     const setPermission = Effect.fn("Session.setPermission")(function* (input: {
@@ -892,6 +948,7 @@ export const layer: Layer.Layer<
       list,
       listGlobal,
       create,
+      createTaskChild,
       fork,
       touch,
       get,

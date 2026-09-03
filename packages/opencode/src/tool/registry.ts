@@ -136,6 +136,7 @@ export const layer = Layer.effect(
                 const bridge = yield* EffectBridge.make()
                 const pluginCtx: PluginToolContext = {
                   ...toolCtx,
+                  taskOrigin: toolCtx.taskOrigin,
                   ask: (req) => bridge.promise(toolCtx.ask(req)),
                   directory: ctx.directory,
                   worktree: ctx.worktree,
