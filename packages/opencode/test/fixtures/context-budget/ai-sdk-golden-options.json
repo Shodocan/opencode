@@ -139,7 +139,6 @@
         "name": "deploy",
         "description": "Deploy the service",
         "inputSchema": {
-          "$schema": "http://json-schema.org/draft-07/schema#",
           "type": "object",
           "properties": {
             "env": {
@@ -153,7 +152,8 @@
             "env",
             "region"
           ],
-          "additionalProperties": false
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
         }
       }
     ],
@@ -165,14 +165,13 @@
     "maxOutputTokens": 32000,
     "providerOptions": {
       "openai": {
-        "store": false,
-        "promptCacheKey": "session-t04-golden"
+        "store": false
       }
     }
   },
   "budget": {
     "phase": "normal",
-    "projectionEstimate": 212,
+    "projectionEstimate": 213,
     "outputAllowanceNormal": 32000
   }
 }

@@ -72,9 +72,11 @@ export type Event =
   | EventPermissionAsked
   | EventPermissionReplied
   | EventTuiPromptAppend2
+  | EventTuiPromptSynthetic2
   | EventTuiCommandExecute2
   | EventTuiToastShow2
   | EventTuiSessionSelect2
+  | EventTuiAgentState2
   | EventMcpToolsChanged
   | EventMcpBrowserOpenFailed
   | EventCommandExecuted
@@ -1405,6 +1407,18 @@ export type GlobalEvent = {
         type: "tui.prompt.append"
         properties: {
           text: string
+          submit?: boolean
+          sessionID?: string
+        }
+      }
+    | {
+        id: string
+        type: "tui.prompt.synthetic"
+        properties: {
+          text: string
+          sessionID: string
+          visible?: boolean
+          caller?: string
         }
       }
     | {
@@ -1449,6 +1463,18 @@ export type GlobalEvent = {
            * Session ID to navigate to
            */
           sessionID: string
+        }
+      }
+    | {
+        id: string
+        type: "tui.agent.state"
+        properties: {
+          agent: string
+          model?: {
+            providerID: string
+            modelID: string
+          }
+          variant?: string
         }
       }
     | {
@@ -2608,6 +2634,18 @@ export type EventTuiPromptAppend = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic = {
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
+    visible?: boolean
+    caller?: string
   }
 }
 
@@ -2652,6 +2690,18 @@ export type EventTuiSessionSelect = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type EventTuiAgentState = {
+  type: "tui.agent.state"
+  properties: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -2923,9 +2973,11 @@ export type V2Event =
   | PermissionAsked
   | PermissionReplied
   | TuiPromptAppend
+  | TuiPromptSynthetic
   | TuiCommandExecute
   | TuiToastShow
   | TuiSessionSelect
+  | TuiAgentState
   | McpToolsChanged
   | McpBrowserOpenFailed
   | CommandExecuted
@@ -2969,6 +3021,19 @@ export type EventTuiPromptAppend2 = {
   type: "tui.prompt.append"
   properties: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type EventTuiPromptSynthetic2 = {
+  id: string
+  type: "tui.prompt.synthetic"
+  properties: {
+    text: string
+    sessionID: string
+    visible?: boolean
+    caller?: string
   }
 }
 
@@ -3016,6 +3081,19 @@ export type EventTuiSessionSelect2 = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type EventTuiAgentState2 = {
+  id: string
+  type: "tui.agent.state"
+  properties: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -5757,6 +5835,28 @@ export type TuiPromptAppend = {
   location?: LocationRef
   data: {
     text: string
+    submit?: boolean
+    sessionID?: string
+  }
+}
+
+export type TuiPromptSynthetic = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "tui.prompt.synthetic"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    text: string
+    sessionID: string
+    visible?: boolean
+    caller?: string
   }
 }
 
@@ -5831,6 +5931,28 @@ export type TuiSessionSelect = {
      * Session ID to navigate to
      */
     sessionID: string
+  }
+}
+
+export type TuiAgentState = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "tui.agent.state"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    agent: string
+    model?: {
+      providerID: string
+      modelID: string
+    }
+    variant?: string
   }
 }
 
@@ -10621,6 +10743,8 @@ export type SyncHistoryListResponse = SyncHistoryListResponses[keyof SyncHistory
 export type TuiAppendPromptData = {
   body?: {
     text: string
+    submit?: boolean
+    sessionID?: string
   }
   path?: never
   query?: {
@@ -10880,7 +11004,13 @@ export type TuiShowToastResponses = {
 export type TuiShowToastResponse = TuiShowToastResponses[keyof TuiShowToastResponses]
 
 export type TuiPublishData = {
-  body?: EventTuiPromptAppend | EventTuiCommandExecute | EventTuiToastShow | EventTuiSessionSelect
+  body?:
+    | EventTuiPromptAppend
+    | EventTuiPromptSynthetic
+    | EventTuiCommandExecute
+    | EventTuiToastShow
+    | EventTuiSessionSelect
+    | EventTuiAgentState
   path?: never
   query?: {
     directory?: string

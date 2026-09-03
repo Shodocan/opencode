@@ -2,6 +2,8 @@ import { asc, eq } from "drizzle-orm"
 import { describe, expect } from "bun:test"
 import { Context, Effect, Exit, Cause, Layer, Schema } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { AbsolutePath } from "@opencode-ai/core/schema"
@@ -85,7 +87,7 @@ type LineageService = {
 type LineageHelper = {
   readonly Service: unknown
   readonly layer: unknown
-  readonly defaultLayer: unknown
+  readonly node: unknown
 }
 
 // Guarded dynamic import: the module is a T06 deliverable, so a pre-T06 tree
@@ -102,7 +104,7 @@ const loadHelper = Effect.fn("test.loadLineageHelper")(function* () {
     | { readonly ContextBudgetLineage?: LineageHelper }
     | undefined
   const helper = loaded?.ContextBudgetLineage
-  if (!helper?.Service || !helper.layer || !helper.defaultLayer) {
+  if (!helper?.Service || !helper.node) {
     return yield* Effect.fail(new Error("T06 RED: missing core context-budget-lineage read/fold helper"))
   }
   return helper
@@ -196,10 +198,20 @@ function serialized(rows: readonly { id: EventV2.ID; aggregate_id: string; seq: 
 // here through a dummy `object` identifier (see svcOf). Layers that satisfy
 // the read therefore provide `object` as their requirement.
 function targetLayer(database: Layer.Layer<Database.Service>, helper: LineageHelper) {
-  const events = EventV2.layer.pipe(Layer.provide(database))
-  const lineage = (helper.layer as Layer.Layer<object, never, Database.Service>).pipe(Layer.provide(database))
-  return Layer.fresh(Layer.mergeAll(database, events, lineage))
+  const lineage = helper.node as LayerNode.Node<object, never>
+  // fresh: the outer test layer already instantiated the shared Database layer
+  // in this run's memo map; without fresh the override would be memoized away.
+  return Layer.fresh(
+    AppNodeBuilder.build(LayerNode.group([Database.node, lineage, EventV2.node]), [
+      [Database.node, database],
+    ]),
+  )
 }
+
+// The helper's node rebuilt with its default (global) dependencies: the
+// structural `object` stand-in keeps the read's requirement typed.
+const defaultLayerOf = (helper: LineageHelper) =>
+  AppNodeBuilder.build(helper.node as LayerNode.Node<object, never>)
 
 function typedFailure(exit: Exit.Exit<unknown, unknown>) {
   expect(Exit.isFailure(exit)).toBe(true)
@@ -208,7 +220,7 @@ function typedFailure(exit: Exit.Exit<unknown, unknown>) {
   expect(exit.cause.reasons.some(Cause.isDieReason)).toBe(false)
 }
 
-const it = testEffect(Layer.mergeAll(Database.defaultLayer, EventV2.defaultLayer))
+const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node])))
 
 describe("ContextBudgetLineage", () => {
   it.effect("registers the versioned internal durable event and stores it under the versioned type", () =>
@@ -253,7 +265,7 @@ describe("ContextBudgetLineage", () => {
         const latest = yield* svc.latest(SESSION_ID)
         const folded = yield* svc.fold(SESSION_ID)
         return { latest, folded }
-      }).pipe(Effect.provide(helper.defaultLayer as Layer.Layer<object>))
+      }).pipe(Effect.provide(defaultLayerOf(helper)))
       const { latest, folded } = yield* read
       // Bounded read returns the newest full state (generation 3), not the
       // first or an unrelated event.
@@ -283,7 +295,7 @@ describe("ContextBudgetLineage", () => {
         const latest = yield* svc.latest(SESSION_ID).pipe(Effect.exit)
         const folded = yield* svc.fold(SESSION_ID).pipe(Effect.exit)
         return { latest, folded }
-      }).pipe(Effect.provide(helper.defaultLayer as Layer.Layer<object>))
+      }).pipe(Effect.provide(defaultLayerOf(helper)))
       const { latest, folded } = yield* read
       expect(Exit.isSuccess(latest)).toBe(true)
       if (Exit.isSuccess(latest)) {
@@ -326,7 +338,7 @@ describe("ContextBudgetLineage", () => {
         const latest = yield* svc.latest(SESSION_ID).pipe(Effect.exit)
         const folded = yield* svc.fold(SESSION_ID).pipe(Effect.exit)
         return { latest, folded }
-      }).pipe(Effect.provide(helper.defaultLayer as Layer.Layer<object>))
+      }).pipe(Effect.provide(defaultLayerOf(helper)))
       const { latest, folded } = yield* read
       typedFailure(latest)
       typedFailure(folded)
@@ -342,7 +354,7 @@ describe("ContextBudgetLineage", () => {
         const latest = yield* svc.latest(SESSION_ID)
         const folded = yield* svc.fold(SESSION_ID)
         return { latest, folded }
-      }).pipe(Effect.provide(helper.defaultLayer as Layer.Layer<object>))
+      }).pipe(Effect.provide(defaultLayerOf(helper)))
       const { latest, folded } = yield* read
       expect(latest).toBeUndefined()
       expect(folded).toBeUndefined()

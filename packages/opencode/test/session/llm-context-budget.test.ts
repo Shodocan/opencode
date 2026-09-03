@@ -25,6 +25,9 @@ import { LLMEvent, LLMRequest, type LLMError } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
+import { Config } from "@/config/config"
 import { Provider } from "@/provider/provider"
 import { Auth } from "@/auth"
 import { Plugin } from "@/plugin"
@@ -373,20 +376,21 @@ function llmHarness(opts: {
   language?: unknown
 }) {
   const language = opts.language ?? terminalModel(opts.model.api.id)
-  return LLM.layer.pipe(
-    Layer.provide(authNoneLayer),
-    Layer.provide(configLayer(opts.compaction)),
-    Layer.provide(providerLayer(opts.model, language)),
-    Layer.provide(pluginPassLayer),
-    Layer.provide(opts.client.layer),
-    Layer.provide(
+  return LayerNode.compile(LLM.node, [
+    [Auth.node, authNoneLayer],
+    [Config.node, configLayer(opts.compaction)],
+    [Provider.node, providerLayer(opts.model, language)],
+    [Plugin.node, pluginPassLayer],
+    [llmClient, opts.client.layer],
+    [
+      RuntimeFlags.node,
       RuntimeFlags.layer({
         experimentalNativeLlm: opts.native,
         outputTokenMax: golden.inputs.outputTokenMax,
         client: "test",
       }),
-    ),
-  )
+    ],
+  ] as const)
 }
 
 function serviceInput(opts: {

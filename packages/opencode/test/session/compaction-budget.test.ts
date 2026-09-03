@@ -790,5 +790,5 @@ describe("CompactionExecutor - bounded rolling summaries", () => {
 })
 
 function mockPersist() {
-  return mock(() => {})
+  return mock(() => Effect.void)
 }

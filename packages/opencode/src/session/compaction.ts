@@ -14,7 +14,10 @@ import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
 
 import { Effect, Layer, Context } from "effect"
+import * as DateTime from "effect/DateTime"
 import { InstanceState } from "@/effect/instance-state"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionMessage } from "@opencode-ai/core/session/message"
 import { CompactionImpossibleError, ContextBudget, isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -379,6 +382,18 @@ const layer = Layer.effect(
       )
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
+      const tailIndex = selected.tail_start_id
+        ? history.findIndex((message) => message.info.id === selected.tail_start_id)
+        : -1
+      const recent =
+        tailIndex < 0
+          ? ""
+          : JSON.stringify(
+              yield* MessageV2.toModelMessagesEffect(history.slice(tailIndex), model, {
+                stripMedia: true,
+                toolOutputMaxChars: TOOL_OUTPUT_MAX_CHARS,
+              }),
+            )
       const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??
@@ -654,17 +669,6 @@ const layer = Layer.effect(
           after: { estimate: afterEstimate, budget },
         })
 
-        if (flags.experimentalEventSystem) {
-          if (summary)
-            yield* events.publish(SessionEvent.Compaction.Ended, {
-              sessionID: input.sessionID,
-              messageID: SessionMessage.ID.make(input.parentID),
-              timestamp: DateTime.makeUnsafe(Date.now()),
-              reason: input.auto ? "auto" : "manual",
-              text: summary ?? "",
-              recent,
-            })
-        }
         yield* events.publish(Event.Compacted, { sessionID: input.sessionID })
       }
       return result

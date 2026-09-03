@@ -88,6 +88,4 @@ export const layer = Layer.effect(
   }),
 )
 
-export const defaultLayer = layer.pipe(Layer.provide(Database.defaultLayer))
-
 export const node = LayerNode.make({ service: Service, layer, deps: [Database.node] })

@@ -3,6 +3,8 @@ import * as path from "path"
 import { asc, eq } from "drizzle-orm"
 import { DateTime, Effect, Layer, Schema } from "effect"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -28,7 +30,7 @@ const InternalSessionEvent = SessionEvent as typeof SessionEvent & {
   }
 }
 
-const it = testEffect(Layer.mergeAll(Database.defaultLayer, EventV2.defaultLayer, SessionProjector.defaultLayer))
+const it = testEffect(AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node])))
 const timestamp = DateTime.makeUnsafe(1)
 const model = { id: ModelV2.ID.make("model"), providerID: ProviderV2.ID.make("provider") }
 
@@ -111,9 +113,13 @@ function serialized(rows: readonly { id: EventV2.ID; aggregate_id: string; seq: 
 }
 
 function targetLayer(database: Layer.Layer<Database.Service>) {
-  const events = EventV2.layer.pipe(Layer.provide(database))
-  const projector = SessionProjector.layer.pipe(Layer.provide(events), Layer.provide(database))
-  return Layer.fresh(Layer.mergeAll(database, events, projector))
+  // fresh: the outer test layer already instantiated the shared Database layer
+  // in this run's memo map; without fresh the override would be memoized away.
+  return Layer.fresh(
+    AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node, SessionProjector.node]), [
+      [Database.node, database],
+    ]),
+  )
 }
 
 function messageSnapshot() {
@@ -151,10 +157,10 @@ describe("CompactionFinalized", () => {
       })
       yield* Effect.addFinalizer(() => unsubscribe)
 
-      const first = yield* events.publish(finalized as never, data as never, {
+      const first = (yield* events.publish(finalized as never, data as never, {
         id: EventV2.ID.make("evt_compaction_finalized_published"),
         commit: () => Effect.sync(() => order.push("commit")),
-      })
+      })) as { type: string; durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number } }
       expect(first.type).toBe(finalized.type)
       expect(first.durable).toMatchObject({ aggregateID: data.sessionID, version: finalized.durable?.version })
       expect(order).toEqual(["commit", "notification", "autocontinue"])

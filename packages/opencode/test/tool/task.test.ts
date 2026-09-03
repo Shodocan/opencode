@@ -396,6 +396,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-surface-child-error",
             agent: "build",
             abort: new AbortController().signal,
             extra: {
@@ -439,6 +440,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-surface-terminal-error",
             agent: "build",
             abort: new AbortController().signal,
             extra: {
@@ -668,6 +670,7 @@ describe("tool.task", () => {
           {
             sessionID: child.id,
             messageID: nestedAssistant.id,
+            callID: "task-nested-depth",
             agent: "general",
             abort: new AbortController().signal,
             extra: { promptOps: stubOps() },

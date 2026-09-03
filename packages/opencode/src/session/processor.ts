@@ -628,7 +628,6 @@ const layer = Layer.effect(
           stack: e instanceof Error ? e.stack : undefined,
         })
         const error = boundaryError(e, parse(e))
-        yield* flushV2Fragments()
         if (SessionV1.ContextOverflowError.isInstance(error)) {
           if ((yield* config.get()).compaction?.auto === false && !ctx.assistantMessage.summary) {
             ctx.assistantMessage.error = error

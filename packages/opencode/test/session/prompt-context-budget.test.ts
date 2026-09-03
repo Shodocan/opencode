@@ -1,17 +1,15 @@
-import { NodeFileSystem } from "@effect/platform-node"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Database } from "@opencode-ai/core/database/database"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2 } from "@opencode-ai/core/event"
 import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { asc, eq } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { describe, expect } from "bun:test"
 import path from "path"
-import { Auth } from "@/auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { FetchHttpClient } from "effect/unstable/http"
-import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
@@ -26,6 +24,7 @@ import { Git } from "../../src/git"
 import { Image } from "../../src/image/image"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { LLM } from "../../src/session/llm"
+import { MessageV2 } from "../../src/session/message-v2"
 import { SessionCompaction } from "../../src/session/compaction"
 import { SessionSummary } from "../../src/session/summary"
 import { Instruction } from "../../src/session/instruction"
@@ -47,7 +46,6 @@ import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { ContextBudget } from "../../src/session/overflow"
 import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -235,99 +233,66 @@ const lsp = Layer.succeed(
   }),
 )
 
-const status = SessionStatus.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer))
-const run = SessionRunState.layer.pipe(Layer.provide(status))
-const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
+// Node-graph harness (mirrors prompt.test.ts): the declared node deps pull in
+// every service the old defaultLayer mergeAll provided; the test doubles
+// replace their nodes. The RuntimeFlags replacement reaches the whole graph,
+// so experimentalNativeLlm actually selects the native runtime (same seam as
+// the recorded precedent — the old LLM.defaultLayer resolved the flags from
+// the environment instead).
+const testLLMServerNode = LayerNode.make({ service: TestLLMServer, layer: TestLLMServer.layer, deps: [] })
+
+const promptRoot = LayerNode.group([
+  SessionPrompt.node,
+  Session.node,
+  SessionProjector.node,
+  MessageV2.node,
+  Snapshot.node,
+  LLM.node,
+  Env.node,
+  AgentSvc.node,
+  Command.node,
+  Permission.node,
+  Plugin.node,
+  Config.node,
+  ProviderSvc.node,
+  LSP.node,
+  MCP.node,
+  FSUtil.node,
+  BackgroundJob.node,
+  SessionStatus.node,
+  SessionRunState.node,
+  Database.node,
+  EventV2Bridge.node,
+  Question.node,
+  Todo.node,
+  ToolRegistry.node,
+  Skill.node,
+  Git.node,
+  Ripgrep.node,
+  Format.node,
+  Truncate.node,
+  SessionProcessor.node,
+  Image.node,
+  SessionCompaction.node,
+  SessionRevert.node,
+  Instruction.node,
+  SystemPrompt.node,
+  CrossSpawnSpawner.node,
+  RuntimeFlags.node,
+])
 
 function makePrompt(input?: { native?: boolean }) {
   const flags = RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: input?.native ?? false })
-  // LLM.defaultLayer resolves RuntimeFlags from the environment (its own
-  // defaultLayer), so the flags layer above would never reach LLM.Service.
-  // The native variant provides the equivalent layer graph with the test
-  // flags so experimentalNativeLlm actually selects the native runtime
-  // (same seam as the recorded precedent).
-  const llmService = input?.native
-    ? LLM.layer.pipe(
-        Layer.provide(Auth.defaultLayer),
-        Layer.provide(Config.defaultLayer),
-        Layer.provide(ProviderSvc.defaultLayer),
-        Layer.provide(Plugin.defaultLayer),
-        Layer.provide(
-          LLMClient.layer.pipe(Layer.provide(Layer.mergeAll(RequestExecutor.defaultLayer, WebSocketExecutor.layer))),
-        ),
-        Layer.provide(flags),
-      )
-    : LLM.defaultLayer
-  const deps = Layer.mergeAll(
-    Session.defaultLayer,
-    Snapshot.defaultLayer,
-    llmService,
-    Env.defaultLayer,
-    AgentSvc.defaultLayer,
-    Command.defaultLayer,
-    Permission.defaultLayer,
-    Plugin.defaultLayer,
-    Config.defaultLayer,
-    ProviderSvc.defaultLayer,
-    lsp,
-    makeMcp(),
-    FSUtil.defaultLayer,
-    BackgroundJob.defaultLayer,
-    status,
-    Database.defaultLayer,
-    EventV2Bridge.defaultLayer,
-  ).pipe(Layer.provideMerge(infra))
-  const question = Question.layer.pipe(Layer.provideMerge(deps))
-  const todo = Todo.layer.pipe(Layer.provideMerge(deps))
-  const registry = ToolRegistry.layer.pipe(
-    Layer.provide(Skill.defaultLayer),
-    Layer.provide(FetchHttpClient.layer),
-    Layer.provide(CrossSpawnSpawner.defaultLayer),
-    Layer.provide(Git.defaultLayer),
-    Layer.provide(Ripgrep.defaultLayer),
-    Layer.provide(Format.defaultLayer),
-    Layer.provide(flags),
-    Layer.provideMerge(todo),
-    Layer.provideMerge(question),
-    Layer.provideMerge(deps),
-  )
-  const trunc = Truncate.layer.pipe(Layer.provideMerge(deps))
-  const proc = SessionProcessor.layer.pipe(
-    Layer.provide(summary),
-    Layer.provide(Image.defaultLayer),
-    Layer.provide(flags),
-    Layer.provideMerge(deps),
-  )
-  const compact = SessionCompaction.layer.pipe(
-    Layer.provide(flags),
-    Layer.provideMerge(proc),
-    Layer.provideMerge(deps),
-  )
-  return SessionPrompt.layer.pipe(
-    Layer.provide(SessionRevert.defaultLayer),
-    Layer.provide(Image.defaultLayer),
-    Layer.provide(summary),
-    Layer.provideMerge(run),
-    Layer.provideMerge(compact),
-    Layer.provideMerge(proc),
-    Layer.provideMerge(registry),
-    Layer.provideMerge(trunc),
-    Layer.provide(Instruction.defaultLayer),
-    Layer.provide(
-      SystemPrompt.layer.pipe(
-        Layer.provide(Skill.defaultLayer),
-        Layer.provide(LocationServiceMap.layer),
-        Layer.provide(deps),
-      ),
-    ),
-    Layer.provide(flags),
-    Layer.provideMerge(deps),
-    Layer.provide(summary),
-  )
+  return LayerNode.compile(LayerNode.group([promptRoot, testLLMServerNode]), [
+    [SessionSummary.node, summary],
+    [LSP.node, lsp],
+    [MCP.node, makeMcp()],
+    [RuntimeFlags.node, flags],
+  ] as const)
 }
 
 function makeHttp(input?: { native?: boolean }) {
-  return Layer.mergeAll(TestLLMServer.layer, makePrompt(input))
+  return makePrompt(input)
 }
 
 const it = testEffect(makeHttp())
@@ -424,7 +389,11 @@ function buildHistory(prompt: SessionPrompt.Interface, llm: LLMOps, sessionID: S
         noReply: true,
         parts: [{ type: "text", text: marker + "H".repeat(79_990) }],
       })
-      yield* llm.push(reply().text(`history reply ${marker}`))
+      // Explicit finish_reason: since upstream #43892 a turn whose recorded
+      // finish is "unknown" (a stream with no finish_reason) no longer ends
+      // the loop — it re-dispatches. .stop() keeps each history turn a single
+      // transport call on both runtimes.
+      yield* llm.push(reply().text(`history reply ${marker}`).stop())
       yield* prompt.loop({ sessionID })
     }
   })
@@ -450,9 +419,13 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       expect(yield* llm.hits).toHaveLength(2)
       // The final request fits at preflight and is rejected by the provider
       // (reactive overflow): the one-shot cycle must run exactly once.
+      // The compaction reply intentionally has no finish_reason: the summary
+      // turn must not terminate the loop before the rebuild dispatch. The
+      // rebuild reply stops cleanly (.stop()), ending the session exactly
+      // after the one-shot cycle.
       yield* llm.error(413, { error: { message: "request entity too large" } })
       yield* llm.push(reply().text("ok"))
-      yield* llm.push(reply().text("rebuild ok"))
+      yield* llm.push(reply().text("rebuild ok").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })
 
@@ -501,9 +474,10 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       // - the opencode-managed OpenAI-compatible route + explicitly pinned
       //   model sidesteps any openai-provider model hooking, so the session
       //   model resolves to the QCB-shaped fixture model;
-      // - the openai-chat parser requires an explicit finish_reason per turn
-      //   (the AI SDK synthesizes one), so history replies stop cleanly and
-      //   each history turn is a single transport call;
+      // - every reply carries an explicit finish_reason (.stop()); since
+      //   upstream #43892 a turn recorded with an "unknown" finish (a stream
+      //   without finish_reason) no longer ends the loop, so explicit stops
+      //   keep each history turn a single transport call on both runtimes;
       // - native overflow is reactive at step-finish: the final turn is
       //   admitted preflight (E <= 209,664) and the provider-reported usage
       //   total (240,050) crosses the model's legacy usable boundary
@@ -685,7 +659,9 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       yield* buildHistory(prompt, llm, chat.id)
       yield* llm.error(413, { error: { message: "request entity too large" } })
       yield* llm.push(reply().text("ok"))
-      yield* llm.push(reply().text("rebuild ok"))
+      // .stop(): the rebuilt turn must end the loop cleanly (upstream #43892
+      // keeps the loop running on an "unknown" recorded finish).
+      yield* llm.push(reply().text("rebuild ok").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })
 

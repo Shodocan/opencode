@@ -19,27 +19,6 @@ import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
-import { afterEach, describe, expect, mock, test } from "bun:test"
-import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
-import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { Database } from "@opencode-ai/core/database/database"
-import { EventV2Bridge } from "@/event-v2-bridge"
-import { APICallError } from "ai"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Schema } from "effect"
-import * as Stream from "effect/Stream"
-import { Config } from "@/config/config"
-import { LLM } from "../../src/session/llm"
-import { SessionCompaction } from "../../src/session/compaction"
-import { Token } from "@/util/token"
-import { Plugin } from "../../src/plugin"
-import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
-import { Session as SessionNs } from "@/session/session"
-import { MessageV2 } from "../../src/session/message-v2"
-import { MessageID, PartID, SessionID } from "../../src/session/schema"
-import { SessionStatus } from "../../src/session/status"
-import { SessionSummary } from "../../src/session/summary"
-import { SessionV2 } from "@opencode-ai/core/session"
-import { SessionExecution } from "@opencode-ai/core/session/execution"
 import { SessionEvent as CoreSessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 
@@ -418,7 +397,7 @@ function pausableReply(
         return Stream.make(
           LLMEvent.textStart({ id: "txt-0" }),
           LLMEvent.textDelta({ id: "txt-0", text }),
-          LLMEvent.textEnd({ id: "txt-0", text }),
+          LLMEvent.textEnd({ id: "txt-0" }),
           LLMEvent.stepFinish({
             index: 0,
             reason: "stop",
@@ -914,6 +893,7 @@ describe("session.compaction.process", () => {
     expect(finalization).toBeDefined()
     expect(finalization?.type).toBe("session.next.compaction.finalized")
     expect(finalization?.durable).toEqual({ aggregate: "sessionID", version: 1 })
+    if (!finalization) return
     expect((CoreSessionEvent as InternalSessionEventNamespace).InternalDurableDefinitions).toContain(finalization)
   })
 
@@ -977,7 +957,11 @@ describe("session.compaction.process", () => {
       yield* Deferred.await(done).pipe(Effect.timeout("500 millis"))
       expect(result).toBe("continue")
       expect(seen).toContain(SessionCompaction.Event.Compacted.type)
-      expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
+      // QCB T05 (frozen plan): the internal durable CompactionFinalized event is
+      // published on this path by design; it is the only session.next event here.
+      expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([
+        "session.next.compaction.finalized",
+      ])
     }),
   )
 
@@ -1803,7 +1787,7 @@ describe("session.compaction.process", () => {
         Deferred.doneUnsafe(gate, Effect.void)
         const result = yield* Fiber.join(fiber).pipe(Effect.timeout("10 seconds"))
         expect(result).toBe("continue")
-      }).pipe(withCompaction({ llm: stub.layer }))
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
   )
 
@@ -1850,7 +1834,7 @@ describe("session.compaction.process", () => {
           .all()
           .pipe(Effect.orDie)
         expect(events.some((row) => row.type === "session.next.compaction.finalized.1")).toBe(false)
-      }).pipe(withCompaction({ llm: stub.layer }))
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
   )
 
@@ -1926,7 +1910,7 @@ describe("session.compaction.process", () => {
         const after = data.after as { estimate: number; budget: number }
         expect(after.estimate).toBeLessThan(before.estimate)
         expect(after.estimate).toBeLessThanOrEqual(after.budget)
-      }).pipe(withCompaction({ llm: stub.layer }))
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
     },
   )
 })

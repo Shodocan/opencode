@@ -1,10 +1,11 @@
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { ModelsDev } from "@opencode-ai/core/models-dev"
 import { Database } from "@opencode-ai/core/database/database"
-import { EventV2 } from "@opencode-ai/core/event"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { llmClient } from "@opencode-ai/core/effect/app-node-platform"
 import { EventTable } from "@opencode-ai/core/event/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { HttpRecorderInternal } from "@opencode-ai/http-recorder/internal"
 import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
 import { eq, asc } from "drizzle-orm"
@@ -22,16 +23,14 @@ import { Question } from "../../src/question"
 import { Todo } from "../../src/session/todo"
 import { Session } from "@/session/session"
 import { RuntimeFlags } from "@/effect/runtime-flags"
-import { LocationServiceMap } from "@opencode-ai/core/location-layer"
 import { Agent as AgentSvc } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { Command } from "../../src/command"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { Permission } from "../../src/permission"
-import { NodeFileSystem } from "@effect/platform-node"
-import { FetchHttpClient } from "effect/unstable/http"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { MessageV2 } from "../../src/session/message-v2"
 import { ContextBudget } from "../../src/session/overflow"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
@@ -172,29 +171,6 @@ const auth = Layer.mock(Auth.Service)({
   all: () => Effect.succeed({}),
 })
 
-const provider = ProviderSvc.layer.pipe(
-  Layer.provide(FSUtil.defaultLayer),
-  Layer.provide(Env.defaultLayer),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(auth),
-  Layer.provide(Plugin.defaultLayer),
-  Layer.provide(ModelsDev.defaultLayer),
-  Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: true })),
-)
-
-// LLM.defaultLayer would resolve RuntimeFlags from the environment, so the
-// test flags are provided directly (same seam as the recorded precedent):
-// experimentalNativeLlm selects the native runtime that the cassette
-// intercepts via LLMClient/RequestExecutor.
-const llm = LLM.layer.pipe(
-  Layer.provide(auth),
-  Layer.provide(Config.defaultLayer),
-  Layer.provide(provider),
-  Layer.provide(Plugin.defaultLayer),
-  Layer.provide(recordedClient),
-  Layer.provide(RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: true })),
-)
-
 const summary = Layer.succeed(
   SessionSummary.Service,
   SessionSummary.Service.of({
@@ -251,78 +227,61 @@ const lsp = Layer.succeed(
   }),
 )
 
-const status = SessionStatus.layer.pipe(Layer.provideMerge(EventV2Bridge.defaultLayer))
-const run = SessionRunState.layer.pipe(Layer.provide(status))
-const infra = Layer.mergeAll(NodeFileSystem.layer, CrossSpawnSpawner.defaultLayer)
+// Node-graph harness (same as prompt.test.ts): the declared node deps pull in
+// every service the old defaultLayer mergeAll provided, and the test doubles
+// replace their nodes. The RuntimeFlags replacement reaches the whole graph,
+// so experimentalNativeLlm actually selects the native runtime that the
+// cassette intercepts via the replaced llmClient.
+const promptRoot = LayerNode.group([
+  SessionPrompt.node,
+  Session.node,
+  SessionProjector.node,
+  MessageV2.node,
+  Snapshot.node,
+  LLM.node,
+  Env.node,
+  AgentSvc.node,
+  Command.node,
+  Permission.node,
+  Plugin.node,
+  Config.node,
+  ProviderSvc.node,
+  LSP.node,
+  MCP.node,
+  FSUtil.node,
+  BackgroundJob.node,
+  SessionStatus.node,
+  SessionRunState.node,
+  Database.node,
+  EventV2Bridge.node,
+  Question.node,
+  Todo.node,
+  ToolRegistry.node,
+  Skill.node,
+  Git.node,
+  Ripgrep.node,
+  Format.node,
+  Truncate.node,
+  SessionProcessor.node,
+  Image.node,
+  SessionCompaction.node,
+  SessionRevert.node,
+  Instruction.node,
+  SystemPrompt.node,
+  CrossSpawnSpawner.node,
+  RuntimeFlags.node,
+])
 
 function makeRecordedPrompt() {
   const flags = RuntimeFlags.layer({ experimentalEventSystem: true, experimentalNativeLlm: true })
-  const deps = Layer.mergeAll(
-    Session.defaultLayer,
-    Snapshot.defaultLayer,
-    llm,
-    Env.defaultLayer,
-    AgentSvc.defaultLayer,
-    Command.defaultLayer,
-    Permission.defaultLayer,
-    Plugin.defaultLayer,
-    Config.defaultLayer,
-    ProviderSvc.defaultLayer,
-    lsp,
-    makeMcp(),
-    FSUtil.defaultLayer,
-    BackgroundJob.defaultLayer,
-    status,
-    Database.defaultLayer,
-    EventV2Bridge.defaultLayer,
-  ).pipe(Layer.provideMerge(infra))
-  const question = Question.layer.pipe(Layer.provideMerge(deps))
-  const todo = Todo.layer.pipe(Layer.provideMerge(deps))
-  const registry = ToolRegistry.layer.pipe(
-    Layer.provide(Skill.defaultLayer),
-    Layer.provide(FetchHttpClient.layer),
-    Layer.provide(CrossSpawnSpawner.defaultLayer),
-    Layer.provide(Git.defaultLayer),
-    Layer.provide(Ripgrep.defaultLayer),
-    Layer.provide(Format.defaultLayer),
-    Layer.provide(flags),
-    Layer.provideMerge(todo),
-    Layer.provideMerge(question),
-    Layer.provideMerge(deps),
-  )
-  const trunc = Truncate.layer.pipe(Layer.provideMerge(deps))
-  const proc = SessionProcessor.layer.pipe(
-    Layer.provide(summary),
-    Layer.provide(Image.defaultLayer),
-    Layer.provide(flags),
-    Layer.provideMerge(deps),
-  )
-  const compact = SessionCompaction.layer.pipe(
-    Layer.provide(flags),
-    Layer.provideMerge(proc),
-    Layer.provideMerge(deps),
-  )
-  return SessionPrompt.layer.pipe(
-    Layer.provide(SessionRevert.defaultLayer),
-    Layer.provide(Image.defaultLayer),
-    Layer.provide(summary),
-    Layer.provideMerge(run),
-    Layer.provideMerge(compact),
-    Layer.provideMerge(proc),
-    Layer.provideMerge(registry),
-    Layer.provideMerge(trunc),
-    Layer.provide(Instruction.defaultLayer),
-    Layer.provide(
-      SystemPrompt.layer.pipe(
-        Layer.provide(Skill.defaultLayer),
-        Layer.provide(LocationServiceMap.layer),
-        Layer.provide(deps),
-      ),
-    ),
-    Layer.provide(flags),
-    Layer.provideMerge(deps),
-    Layer.provide(summary),
-  )
+  return LayerNode.compile(promptRoot, [
+    [SessionSummary.node, summary],
+    [Auth.node, auth],
+    [llmClient, recordedClient],
+    [LSP.node, lsp],
+    [MCP.node, makeMcp()],
+    [RuntimeFlags.node, flags],
+  ] as const)
 }
 
 const it = testEffect(makeRecordedPrompt())
@@ -337,6 +296,13 @@ const QCB_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 // never resolves a catalog default).
 const qwenCfg: Partial<ConfigV1.Info> = {
   model: "opencode/qwen3-coder-plus",
+  // The cassette was recorded under the v1.17.11 compaction tail selection
+  // (default 2 recent turns: head = [HIST-1], tail = [HIST-2, FINAL]).
+  // Upstream #42045 removed the default and made it budget-driven over all
+  // turns (max preserve 8,000 -> 15,000), where this small history fits
+  // entirely in the tail and the whole conversation is summarized. Pinning
+  // tail_turns: 2 restores the recorded selection profile exactly.
+  compaction: { tail_turns: 2 },
   provider: {
     opencode: {
       name: "Qwen",
