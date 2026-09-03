@@ -1,10 +1,12 @@
 import type { Auth } from "@/auth"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import type { Provider } from "@/provider/provider"
 import { ProviderTransform } from "@/provider/transform"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
+import { ContextBudgetExceededError } from "@/session/overflow"
 import { asSchema, type ModelMessage, type Tool } from "ai"
-import { Cause, Effect, FiberSet, Queue } from "effect"
+import { Cause, Effect, FiberSet, Queue, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { FetchHttpClient } from "effect/unstable/http"
 import {
@@ -41,7 +43,16 @@ type StreamInput = {
   readonly providerOptions?: Record<string, any>
   readonly headers: Record<string, string>
   readonly abort: AbortSignal
+  /** Route config for the T04 final pre-network admission gate. */
+  readonly cfg?: ConfigV1.Info
+  /** Budget phase marker ("normal" | "compaction") for gate evidence. */
+  readonly phase?: string
 }
+
+// Direct adapter calls without a route config (unit transport tests) evaluate
+// the final gate against the empty default config; the production LLM.Service
+// seam always passes the live route config.
+const DEFAULT_CFG = Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info
 
 export function status(input: Pick<StreamInput, "model" | "provider" | "auth">): RuntimeStatus {
   return statusWithFetch(input, providerFetch(input))
@@ -87,7 +98,7 @@ export function stream(input: StreamInput): StreamResult {
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
   const tools = nativeTools(input.tools, input)
-  const request = LLMNative.request({
+  const base = LLMNative.request({
     model: input.model,
     apiKey: current.apiKey,
     baseURL: current.baseURL,
@@ -100,17 +111,40 @@ export function stream(input: StreamInput): StreamResult {
     providerOptions: ProviderTransform.providerOptions(input.model, input.providerOptions ?? {}),
     headers: { ...providerHeaders(input.provider.options.headers), ...input.headers },
   })
+  // T04 exact final value: the post-LLMRequest.update request with the
+  // executable tool definitions appended. The projection, the admission, and
+  // llmClient.stream all consume this same value; the pre-update base is the
+  // only pre-update request and is never sent.
+  const final = LLMRequest.update(base, {
+    tools: [...base.tools, ...toDefinitions(tools)],
+  })
+
+  // T04 final pre-network gate: the admission decision derives from the exact
+  // final value above. Rejection fails the stream typed, before any
+  // llmClient/HTTP/provider/chargeable call.
+  try {
+    LLMNative.admit({
+      model: input.model,
+      cfg: input.cfg ?? DEFAULT_CFG,
+      projection: LLMNative.finalProjection(final),
+      phase: input.phase ?? "normal",
+      runtime: "native",
+      maxOutputTokens: input.maxOutputTokens,
+    })
+  } catch (cause) {
+    if (cause instanceof ContextBudgetExceededError) {
+      return { ...current, stream: Stream.fail(cause) }
+    }
+    throw cause
+  }
+
   const stream = Stream.scoped(
     Stream.unwrap(
       Effect.gen(function* () {
         const settlements = yield* FiberSet.make<void>()
         const results = yield* Queue.unbounded<LLMEvent, Cause.Done>()
         const provider = input.llmClient
-          .stream(
-            LLMRequest.update(request, {
-              tools: [...request.tools, ...toDefinitions(tools)],
-            }),
-          )
+          .stream(final)
           .pipe(
             Stream.flatMap((event) =>
               event.type !== "tool-call" || event.providerExecuted

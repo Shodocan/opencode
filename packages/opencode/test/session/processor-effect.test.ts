@@ -378,13 +378,17 @@ it.live("session.processor effect tests stop after token overflow requests compa
         const database = yield* Database.Service
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.text("after", { usage: { input: 100, output: 0 } })
+        // The usage report must cross the usable context (context - output
+        // allowance) to trigger compaction. The context limit must stay well
+        // above the QCB preflight floor (20,000 reserve + 20,480 headroom) or
+        // the final-payload gate rejects the request before any stream event.
+        yield* llm.text("after", { usage: { input: 32_000, output: 0 } })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "compact")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
         const base = yield* provider.getModel(ref.providerID, ref.modelID)
-        const mdl = { ...base, limit: { context: 20, output: 10 } }
+        const mdl = { ...base, limit: { context: 32_000, output: 10 } }
         const handle = yield* processors.create({
           assistantMessage: msg,
           sessionID: chat.id,

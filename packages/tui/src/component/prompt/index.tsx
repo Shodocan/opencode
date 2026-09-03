@@ -51,14 +51,17 @@ import { createFadeIn } from "../../util/signal"
 import { DialogSkill } from "../dialog-skill"
 import { DialogWorkspaceUnavailable } from "../dialog-workspace-unavailable"
 import { useArgs } from "../../context/args"
+import { createPromptEventHandlers } from "./events"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useLeaderActive, useOpencodeKeymap } from "../../keymap"
 import { useTuiConfig } from "../../config"
 import { usePromptWorkspace } from "./workspace"
 import { usePromptMove } from "./move"
 import { readLocalAttachment } from "./local-attachment"
+import { MCP_VISIBLE_METADATA } from "../../util/mcp-visible-message"
 import { useLocation } from "../../context/location"
 
 registerOpencodeSpinner()
+
 
 export type PromptProps = {
   sessionID?: string
@@ -234,17 +237,113 @@ export function Prompt(props: PromptProps) {
   let promptPartTypeId = 0
   const event = useEvent()
 
+  // Hidden work-tracker messages are delivered as synthetic model prompts.
+  const hiddenPromptQueue = new Map<string, Array<{ text: string; visible?: boolean; caller?: string }>>()
+  const hiddenPromptInFlight = new Set<string>()
+
+  const drainHiddenPromptQueue = async (sessionID = props.sessionID) => {
+    if (!sessionID) return
+    if (hiddenPromptInFlight.has(sessionID)) return
+
+    const queue = hiddenPromptQueue.get(sessionID)
+    if (!queue || queue.length === 0) return
+
+    hiddenPromptInFlight.add(sessionID)
+    try {
+      while (queue.length > 0) {
+        const item = queue.shift()
+        if (!item) continue
+
+        const agent = local.agent.current()
+        const model = local.model.current()
+        if (!agent) continue
+
+        await sdk.client.session
+          .prompt({
+            sessionID,
+            agent: agent.name,
+            ...(model ? { model } : {}),
+            variant: local.model.variant.current(),
+            parts: [
+              {
+                type: "text",
+                text: item.text,
+                synthetic: true,
+                ...(item.visible !== false
+                  ? {
+                      metadata: {
+                        [MCP_VISIBLE_METADATA.visible]: true,
+                        ...(item.caller ? { [MCP_VISIBLE_METADATA.caller]: item.caller } : {}),
+                      },
+                    }
+                  : {}),
+              },
+            ],
+          })
+          .catch((error) => {
+            console.error("failed to deliver hidden model prompt", error)
+          })
+      }
+    } finally {
+      hiddenPromptInFlight.delete(sessionID)
+
+      if (queue.length === 0) {
+        hiddenPromptQueue.delete(sessionID)
+      }
+
+      if (queue.length > 0) {
+        void drainHiddenPromptQueue(sessionID)
+      }
+    }
+  }
+
+  createEffect(() => {
+    if (props.sessionID) {
+      void drainHiddenPromptQueue(props.sessionID)
+    }
+  })
+
+  const promptEvents = createPromptEventHandlers({
+    sessionID: () => props.sessionID,
+    onAppend(evt) {
+      if (!input || input.isDestroyed) return
+      const shouldSubmit = Boolean(evt.submit)
+
+      input.insertText(evt.text)
+      setStore("prompt", "input", input.plainText)
+      auto()?.onInput(input.plainText)
+
+      setTimeout(() => {
+        // setTimeout is a workaround and needs to be addressed properly
+        if (!input || input.isDestroyed) return
+        input.focus()
+        input.getLayoutNode().markDirty()
+        input.gotoBufferEnd()
+        renderer.requestRender()
+
+        if (shouldSubmit) {
+          setTimeout(() => {
+            void submit()
+          }, 100)
+        }
+      })
+    },
+    onSynthetic(evt) {
+      const queue = hiddenPromptQueue.get(evt.sessionID) ?? []
+      queue.push({ text: evt.text, visible: evt.visible, caller: evt.caller })
+      hiddenPromptQueue.set(evt.sessionID, queue)
+      void drainHiddenPromptQueue(evt.sessionID)
+    },
+  })
+
   event.on("tui.prompt.append", (evt, { workspace }) => {
     if (workspace !== project.workspace.current()) return
-    if (!input || input.isDestroyed) return
-    input.insertText(evt.properties.text)
-    setTimeout(() => {
-      // setTimeout is a workaround and needs to be addressed properly
-      if (!input || input.isDestroyed) return
-      input.getLayoutNode().markDirty()
-      input.gotoBufferEnd()
-      renderer.requestRender()
-    }, 0)
+    promptEvents.onAppend(evt.properties)
+  })
+
+  event.on("tui.prompt.synthetic", (evt, { workspace }) => {
+    if (workspace !== project.workspace.current()) return
+    promptEvents.onSynthetic(evt.properties)
   })
 
   createEffect(() => {

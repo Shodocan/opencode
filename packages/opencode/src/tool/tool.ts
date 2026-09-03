@@ -12,6 +12,16 @@ interface Metadata {
   [key: string]: any
 }
 
+/**
+ * Host-minted provenance for one child task invocation. It is carried with the
+ * prompt invocation, never decoded from model-visible tool arguments.
+ */
+export type TaskOrigin = {
+  version: 1
+  parentSessionID: SessionID
+  taskCallID: string
+}
+
 // TODO: remove this hack
 export type DynamicDescription = (agent: Agent.Info) => Effect.Effect<string>
 
@@ -39,6 +49,7 @@ export type Context<M extends Metadata = Metadata> = {
   agent: string
   abort: AbortSignal
   callID?: string
+  taskOrigin?: TaskOrigin
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>

@@ -530,6 +530,23 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       })
     })
 
+    let lastPublishedAgentState = ""
+    createEffect(() => {
+      const value = agent.current()
+      if (!value) return
+      const selected = model.current()
+      const variant = model.variant.current()
+      const properties = {
+        agent: value.name,
+        ...(selected ? { model: selected } : {}),
+        ...(variant ? { variant } : {}),
+      }
+      const key = JSON.stringify(properties)
+      if (key === lastPublishedAgentState) return
+      lastPublishedAgentState = key
+      void sdk.client.tui.publish({ body: { type: "tui.agent.state", properties } }).catch(() => {})
+    })
+
     const result = {
       model,
       agent,

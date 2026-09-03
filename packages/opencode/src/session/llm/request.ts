@@ -14,6 +14,7 @@ import { Effect, Record } from "effect"
 import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
+import z from "zod"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
@@ -48,7 +49,74 @@ export type Prepared = {
   }
   readonly messageTransformOptions: Record<string, any>
   readonly headers: Record<string, string>
+  readonly budgetProjection: BudgetProjection
 }
+
+// ---------------------------------------------------------------------------
+// Budget projection (QCB T02)
+//
+// A separate, immutable, data-only view of the prepared request, consumed by
+// the late pre-dispatch context-budget estimate. It carries exactly what
+// affects the serialized prompt: transformed system text, normalized
+// model-visible messages (current user input, tool calls, tool results,
+// max-step additions), active tool name/description/JSON schema,
+// serialization-affecting provider options, and the output allowance.
+//
+// Executable tool functions never enter it. Media is sized conservatively
+// without dereference: known encoded/byte length plus SHA-256 where derivable
+// from in-memory data, or a deterministic envelope overhead for remote URIs.
+// Media whose size is not derivable fails closed (UnknownMediaSizeError).
+// ---------------------------------------------------------------------------
+
+export class BudgetProjectionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "BudgetProjectionError"
+  }
+}
+
+export class UnknownMediaSizeError extends BudgetProjectionError {
+  constructor(message: string) {
+    super(message)
+    this.name = "UnknownMediaSizeError"
+  }
+}
+
+export type BudgetMedia = {
+  readonly kind: "data" | "uri"
+  readonly source: "string" | "data-uri" | "bytes" | "blob" | "uri"
+  readonly mediaType: string | null
+  readonly filename: string | null
+  /** Known encoded/byte length; null when only the envelope overhead applies. */
+  readonly length: number | null
+  /** SHA-256 hex of the in-memory payload; null when not derivable without dereference. */
+  readonly sha256: string | null
+  readonly envelopeOverhead: number
+}
+
+export type BudgetTool = {
+  readonly name: string
+  readonly description: string
+  readonly inputSchema: Record<string, unknown> | null
+}
+
+export type BudgetProjectionMessage = {
+  readonly role: string
+  readonly content: unknown
+}
+
+export type BudgetProjection = {
+  readonly system: string[]
+  readonly messages: BudgetProjectionMessage[]
+  readonly tools: Record<string, BudgetTool>
+  readonly options: Record<string, unknown>
+  readonly outputAllowance: number
+}
+
+// Deterministic serialization overhead (characters) charged for media that
+// cannot be sized without dereference, e.g. remote URIs. Used by the
+// four-characters-per-token estimator as a conservative floor.
+const MEDIA_ENVELOPE_OVERHEAD = 16_384
 
 const mergeOptions = (target: Record<string, any>, source: Record<string, any> | undefined): Record<string, any> =>
   mergeDeep(target, source ?? {}) as Record<string, any>
@@ -126,7 +194,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         : undefined,
       topP: input.agent.topP ?? ProviderTransform.topP(input.model),
       topK: ProviderTransform.topK(input.model),
-      maxOutputTokens: ProviderTransform.maxOutputTokens(input.model, input.flags.outputTokenMax),
+      maxOutputTokens: ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax),
       options,
     },
   )
@@ -178,10 +246,36 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     ? (yield* InstanceState.context).project.id
     : undefined
 
+  const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
+
+  // Output allowance: normal requests keep the full runtime output allowance;
+  // compaction is bounded by min(4_096, route output limit, runtime cap).
+  const outputAllowance =
+    input.agent.name === "compaction"
+      ? Math.min(4_096, input.model.limit.output, input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER)
+      : ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax)
+
+  const budgetProjection = yield* Effect.tryPromise({
+    try: () =>
+      buildBudgetProjection({
+        system,
+        messages,
+        tools: sortedTools,
+        options: params.options,
+        outputAllowance,
+      }),
+    catch: (cause) =>
+      cause instanceof UnknownMediaSizeError
+        ? cause
+        : new BudgetProjectionError(
+            `budget projection failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          ),
+  })
+
   return {
     system,
     messages,
-    tools: Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b))),
+    tools: sortedTools,
     params,
     messageTransformOptions: options,
     headers: {
@@ -190,7 +284,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
             ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
             "x-opencode-session": input.sessionID,
             "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags.client,
+            "x-opencode-client": input.flags?.client,
             "User-Agent": USER_AGENT,
           }
         : {
@@ -202,6 +296,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       ...input.model.headers,
       ...headers,
     },
+    budgetProjection,
   }
 })
 
@@ -221,6 +316,210 @@ export function hasToolCalls(messages: ModelMessage[]): boolean {
     }
   }
   return false
+}
+
+function isZodType(value: unknown): value is z.ZodType {
+  return typeof value === "object" && value !== null && "_zod" in value
+}
+
+function isMediaPart(part: unknown): part is Record<string, any> {
+  if (typeof part !== "object" || part === null) return false
+  const candidate = part as Record<string, any>
+  return candidate.type === "file" || (typeof candidate.mediaType === "string" && candidate.data != null)
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
+function isUrlString(value: string): boolean {
+  return value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://")
+}
+
+function projectTool(name: string, tool: Tool): BudgetTool {
+  const description = typeof tool.description === "string" ? tool.description : ""
+  const inputSchema = tool.inputSchema
+  let schema: Record<string, unknown> | null = null
+  if (inputSchema !== undefined && inputSchema !== null) {
+    const converted = isZodType(inputSchema)
+      ? z.toJSONSchema(inputSchema, { io: "input", unrepresentable: "any" })
+      : inputSchema
+    const data = toData(converted)
+    schema = isPlainRecord(data) ? data : {}
+  }
+  return { name, description, inputSchema: schema }
+}
+
+async function projectMedia(part: Record<string, any>): Promise<BudgetMedia> {
+  const mediaType = typeof part.mediaType === "string" ? part.mediaType : null
+  const filename = typeof part.filename === "string" ? part.filename : null
+  const label = `${mediaType ?? "media"}${filename ? ` (${filename})` : ""}`
+  const data = part.data
+  const uri = data instanceof URL ? data.href : typeof data === "string" && isUrlString(data) ? data : undefined
+  if (uri !== undefined) {
+    const scheme = new URL(uri).protocol.replace(/:$/, "")
+    if (scheme === "data") {
+      // Inline encoded payload: size and digest are derivable without I/O.
+      const payload = uri.slice(uri.indexOf(",") + 1)
+      return {
+        kind: "data",
+        source: "data-uri",
+        mediaType,
+        filename,
+        length: payload.length,
+        sha256: await sha256Hex(payload),
+        envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+      }
+    }
+    if (scheme === "http" || scheme === "https") {
+      // Remote media is accounted without dereference: source kind plus the
+      // deterministic envelope overhead only.
+      return {
+        kind: "uri",
+        source: "uri",
+        mediaType,
+        filename,
+        length: null,
+        sha256: null,
+        envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+      }
+    }
+    // file://, blob://, etc. have no derivable size without dereference.
+    throw new UnknownMediaSizeError(`cannot derive size of ${scheme}:// media ${label}; failing closed`)
+  }
+  if (typeof data === "string") {
+    return {
+      kind: "data",
+      source: "string",
+      mediaType,
+      filename,
+      length: data.length,
+      sha256: await sha256Hex(data),
+      envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+    }
+  }
+  if (typeof Blob !== "undefined" && data instanceof Blob) {
+    // Blob size is known without reading the stream, so no digest is taken.
+    return {
+      kind: "data",
+      source: "blob",
+      mediaType,
+      filename,
+      length: data.size,
+      sha256: null,
+      envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+    }
+  }
+  if (data instanceof ArrayBuffer) {
+    return {
+      kind: "data",
+      source: "bytes",
+      mediaType,
+      filename,
+      length: data.byteLength,
+      sha256: await sha256Hex(new Uint8Array(data)),
+      envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+    }
+  }
+  if (ArrayBuffer.isView(data)) {
+    return {
+      kind: "data",
+      source: "bytes",
+      mediaType,
+      filename,
+      length: data.byteLength,
+      sha256: await sha256Hex(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)),
+      envelopeOverhead: MEDIA_ENVELOPE_OVERHEAD,
+    }
+  }
+  throw new UnknownMediaSizeError(`cannot derive size of media handle ${label}; failing closed`)
+}
+
+async function sha256Hex(input: string | Uint8Array): Promise<string> {
+  const bytes = typeof input === "string" ? new TextEncoder().encode(input) : new Uint8Array(input)
+  const digest = await crypto.subtle.digest("SHA-256", bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+function toData(value: unknown): unknown {
+  if (value === null) return null
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value
+    case "number":
+      return Number.isFinite(value) ? value : null
+    case "undefined":
+    case "function":
+      return null
+  }
+  if (Array.isArray(value)) return value.map((item) => toData(item))
+  if (value instanceof URL) return value.href
+  if (typeof value === "object") {
+    const out: Record<string, unknown> = {}
+    for (const [key, item] of Object.entries(value)) {
+      if (item === undefined || typeof item === "function") continue
+      out[key] = toData(item)
+    }
+    return out
+  }
+  return null
+}
+
+function freezeDeep<T>(value: T): T {
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) freezeDeep(item)
+    Object.freeze(value)
+  }
+  return value
+}
+
+async function buildBudgetProjection(input: {
+  system: string[]
+  messages: ModelMessage[]
+  tools: Record<string, Tool>
+  options: Record<string, any>
+  outputAllowance: number
+}): Promise<BudgetProjection> {
+  const messages: BudgetProjectionMessage[] = []
+  for (const message of input.messages) {
+    const candidate = message as { role?: unknown; content?: unknown } | string
+    const role = typeof candidate === "object" && typeof candidate.role === "string" ? candidate.role : "unknown"
+    const content = typeof candidate === "object" ? candidate.content : candidate
+    if (typeof content === "string") {
+      messages.push({ role, content })
+      continue
+    }
+    const parts: unknown[] = []
+    if (Array.isArray(content)) {
+      for (const part of content) {
+        if (typeof part === "string") {
+          parts.push(part)
+          continue
+        }
+        // Media is sized conservatively without dereference; everything else
+        // is deep-copied to plain data with functions dropped.
+        parts.push(isMediaPart(part) ? await projectMedia(part) : toData(part))
+      }
+    } else {
+      parts.push(toData(content))
+    }
+    messages.push({ role, content: parts })
+  }
+
+  const tools: Record<string, BudgetTool> = {}
+  for (const [name, tool] of Object.entries(input.tools)) tools[name] = projectTool(name, tool)
+
+  const options = toData(input.options)
+  return freezeDeep({
+    // System entries are strings by contract; non-strings cannot contribute
+    // text to the estimate and are dropped.
+    system: input.system.filter((entry): entry is string => typeof entry === "string"),
+    messages,
+    tools,
+    options: isPlainRecord(options) ? options : {},
+    outputAllowance: input.outputAllowance,
+  })
 }
 
 export * as LLMRequestPrep from "./request"

@@ -1,0 +1,168 @@
+{
+  "note": "T04 fixture A \u2014 canonical final outgoing payload at the native lowering seam (the exact post-LLMRequest.update value LLMNativeRuntime.stream hands to llmClient.stream, route-qualified through the same LLMClient.compile the client runs before transport). Inputs are frozen in 'inputs'; the native section is the golden projection captured from the existing lowering (LLMNative.request + ProviderTransform + toDefinitions + provider body builder). The T04 gate must admit/observe exactly these values.",
+  "seam": "LLMNativeRuntime.stream -> llmClient.stream(LStreamRequest)",
+  "inputs": {
+    "model": {
+      "id": "m1",
+      "providerID": "openai",
+      "api": {
+        "id": "m1",
+        "url": "http://127.0.0.1:59871/v1",
+        "npm": "@ai-sdk/openai-compatible"
+      },
+      "limit": {
+        "context": 262144,
+        "output": 32000
+      }
+    },
+    "agent": {
+      "name": "build",
+      "prompt": "ANSWER-CONCISELY-MARKER"
+    },
+    "user": {
+      "id": "msg_user-t04-golden",
+      "sessionID": "session-t04-golden",
+      "model": {
+        "providerID": "openai",
+        "modelID": "m1"
+      }
+    },
+    "system": [
+      "BASE-SYSTEM-MARKER",
+      "USER-SYSTEM-MARKER"
+    ],
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool-call",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "input": {
+              "env": "prod"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "output": {
+              "type": "text",
+              "value": "RESULT-PAYLOAD-MARKER"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "CURRENT-INPUT-MARKER"
+      }
+    ],
+    "tools": {
+      "deploy": {
+        "description": "Deploy the service",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env",
+            "region"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    },
+    "toolChoice": "auto",
+    "apiKey": "test-key",
+    "outputTokenMax": 32000,
+    "modelOutputLimit": 32000
+  },
+  "native": {
+    "route": "openai-compatible-chat",
+    "protocol": "openai-chat",
+    "body": {
+      "model": "m1",
+      "messages": [
+        {
+          "role": "system",
+          "content": "ANSWER-CONCISELY-MARKER\nBASE-SYSTEM-MARKER\nUSER-SYSTEM-MARKER"
+        },
+        {
+          "role": "assistant",
+          "content": null,
+          "tool_calls": [
+            {
+              "id": "call-77",
+              "type": "function",
+              "function": {
+                "name": "deploy",
+                "arguments": "{\"env\":\"prod\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "call-77",
+          "content": "RESULT-PAYLOAD-MARKER"
+        },
+        {
+          "role": "user",
+          "content": "CURRENT-INPUT-MARKER"
+        }
+      ],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "deploy",
+            "description": "Deploy the service",
+            "parameters": {
+              "$schema": "http://json-schema.org/draft-07/schema#",
+              "type": "object",
+              "properties": {
+                "env": {
+                  "type": "string"
+                },
+                "region": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "env",
+                "region"
+              ],
+              "additionalProperties": false
+            }
+          }
+        }
+      ],
+      "tool_choice": "auto",
+      "stream": true,
+      "stream_options": {
+        "include_usage": true
+      },
+      "store": false,
+      "max_tokens": 32000
+    }
+  },
+  "budget": {
+    "phase": "normal",
+    "projectionEstimate": 203,
+    "outputAllowanceNormal": 32000
+  }
+}

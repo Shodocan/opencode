@@ -12,7 +12,7 @@ import { Provider } from "@/provider/provider"
 
 import { type Tool as AITool, tool, jsonSchema } from "ai"
 import type { JSONSchema7 } from "@ai-sdk/provider"
-import { SessionCompaction } from "./compaction"
+import { CompactionPlanner, SessionCompaction } from "./compaction"
 import { SystemPrompt } from "./system"
 import { Instruction } from "./instruction"
 import { Plugin } from "../plugin"
@@ -51,7 +51,11 @@ import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
-import { eq } from "drizzle-orm"
+import { and, desc, eq, lt, like, or } from "drizzle-orm"
+import { EventTable } from "@opencode-ai/core/event/sql"
+import { EventV2, InvalidDurableEventError } from "@opencode-ai/core/event"
+import { SessionEvent } from "@opencode-ai/core/session/event"
+import { CompactionImpossibleError, ContextBudget } from "./overflow"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
@@ -95,13 +99,64 @@ function formatMcpResourceBytes(value: number) {
 
 function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
-  // They are not pending work and must not trigger an assistant-prefill request.
+  // This prevents an abandoned tool_use from triggering an assistant-prefill request.
   return part.state.status === "error" && part.state.metadata?.interrupted === true
+}
+
+// ─── T06 durable-lineage one-shot context-budget repair ─────────────────────
+//
+// The context-budget lineage is event-log only: the serialized full state in
+// the event log is the sole restart/CAS authority. Each runLoop invocation
+// seeds a per-run draft from the newest indexed state (trusted only when its
+// compaction story is complete), pre-checks the expected generation before
+// every dispatch (a conflict terminates with zero provider calls), records
+// the overflow outcome before repair, gates the repair on the bounded planner
+// and an unchanged durable-output watermark, and settles the one-shot cycle
+// exactly once. The immediate-transaction PublishOptions.commit on each
+// lineage publish is the CAS: it compares the expected generation with the
+// latest indexed lineage event and fails closed (defect) on a mismatch the
+// serialized pre-check could not observe.
+const LINEAGE_TYPE_V1 = EventV2.versionedType(SessionEvent.ContextBudgetLineage.type, 1)
+// The event's own data schema is the decode authority for the serialized
+// full state; decodeUnknownOption infers the payload type from it.
+const LINEAGE_DATA = SessionEvent.ContextBudgetLineage.data
+
+// Seam projections may carry non-JSON leaves (undefined properties the
+// canonical form drops); the durable state stores the canonical JSON form.
+const lineageProjection = (value: unknown) => JSON.parse(ContextBudget.canonicalSerialize(value))
+
+type LineageRouteEntry = {
+  readonly providerID: string
+  readonly modelID: string
+  readonly runtime: string
+  readonly requestHash: string
+  readonly outcome: string
+}
+
+type LineagePreDispatch = {
+  readonly providerID: string
+  readonly modelID: string
+  readonly runtime: string
+  readonly requestHash: string
+  readonly projection: unknown
+}
+
+type LineageDraft = {
+  readonly sessionID: SessionID
+  expectedGeneration: number
+  compaction_count: 0 | 1
+  routeLedger: LineageRouteEntry[]
+  overflowHashes: string[]
+  preDispatch: LineagePreDispatch | undefined
+  plan: { readonly requestHash: string; readonly projection: unknown } | undefined
+  watermark: number
+  foreign: boolean
+  awaitingSettlement: boolean
 }
 
 export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
-  readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
+  readonly prompt: (input: InternalPromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
@@ -141,11 +196,194 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
+
+    // T06: bounded lineage reads over the event log (the (aggregate_id,
+    // type, seq) index serves the latest read).
+    const lineageRows = (sessionID: SessionID) =>
+      db
+        .select()
+        .from(EventTable)
+        .where(and(eq(EventTable.aggregate_id, sessionID), eq(EventTable.type, LINEAGE_TYPE_V1)))
+        .orderBy(desc(EventTable.seq))
+        .all()
+        .pipe(Effect.orDie)
+
+    const lineageLatest = (sessionID: SessionID) =>
+      Effect.gen(function* () {
+        const list = yield* lineageRows(sessionID)
+        const row = list[0]
+        if (!row) return undefined
+        const decoded = Schema.decodeUnknownOption(LINEAGE_DATA)(row.data)
+        if (Option.isNone(decoded))
+          return yield* Effect.fail(
+            new InvalidDurableEventError({
+              type: SessionEvent.ContextBudgetLineage.type,
+              message: "context-budget lineage: undecodable full state",
+            }),
+          )
+        return decoded.value
+      })
+
+    // Durable assistant output watermark: the newest seq of step/text/tool/
+    // reasoning output events in the aggregate (versioned types keep the
+    // unversioned prefix).
+    const outputWatermark = (sessionID: SessionID) =>
+      Effect.gen(function* () {
+        const rows = yield* db
+          .select({ seq: EventTable.seq })
+          .from(EventTable)
+          .where(
+            and(
+              eq(EventTable.aggregate_id, sessionID),
+              or(
+                like(EventTable.type, "session.next.step.%"),
+                like(EventTable.type, "session.next.text.%"),
+                like(EventTable.type, "session.next.tool.%"),
+                like(EventTable.type, "session.next.reasoning.%"),
+              ),
+            ),
+          )
+          .all()
+          .pipe(Effect.orDie)
+        return rows.reduce((max, row) => Math.max(max, row.seq), 0)
+      })
+
+    // Seed the per-run draft: the newest indexed state is trusted only when
+    // its compaction story is complete (counter 0, or counter 1 with at
+    // least one ledger entry). Corrupt or foreign state anchors the draft at
+    // generation 0 with `foreign` set — the pre-dispatch conflict check then
+    // fails closed with zero provider calls.
+    const lineageSeed = (sessionID: SessionID) =>
+      Effect.gen(function* () {
+        const fresh: LineageDraft = {
+          sessionID,
+          expectedGeneration: 0,
+          compaction_count: 0,
+          routeLedger: [],
+          overflowHashes: [],
+          preDispatch: undefined,
+          plan: undefined,
+          watermark: 0,
+          foreign: false,
+          awaitingSettlement: false,
+        }
+        const latest = yield* lineageLatest(sessionID).pipe(Effect.exit)
+        if (Exit.isFailure(latest)) return { ...fresh, foreign: true }
+        const state = latest.value
+        if (!state) return fresh
+        const complete = state.compaction_count === 0 || state.routeLedger.length >= 1
+        if (!complete) return { ...fresh, foreign: true }
+        return {
+          ...fresh,
+          expectedGeneration: state.newGeneration,
+          compaction_count: state.compaction_count,
+          routeLedger: state.routeLedger.map((entry) => ({ ...entry })),
+          overflowHashes: [...state.overflowHashes],
+          watermark: state.watermark.outputSeq,
+        }
+      })
+
+    // Publish the full lineage state as a durable event; the immediate-
+    // transaction commit is the CAS comparing the expected generation with
+    // the latest indexed lineage event (the serialized event log remains the
+    // replay authority).
+    const lineagePublish = (draft: LineageDraft, userMessageID: string) =>
+      Effect.gen(function* () {
+        const preDispatch = draft.preDispatch
+        if (!preDispatch)
+          return yield* Effect.die(new Error("context-budget lineage: publish without a pre-dispatch entry"))
+        const state = {
+          timestamp: Date.now(),
+          sessionID: draft.sessionID,
+          userMessageID,
+          expectedGeneration: draft.expectedGeneration,
+          newGeneration: draft.expectedGeneration + 1,
+          compaction_count: draft.compaction_count,
+          routeLedger: draft.routeLedger.map((entry) => ({ ...entry })),
+          overflowHashes: [...draft.overflowHashes],
+          preDispatch: { ...preDispatch, projection: lineageProjection(preDispatch.projection) },
+          watermark: { outputSeq: draft.watermark },
+        }
+        yield* events.publish(SessionEvent.ContextBudgetLineage, state, {
+          commit: (seq) =>
+            Effect.gen(function* () {
+              const prev = yield* db
+                .select({ data: EventTable.data })
+                .from(EventTable)
+                .where(
+                  and(
+                    eq(EventTable.aggregate_id, draft.sessionID),
+                    eq(EventTable.type, LINEAGE_TYPE_V1),
+                    lt(EventTable.seq, seq),
+                  ),
+                )
+                .orderBy(desc(EventTable.seq))
+                .limit(1)
+                .all()
+                .pipe(Effect.orDie)
+              const row = prev[0]
+              const decoded = row ? Schema.decodeUnknownOption(LINEAGE_DATA)(row.data) : Option.none()
+              const indexed = Option.isSome(decoded) ? decoded.value.newGeneration : 0
+              if (indexed !== draft.expectedGeneration)
+                yield* Effect.die(
+                  new InvalidDurableEventError({
+                    type: SessionEvent.ContextBudgetLineage.type,
+                    message: `context-budget lineage CAS mismatch: expected generation ${draft.expectedGeneration}, indexed ${indexed}`,
+                  }),
+                )
+            }),
+        })
+        draft.expectedGeneration += 1
+      })
+
+    // Record the overflow outcome (before any repair) and run the pre-repair
+    // gates. Returns "terminal" when the one-shot cycle must stop: a
+    // pre-dispatch entry is missing, the counter is already spent, the hash
+    // is a known pending/overflow hash (restart cannot redispatch it), or
+    // durable output appeared since the overflow was recorded.
+    const lineageOverflow = Effect.fn("SessionPrompt.lineageOverflow")(function* (
+      draft: LineageDraft,
+      userMessageID: string,
+    ) {
+      const preDispatch = draft.preDispatch
+      if (
+        !preDispatch ||
+        draft.foreign ||
+        draft.compaction_count === 1 ||
+        draft.overflowHashes.includes(preDispatch.requestHash)
+      )
+        return "terminal" as const
+      const recorded = yield* outputWatermark(draft.sessionID)
+      draft.overflowHashes.push(preDispatch.requestHash)
+      draft.routeLedger.push({
+        providerID: preDispatch.providerID,
+        modelID: preDispatch.modelID,
+        runtime: preDispatch.runtime,
+        requestHash: preDispatch.requestHash,
+        outcome: "overflow",
+      })
+      draft.watermark = recorded
+      yield* lineagePublish(draft, userMessageID)
+      const current = yield* outputWatermark(draft.sessionID)
+      if (current !== draft.watermark) return "terminal" as const
+      return "recorded" as const
+    })
+
+    const lineageTerminate = (msg: SessionV1.Assistant) =>
+      Effect.gen(function* () {
+        msg.error = new SessionV1.ContextOverflowError({ message: "Input exceeds context window of this model" }).toObject()
+        msg.finish = "error"
+        msg.time.completed = Date.now()
+        yield* sessions.updateMessage(msg)
+        yield* events.publish(Session.Event.Error, { sessionID: msg.sessionID, error: msg.error })
+        yield* status.set(msg.sessionID, { type: "idle" })
+      })
+
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
-        prompt: (input: PromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
+        prompt: (input: InternalPromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
@@ -259,8 +497,9 @@ const layer = Layer.effect(
       sessionID: SessionID
       session: Session.Info
       msgs: SessionV1.WithParts[]
+      taskOrigin?: Tool.TaskOrigin
     }) {
-      const { task, model, lastUser, sessionID, session, msgs } = input
+      const { task, model, lastUser, sessionID, session, msgs, taskOrigin } = input
       const ctx = yield* InstanceState.context
       const promptOps = yield* ops()
       const { task: taskTool } = yield* registry.named()
@@ -306,7 +545,7 @@ const layer = Layer.effect(
       }
       yield* plugin.trigger(
         "tool.execute.before",
-        { tool: TaskTool.id, sessionID, callID: part.id },
+        { tool: TaskTool.id, sessionID, callID: part.callID, taskOrigin },
         { args: taskArgs },
       )
 
@@ -328,6 +567,7 @@ const layer = Layer.effect(
           sessionID,
           abort: taskAbort.signal,
           callID: part.callID,
+          taskOrigin,
           extra: { bypassAgentCheck: true, promptOps },
           messages: msgs,
           metadata: (val: { title?: string; metadata?: Record<string, any> }) =>
@@ -388,7 +628,7 @@ const layer = Layer.effect(
 
       yield* plugin.trigger(
         "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.id, args: taskArgs },
+        { tool: TaskTool.id, sessionID, callID: part.callID, args: taskArgs, taskOrigin },
         result,
       )
 
@@ -1049,10 +1289,22 @@ const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
-    const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
+    const requireTaskInvocationOrigin = Effect.fn("SessionPrompt.requireTaskInvocationOrigin")(function* (
+      session: Session.Info,
+      taskOrigin?: Tool.TaskOrigin,
+    ) {
+      if (session.parentID && session.metadata?.["opencode.task.origin"] !== undefined && taskOrigin === undefined) {
+        return yield* Effect.die(
+          new NamedError.Unknown({ message: "Task child sessions require an active invocation origin" }),
+        )
+      }
+    })
+
+    const prompt: (input: InternalPromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
       "SessionPrompt.prompt",
-    )(function* (input: PromptInput) {
+    )(function* (input: InternalPromptInput) {
       const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session, input.taskOrigin)
       yield* revert.cleanup(session)
       const message = yield* createUserMessage(input)
       yield* sessions.touch(input.sessionID)
@@ -1067,7 +1319,11 @@ const layer = Layer.effect(
       }
 
       if (input.noReply === true) return message
-      return yield* loop({ sessionID: input.sessionID })
+      return yield* state.ensureRunning(
+        input.sessionID,
+        lastAssistant(input.sessionID),
+        runLoop(input.sessionID, input.taskOrigin),
+      )
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
@@ -1078,12 +1334,13 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID) {
+    const runLoop: (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
+      function* (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        const lineageDraft = yield* lineageSeed(sessionID)
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1142,7 +1399,7 @@ const layer = Layer.effect(
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
-            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs })
+            yield* handleSubtask({ task, model, lastUser, sessionID, session, msgs, taskOrigin })
             continue
           }
 
@@ -1155,6 +1412,29 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
+            // T06: record the admitted one-shot compaction route exactly once
+            // (the planned request identity is the durable ledger hash; the
+            // executor's own dispatch is admitted without a hook).
+            if (lineageDraft.compaction_count === 0 && lineageDraft.plan && lineageDraft.preDispatch) {
+              lineageDraft.compaction_count = 1
+              lineageDraft.routeLedger.push({
+                providerID: model.providerID,
+                modelID: model.id,
+                runtime: lineageDraft.preDispatch.runtime,
+                requestHash: lineageDraft.plan.requestHash,
+                outcome: "admitted",
+              })
+              lineageDraft.preDispatch = {
+                providerID: model.providerID,
+                modelID: model.id,
+                runtime: lineageDraft.preDispatch.runtime,
+                requestHash: lineageDraft.plan.requestHash,
+                projection: lineageDraft.plan.projection,
+              }
+              lineageDraft.watermark = yield* outputWatermark(sessionID)
+              yield* lineagePublish(lineageDraft, lastUser.id)
+              lineageDraft.awaitingSettlement = true
+            }
             continue
           }
 
@@ -1200,6 +1480,23 @@ const layer = Layer.effect(
           }
           yield* sessions.updateMessage(msg)
 
+          // T06: serialized pre-dispatch CAS. The draft's expected generation
+          // must match the newest indexed lineage state; any mismatch (or any
+          // failure to read or decode it) terminates the loop with zero
+          // provider calls.
+          const precheck = yield* lineageLatest(sessionID).pipe(Effect.exit)
+          const conflict =
+            lineageDraft.foreign ||
+            (Exit.isFailure(precheck)
+              ? true
+              : precheck.value === undefined
+                ? lineageDraft.expectedGeneration !== 0
+                : precheck.value.newGeneration !== lineageDraft.expectedGeneration)
+          if (conflict) {
+            yield* lineageTerminate(msg)
+            break
+          }
+
           const finalizeInterruptedAssistant = Effect.gen(function* () {
             if (msg.time.completed) return
             msg.error ??= MessageV2.fromError(new DOMException("Aborted", "AbortError"), {
@@ -1231,6 +1528,7 @@ const layer = Layer.effect(
               bypassAgentCheck,
               messages: msgs,
               promptOps,
+              taskOrigin,
             }).pipe(
               Effect.provideService(Plugin.Service, plugin),
               Effect.provideService(Permission.Service, permission),
@@ -1283,6 +1581,16 @@ const layer = Layer.effect(
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
+              lineage: (final) => {
+                lineageDraft.preDispatch = {
+                  providerID: final.providerID,
+                  modelID: final.modelID,
+                  runtime: final.runtime,
+                  requestHash: final.requestHash,
+                  projection: final.projection,
+                }
+                return Effect.void
+              },
             })
 
             if (structured !== undefined) {
@@ -1316,8 +1624,63 @@ const layer = Layer.effect(
               }
             }
 
-            if (result === "stop") return "break" as const
+            // T06: settle the one-shot repair cycle after the repaired
+            // dispatch completes cleanly.
+            if (lineageDraft.awaitingSettlement && !handle.message.error && result !== "compact") {
+              const settled = lineageDraft.preDispatch
+              if (settled) {
+                lineageDraft.routeLedger.push({
+                  providerID: settled.providerID,
+                  modelID: settled.modelID,
+                  runtime: settled.runtime,
+                  requestHash: settled.requestHash,
+                  outcome: "admitted",
+                })
+                yield* lineagePublish(lineageDraft, lastUser.id)
+                lineageDraft.awaitingSettlement = false
+              }
+            }
+
+            if (result === "stop") {
+              // T06: a hard overflow with the one-shot cycle untouched is
+              // terminal — record the overflow route and stop without repair.
+              if (
+                !handle.message.summary &&
+                lineageDraft.compaction_count === 0 &&
+                lineageDraft.preDispatch &&
+                SessionV1.ContextOverflowError.isInstance(handle.message.error)
+              ) {
+                yield* lineageOverflow(lineageDraft, lastUser.id)
+              }
+              return "break" as const
+            }
             if (result === "compact") {
+              // T06: record the overflow before any repair; the bounded
+              // planner gates the one-shot repair on an unchanged durable
+              // output watermark.
+              const recorded = yield* lineageOverflow(lineageDraft, lastUser.id)
+              if (recorded === "terminal") {
+                yield* lineageTerminate(msg)
+                return "break" as const
+              }
+              const cfg = yield* config.get()
+              try {
+                const plan = CompactionPlanner.plan({
+                  messages: msgs,
+                  model,
+                  cfg,
+                  requestHash: lineageDraft.preDispatch?.requestHash,
+                })
+                lineageDraft.plan = plan.proposals[0]
+                  ? { requestHash: plan.proposals[0].requestHash, projection: plan.proposals[0].request }
+                  : { requestHash: lineageDraft.preDispatch?.requestHash ?? "", projection: {} }
+              } catch (e) {
+                if (e instanceof CompactionImpossibleError) {
+                  yield* lineageTerminate(msg)
+                  return "break" as const
+                }
+                throw e
+              }
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
@@ -1343,17 +1706,23 @@ const layer = Layer.effect(
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       const ready = yield* Latch.make()
       return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+      yield* requireTaskInvocationOrigin(session)
       yield* Effect.logInfo("command", {
         "session.id": input.sessionID,
         command: input.command,
@@ -1519,6 +1888,9 @@ export const PromptInput = Schema.Struct({
   ),
 })
 export type PromptInput = Schema.Schema.Type<typeof PromptInput>
+
+/** Internal-only prompt carrier; HTTP payload schemas intentionally omit it. */
+export type InternalPromptInput = PromptInput & { taskOrigin?: Tool.TaskOrigin }
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,

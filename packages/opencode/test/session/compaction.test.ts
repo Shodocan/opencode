@@ -19,7 +19,9 @@ import { SessionStatus } from "../../src/session/status"
 import { SessionSummary } from "../../src/session/summary"
 import { SessionV2 } from "@opencode-ai/core/session"
 import { SessionExecution } from "@opencode-ai/core/session/execution"
+import { SessionEvent as CoreSessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
+
 
 import { Provider } from "@/provider/provider"
 import * as SessionProcessorModule from "../../src/session/processor"
@@ -31,8 +33,12 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { LLMEvent, Usage } from "@opencode-ai/llm"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { asc, eq } from "drizzle-orm"
+import { EventTable } from "@opencode-ai/core/event/sql"
+import { MessageTable, PartTable } from "@opencode-ai/core/session/sql"
 import { AppNodeBuilder } from "@opencode-ai/core/effect/app-node-builder"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -252,6 +258,44 @@ type CompactionProcessOptions = {
   config?: Layer.Layer<Config.Service>
 }
 
+type CompactionFinalizedDefinition = {
+  readonly type: string
+  readonly durable?: { readonly version: number; readonly aggregate: string }
+}
+
+type InternalSessionEventNamespace = typeof CoreSessionEvent & {
+  readonly InternalDurableDefinitions?: readonly CompactionFinalizedDefinition[]
+  readonly CompactionFinalized?: CompactionFinalizedDefinition
+}
+
+function compactionFinalization(): CompactionFinalizedDefinition | undefined {
+  return (CoreSessionEvent as InternalSessionEventNamespace).CompactionFinalized
+}
+
+// Deterministic serialization of the session's durable v1 rows (messages +
+// parts). Used to prove compaction leaves the durable state byte-equivalent
+// until the finalization commit (T05: no intermediate persistence).
+function durableSnapshot(sessionID: SessionID) {
+  return Effect.gen(function* () {
+    const { db } = yield* Database.Service
+    const messages = yield* db
+      .select()
+      .from(MessageTable)
+      .where(eq(MessageTable.session_id, sessionID))
+      .orderBy(asc(MessageTable.time_created), asc(MessageTable.id))
+      .all()
+      .pipe(Effect.orDie)
+    const parts = yield* db
+      .select()
+      .from(PartTable)
+      .where(eq(PartTable.session_id, sessionID))
+      .orderBy(asc(PartTable.time_created), asc(PartTable.id))
+      .all()
+      .pipe(Effect.orDie)
+    return JSON.stringify({ messages, parts })
+  })
+}
+
 function withCompaction(options?: CompactionProcessOptions) {
   return Effect.provide(compactionProcessLayer(options))
 }
@@ -332,6 +376,38 @@ function reply(
       LLMEvent.finish({
         reason: "stop",
         usage: basicUsage(),
+      }),
+    )
+  }
+}
+
+// Summary stream that signals `ready` the moment the summary request is
+// dispatched, then blocks mid-stream on `gate`: a deterministic
+// mid-execution observation window for the process.
+function pausableReply(
+  text: string,
+  ready: Deferred.Deferred<void>,
+  gate: Deferred.Deferred<void>,
+): (input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown> {
+  return (input) => {
+    Deferred.doneUnsafe(ready, Effect.void)
+    return Stream.unwrap(
+      Effect.gen(function* () {
+        yield* Deferred.await(gate)
+        return Stream.make(
+          LLMEvent.textStart({ id: "txt-0" }),
+          LLMEvent.textDelta({ id: "txt-0", text }),
+          LLMEvent.textEnd({ id: "txt-0" }),
+          LLMEvent.stepFinish({
+            index: 0,
+            reason: "stop",
+            usage: basicUsage(),
+          }),
+          LLMEvent.finish({
+            reason: "stop",
+            usage: basicUsage(),
+          }),
+        )
       }),
     )
   }
@@ -812,6 +888,15 @@ describe("session.compaction.prune", () => {
 })
 
 describe("session.compaction.process", () => {
+  test("exposes the versioned internal finalization boundary", () => {
+    const finalization = compactionFinalization()
+    expect(finalization).toBeDefined()
+    expect(finalization?.type).toBe("session.next.compaction.finalized")
+    expect(finalization?.durable).toEqual({ aggregate: "sessionID", version: 1 })
+    if (!finalization) return
+    expect((CoreSessionEvent as InternalSessionEventNamespace).InternalDurableDefinitions).toContain(finalization)
+  })
+
   it.instance(
     "throws when parent is not a user message",
     Effect.gen(function* () {
@@ -872,7 +957,11 @@ describe("session.compaction.process", () => {
       yield* Deferred.await(done).pipe(Effect.timeout("500 millis"))
       expect(result).toBe("continue")
       expect(seen).toContain(SessionCompaction.Event.Compacted.type)
-      expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
+      // QCB T05 (frozen plan): the internal durable CompactionFinalized event is
+      // published on this path by design; it is the only session.next event here.
+      expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([
+        "session.next.compaction.finalized",
+      ])
     }),
   )
 
@@ -1659,6 +1748,170 @@ describe("session.compaction.process", () => {
       expect(part?.type).toBe("compaction")
       expect(part?.tail_start_id).toBe(keep.id)
     }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 500 }) })),
+  )
+
+  // ─── T05 — execution/persistence: in-memory rolling summaries, byte-equivalent ───
+  // abort, and the single versioned CompactionFinalized full-state event.
+
+  itCompaction.instance(
+    "keeps durable rows byte-equivalent while the rolling summary stays in memory",
+    () => {
+      const stub = llm()
+      const ready = Deferred.makeUnsafe<void>()
+      const gate = Deferred.makeUnsafe<void>()
+      stub.push(pausableReply("summary", ready, gate))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "x".repeat(2_000))
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createUserMessage(session.id, "and this one too")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const entry = yield* durableSnapshot(session.id)
+
+        const fiber = yield* SessionCompaction.use
+          .process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+          .pipe(Effect.forkChild)
+
+        // Mid-execution window: the summary request has been dispatched and
+        // the stream is gated. Every intermediate summary, object, marker,
+        // usage, and projection must still be in memory — the durable rows
+        // are byte-equivalent to entry (no intermediate persistence).
+        yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
+        expect(yield* durableSnapshot(session.id)).toBe(entry)
+
+        Deferred.doneUnsafe(gate, Effect.void)
+        const result = yield* Fiber.join(fiber).pipe(Effect.timeout("10 seconds"))
+        expect(result).toBe("continue")
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+  )
+
+  itCompaction.instance(
+    "leaves durable rows byte-equivalent to entry when aborted mid-execution",
+    () => {
+      const stub = llm()
+      const ready = Deferred.makeUnsafe<void>()
+      const gate = Deferred.makeUnsafe<void>()
+      stub.push(pausableReply("summary", ready, gate))
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "x".repeat(2_000))
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const entry = yield* durableSnapshot(session.id)
+
+        const fiber = yield* SessionCompaction.use
+          .process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+          .pipe(Effect.forkChild)
+
+        yield* Deferred.await(ready).pipe(Effect.timeout("5 seconds"))
+        yield* Fiber.interrupt(fiber)
+        const exit = yield* Fiber.await(fiber).pipe(Effect.timeout("1 second"))
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.hasInterrupts(exit.cause)).toBe(true)
+          // An aborted execution must not persist anything: durable rows are
+          // byte-equivalent to entry.
+          expect(yield* durableSnapshot(session.id)).toBe(entry)
+        }
+        // No finalization event may have been committed by the abort.
+        const { db } = yield* Database.Service
+        const events = yield* db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, session.id))
+          .all()
+          .pipe(Effect.orDie)
+        expect(events.some((row) => row.type === "session.next.compaction.finalized.1")).toBe(false)
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+  )
+
+  itCompaction.instance(
+    "publishes exactly one versioned CompactionFinalized full-state event with a reduced after estimate",
+    () => {
+      const stub = llm()
+      stub.push(reply("summary"))
+      return Effect.gen(function* () {
+        const finalization = compactionFinalization()
+        expect(finalization).toBeDefined()
+        expect(finalization?.type).toBe("session.next.compaction.finalized")
+        expect(finalization?.durable).toEqual({ aggregate: "sessionID", version: 1 })
+
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "x".repeat(2_000))
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createUserMessage(session.id, "and this one too")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        const result = yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+        expect(result).toBe("continue")
+
+        // Exactly one internal durable finalization event, versioned.
+        const { db } = yield* Database.Service
+        const events = yield* db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, session.id))
+          .all()
+          .pipe(Effect.orDie)
+        const finalized = events.filter((row) => row.type === `${finalization!.type}.1`)
+        expect(finalized).toHaveLength(1)
+
+        // Full state: deterministic message IDs, complete assistant and
+        // parts, marker with the summary and recent text, usage, and the
+        // before/after projections with E_after < E_before and E_after <= B.
+        const data = finalized[0]!.data as Record<string, unknown>
+        expect(data.sessionID).toBe(session.id)
+        const compaction = data.compaction as {
+          message: { id: string }
+          marker: { id: string; summary: string }
+          assistant: { id: string; content: unknown[] }
+          parts: unknown[]
+        }
+        for (const id of [compaction.message.id, compaction.marker.id, compaction.assistant.id]) {
+          expect(id).toMatch(/^msg_/)
+        }
+        expect(compaction.assistant.content.length).toBeGreaterThan(0)
+        expect(JSON.stringify(compaction.assistant.content)).toContain("summary")
+        expect(compaction.parts.length).toBeGreaterThan(0)
+        expect(JSON.stringify(compaction.parts)).toContain("summary")
+        expect(compaction.marker.summary).toContain("summary")
+        expect(typeof data.recent).toBe("string")
+        const usage = data.usage as {
+          cost: number
+          tokens: { input: number; output: number; reasoning: number; cache: { read: number; write: number } }
+        }
+        expect(typeof usage.cost).toBe("number")
+        expect(typeof usage.tokens.input).toBe("number")
+        expect(typeof usage.tokens.output).toBe("number")
+        expect(typeof usage.tokens.reasoning).toBe("number")
+        const before = data.before as { estimate: number; budget: number }
+        const after = data.after as { estimate: number; budget: number }
+        expect(after.estimate).toBeLessThan(before.estimate)
+        expect(after.estimate).toBeLessThanOrEqual(after.budget)
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
   )
 })
 

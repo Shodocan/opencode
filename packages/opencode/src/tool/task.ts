@@ -14,11 +14,12 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { NotFoundError } from "@/storage/storage"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
+  prompt(input: SessionPrompt.InternalPromptInput): Effect.Effect<SessionV1.WithParts>
 }
 
 const id = "task"
@@ -94,6 +95,14 @@ export const TaskTool = Tool.define(
       ctx: Tool.Context,
     ) {
       const cfg = yield* config.get()
+      // The runtime call ID identifies this invocation; never synthesize one.
+      const taskCallID = ctx.callID?.trim()
+      if (!taskCallID) return yield* Effect.fail(new Error("TaskTool requires a nonblank host callID"))
+      const taskOrigin: Tool.TaskOrigin = {
+        version: 1,
+        parentSessionID: ctx.sessionID,
+        taskCallID,
+      }
       const runInBackground = params.background === true
       if (runInBackground && !flags.experimentalBackgroundSubagents) {
         return yield* Effect.fail(
@@ -134,8 +143,11 @@ export const TaskTool = Tool.define(
       }
 
       const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
         : undefined
+if (session && session.parentID !== ctx.sessionID) {
+        return yield* Effect.fail(new Error("TaskTool task_id must name a direct child of the calling session"))
+      }
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
@@ -155,7 +167,7 @@ export const TaskTool = Tool.define(
       ]
       const nextSession =
         session ??
-        (yield* sessions.create({
+        (yield* sessions.createTaskChild({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
@@ -169,6 +181,14 @@ export const TaskTool = Tool.define(
                 ),
             ),
           ],
+          metadata: {
+            "opencode.task.origin": {
+              version: 1,
+              parentSessionID: ctx.sessionID,
+              tool: id,
+              callID: taskCallID,
+            },
+          },
         }))
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
@@ -208,6 +228,7 @@ export const TaskTool = Tool.define(
           },
           variant: next.model ? undefined : variant,
           agent: next.name,
+          taskOrigin,
           parts,
         })
         if (result.info.role === "assistant" && result.info.error) {

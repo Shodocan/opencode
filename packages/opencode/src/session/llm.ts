@@ -6,9 +6,9 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Context, Effect, Layer } from "effect"
 import * as Stream from "effect/Stream"
-import { streamText, wrapLanguageModel, type ModelMessage, type Tool } from "ai"
-import type { LLMEvent } from "@opencode-ai/llm"
-import { LLMClient } from "@opencode-ai/llm/route"
+import { streamText, type ModelMessage, type Tool } from "ai"
+import { LLMRequest, toDefinitions, type LLMEvent } from "@opencode-ai/llm"
+import { LLMClient, RequestExecutor, WebSocketExecutor } from "@opencode-ai/llm/route"
 import type { LLMClientService } from "@opencode-ai/llm/route"
 import { GitLabWorkflowLanguageModel } from "gitlab-ai-provider"
 import { ProviderTransform } from "@/provider/transform"
@@ -26,11 +26,24 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import * as Option from "effect/Option"
 import * as OtelTracer from "@effect/opentelemetry/Tracer"
+import { ContextBudgetExceededError } from "./overflow"
 import { LLMAISDK } from "./llm/ai-sdk"
+import { LLMNative } from "./llm/native-request"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
+
+// T06: the awaited final-pre-network lineage seam payload — the exact final
+// route/runtime/projection/request-hash of the payload about to be (or not)
+// dispatched.
+export type LineageFinal = {
+  readonly providerID: string
+  readonly modelID: string
+  readonly runtime: "native" | "ai-sdk"
+  readonly requestHash: string
+  readonly projection: unknown
+}
 
 export type StreamInput = {
   user: SessionV1.User
@@ -45,6 +58,10 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  /** T06: awaited before dispatch on both runtimes; failure fails the stream
+   * before any native/streamText/HTTP/provider call. The sole pre-dispatch
+   * lineage hook. */
+  lineage?: (input: LineageFinal) => Effect.Effect<void>
 }
 
 export type StreamRequest = StreamInput & {
@@ -111,6 +128,19 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+
+      // T04 outgoing output: a defined outgoing cap is clamped down to the
+      // route/runtime allowance (compaction: min(4_096, route output, runtime
+      // cap) via the T02 budget projection allowance; normal requests keep
+      // the full allowance because params and allowance share the same
+      // formula). A plugin that strips the cap (e.g. the OpenAI/codex
+      // chat.params hook) keeps it stripped — the clamp only lowers a defined
+      // value, it never invents one. Both runtimes send this same value.
+      const phase = input.agent.name === "compaction" ? "compaction" : "normal"
+      const outgoingMaxOutputTokens =
+        prepared.params.maxOutputTokens === undefined
+          ? undefined
+          : Math.min(prepared.params.maxOutputTokens, prepared.budgetProjection.outputAllowance)
 
       // Wire up toolExecutor for DWS workflow models so that tool calls
       // from the workflow service are executed via opencode's tool system
@@ -235,10 +265,12 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          maxOutputTokens: prepared.params.maxOutputTokens,
+          maxOutputTokens: outgoingMaxOutputTokens,
           providerOptions: prepared.params.options,
           headers: prepared.headers,
           abort: input.abort,
+          cfg,
+          phase,
         })
         if (native.type === "supported") {
           yield* Effect.logInfo("llm runtime selected", {
@@ -246,6 +278,52 @@ const live: Layer.Layer<
             "llm.provider": input.model.providerID,
             "llm.model": input.model.id,
           })
+          // T06 lineage seam (native): rebuild the exact final pre-network
+          // value from the same inputs the runtime lowers (the runtime
+          // admission has already run; the projection is of the post-
+          // LLMRequest.update value the runtime hands to llmClient.stream).
+          // A hook failure fails this effect before the native stream is
+          // returned — zero native/streamText/HTTP/provider calls.
+          if (input.lineage) {
+            const nativeStatus = LLMNativeRuntime.status({ model: input.model, provider: item, auth: info })
+            if (nativeStatus.type === "supported") {
+              const nativeToolDefs = LLMNativeRuntime.nativeTools(prepared.tools, {
+                messages: prepared.messages,
+                abort: input.abort,
+              })
+              const nativeBase = LLMNative.request({
+                model: input.model,
+                apiKey: nativeStatus.apiKey,
+                baseURL: nativeStatus.baseURL,
+                // Defensive copy: ProviderTransform.message mutates in place;
+                // the runtime applies its own single transform below.
+                messages: ProviderTransform.message(structuredClone(prepared.messages), input.model, prepared.params.options ?? {}),
+                toolChoice: input.toolChoice,
+                temperature: prepared.params.temperature,
+                topP: prepared.params.topP,
+                topK: prepared.params.topK,
+                maxOutputTokens: outgoingMaxOutputTokens,
+                providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options ?? {}),
+                headers: prepared.headers,
+              })
+              const nativeFinal = LLMRequest.update(nativeBase, {
+                tools: [...nativeBase.tools, ...toDefinitions(nativeToolDefs)],
+              })
+              const projection = LLMNative.finalProjection(nativeFinal)
+              const requestHash = LLMNative.requestHash({
+                route: { providerID: input.model.providerID, modelID: input.model.id },
+                runtime: "native",
+                projection,
+              })
+              yield* input.lineage({
+                providerID: input.model.providerID,
+                modelID: input.model.id,
+                runtime: "native",
+                requestHash,
+                projection,
+              })
+            }
+          }
           return {
             type: "native" as const,
             stream: native.stream,
@@ -273,6 +351,71 @@ const live: Layer.Layer<
         "llm.provider": input.model.providerID,
         "llm.model": input.model.id,
       })
+
+      // T04: the sole named final transform for the AI SDK branch. This helper
+      // is the only owner of ProviderTransform.message on this branch — the
+      // legacy transformParams middleware is replaced by it — and it applies
+      // the transform exactly once, on a defensive copy (the transform mutates
+      // message objects in place). The single transformed result feeds both
+      // the final pre-network admission gate and streamText immediately
+      // before dispatch.
+      const finalPrompt = ProviderTransform.message(
+        structuredClone(prepared.messages),
+        input.model,
+        prepared.messageTransformOptions,
+      )
+      const aiSdkProviderOptions = ProviderTransform.providerOptions(input.model, prepared.params.options)
+
+      // T04 final pre-network gate: the exact outgoing streamText params
+      // (final transform output, tools, choice, serialization-affecting
+      // options, output allowance) are the sole admission input. Media parts
+      // are charged with the same T02-parity budget records as at prepare
+      // time — raw base64 never enters the estimate. Rejection is a typed
+      // failure before any streamText/doStream/HTTP/provider call.
+      const finalPayload = {
+        prompt: LLMNative.budgetMessages(finalPrompt),
+        tools: prepared.budgetProjection.tools,
+        toolChoice: input.toolChoice ?? null,
+        temperature: prepared.params.temperature ?? null,
+        topP: prepared.params.topP ?? null,
+        topK: prepared.params.topK ?? null,
+        maxOutputTokens: outgoingMaxOutputTokens,
+        providerOptions: aiSdkProviderOptions ?? null,
+      }
+
+      // T06 lineage seam (AI SDK): the T04 final-transform single result is
+      // the exact final pre-network payload. The hook is awaited before the
+      // admission decision and dispatch; a hook failure fails this effect
+      // before any streamText/HTTP/provider call.
+      if (input.lineage) {
+        const requestHash = LLMNative.requestHash({
+          route: { providerID: input.model.providerID, modelID: input.model.id },
+          runtime: "ai-sdk",
+          projection: finalPayload,
+        })
+        yield* input.lineage({
+          providerID: input.model.providerID,
+          modelID: input.model.id,
+          runtime: "ai-sdk",
+          requestHash,
+          projection: finalPayload,
+        })
+      }
+
+      try {
+        LLMNative.admit({
+          model: input.model,
+          cfg,
+          projection: finalPayload,
+          phase,
+          runtime: "ai-sdk",
+          maxOutputTokens: outgoingMaxOutputTokens,
+        })
+      } catch (cause) {
+        if (cause instanceof ContextBudgetExceededError) yield* Effect.fail(cause)
+        throw cause
+      }
+
       // Default runtime path: AI SDK owns provider execution and tool dispatch;
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
@@ -313,34 +456,16 @@ const live: Layer.Layer<
           temperature: prepared.params.temperature,
           topP: prepared.params.topP,
           topK: prepared.params.topK,
-          providerOptions: ProviderTransform.providerOptions(input.model, prepared.params.options),
+          providerOptions: aiSdkProviderOptions,
           activeTools: Object.keys(prepared.tools).filter((x) => x !== "invalid"),
           tools: prepared.tools,
           toolChoice: input.toolChoice,
-          maxOutputTokens: prepared.params.maxOutputTokens,
+          maxOutputTokens: outgoingMaxOutputTokens,
           abortSignal: input.abort,
           headers: prepared.headers,
           maxRetries: input.retries ?? 0,
-          messages: prepared.messages,
-          model: wrapLanguageModel({
-            model: language,
-            middleware: [
-              {
-                specificationVersion: "v3" as const,
-                async transformParams(args) {
-                  if (args.type === "stream") {
-                    // @ts-expect-error
-                    args.params.prompt = ProviderTransform.message(
-                      args.params.prompt,
-                      input.model,
-                      prepared.messageTransformOptions,
-                    )
-                  }
-                  return args.params
-                },
-              },
-            ],
-          }),
+          messages: finalPrompt,
+          model: language,
           experimental_telemetry: {
             isEnabled: cfg.experimental?.openTelemetry,
             functionId: "session.llm",

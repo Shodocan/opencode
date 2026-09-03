@@ -1,0 +1,177 @@
+{
+  "note": "T04 fixture B \u2014 canonical final outgoing options at the AI SDK terminal provider seam (the LanguageModelV3CallOptions the wrapped model's doStream actually receives after llm.ts's transformParams middleware runs ProviderTransform.message). Frozen inputs are identical to native-golden-request.json for parity. 'tools' is the provider-shaped tool list; executable tool functions never enter this projection.",
+  "seam": "llm.ts streamText -> wrapLanguageModel middleware -> fake terminal doStream(options)",
+  "inputs": {
+    "model": {
+      "id": "m1",
+      "providerID": "openai",
+      "api": {
+        "id": "m1",
+        "url": "http://127.0.0.1:59871/v1",
+        "npm": "@ai-sdk/openai-compatible"
+      },
+      "limit": {
+        "context": 262144,
+        "output": 32000
+      }
+    },
+    "agent": {
+      "name": "build",
+      "prompt": "ANSWER-CONCISELY-MARKER"
+    },
+    "user": {
+      "id": "msg_user-t04-golden",
+      "sessionID": "session-t04-golden",
+      "model": {
+        "providerID": "openai",
+        "modelID": "m1"
+      }
+    },
+    "system": [
+      "BASE-SYSTEM-MARKER",
+      "USER-SYSTEM-MARKER"
+    ],
+    "messages": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool-call",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "input": {
+              "env": "prod"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "output": {
+              "type": "text",
+              "value": "RESULT-PAYLOAD-MARKER"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": "CURRENT-INPUT-MARKER"
+      }
+    ],
+    "tools": {
+      "deploy": {
+        "description": "Deploy the service",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env",
+            "region"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    },
+    "toolChoice": "auto",
+    "outputTokenMax": 32000,
+    "modelOutputLimit": 32000
+  },
+  "aiSdk": {
+    "prompt": [
+      {
+        "role": "system",
+        "content": "ANSWER-CONCISELY-MARKER\nBASE-SYSTEM-MARKER\nUSER-SYSTEM-MARKER"
+      },
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "tool-call",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "input": {
+              "env": "prod"
+            }
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": [
+          {
+            "type": "tool-result",
+            "toolCallId": "call-77",
+            "toolName": "deploy",
+            "output": {
+              "type": "text",
+              "value": "RESULT-PAYLOAD-MARKER"
+            }
+          }
+        ]
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "CURRENT-INPUT-MARKER"
+          }
+        ]
+      }
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "name": "deploy",
+        "description": "Deploy the service",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "env": {
+              "type": "string"
+            },
+            "region": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "env",
+            "region"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        }
+      }
+    ],
+    "toolChoice": {
+      "type": "auto"
+    },
+    "temperature": null,
+    "topP": null,
+    "maxOutputTokens": 32000,
+    "providerOptions": {
+      "openai": {
+        "store": false
+      }
+    }
+  },
+  "budget": {
+    "phase": "normal",
+    "projectionEstimate": 213,
+    "outputAllowanceNormal": 32000
+  }
+}

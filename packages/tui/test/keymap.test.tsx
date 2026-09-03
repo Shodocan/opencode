@@ -1,9 +1,11 @@
 /** @jsxImportSource @opentui/solid */
+import { TextareaRenderable } from "@opentui/core"
 import { createDefaultOpenTuiKeymap } from "@opentui/keymap/opentui"
 import { createBindingLookup } from "@opentui/keymap/extras"
 import { testRender, useRenderer } from "@opentui/solid"
 import { expect, test } from "bun:test"
-import { onCleanup } from "solid-js"
+import { onCleanup, onMount } from "solid-js"
+import { createTuiResolvedConfig } from "./fixture/tui-runtime"
 import { TuiKeybind } from "../src/config/keybind"
 import { getOpencodeModeStack, OPENCODE_BASE_MODE, OpencodeKeymapProvider, registerOpencodeKeymap } from "../src/keymap"
 
@@ -15,6 +17,14 @@ function createResolvedKeymapConfig(input: TuiKeybind.KeybindOverrides = {}) {
       bindingDefaults: TuiKeybind.bindingDefaults(),
     }),
     leader_timeout: 2000,
+  }
+}
+
+async function wait(fn: () => boolean, timeout = 2000) {
+  const start = Date.now()
+  while (!fn()) {
+    if (Date.now() - start > timeout) throw new Error("timed out waiting for condition")
+    await Bun.sleep(10)
   }
 }
 
@@ -135,6 +145,47 @@ test("mode-less bindings stay active when opencode mode changes", async () => {
         "model.list": 0,
       },
     })
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("linefeed dispatches input submit for terminals that send LF for Enter", async () => {
+  const events: string[] = []
+  let textarea: TextareaRenderable | undefined
+
+  function Harness() {
+    const renderer = useRenderer()
+    const keymap = createDefaultOpenTuiKeymap(renderer)
+    const config = createTuiResolvedConfig()
+    const offKeymap = registerOpencodeKeymap(keymap, renderer, config)
+
+    onMount(() => textarea?.focus())
+    onCleanup(offKeymap)
+
+    return (
+      <OpencodeKeymapProvider keymap={keymap}>
+        <textarea
+          initialValue="draft"
+          ref={(value: TextareaRenderable) => {
+            textarea = value
+          }}
+          onSubmit={() => events.push("submit")}
+          onContentChange={() => events.push("content")}
+        />
+      </OpencodeKeymapProvider>
+    )
+  }
+
+  const app = await testRender(() => <Harness />)
+  try {
+    await wait(() => app.renderer.currentFocusedEditor === textarea && textarea?.traits.suspend === true)
+    events.length = 0
+
+    app.mockInput.pressKey("\n")
+
+    expect(events).toEqual(["submit"])
+    expect(textarea?.plainText).toBe("draft")
   } finally {
     app.renderer.destroy()
   }

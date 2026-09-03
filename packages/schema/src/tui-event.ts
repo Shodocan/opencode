@@ -8,7 +8,24 @@ import { SessionID } from "./session-id"
 
 const DEFAULT_TOAST_DURATION = 5000
 
-export const PromptAppend = Event.define({ type: "tui.prompt.append", schema: { text: Schema.String } })
+export const PromptAppend = Event.define({
+  type: "tui.prompt.append",
+  schema: {
+    text: Schema.String,
+    submit: optional(Schema.Boolean),
+    sessionID: optional(SessionID),
+  },
+})
+
+export const PromptSynthetic = Event.define({
+  type: "tui.prompt.synthetic",
+  schema: {
+    text: Schema.String,
+    sessionID: SessionID,
+    visible: optional(Schema.Boolean),
+    caller: optional(Schema.String),
+  },
+})
 
 export const CommandExecute = Event.define({
   type: "tui.command.execute",
@@ -56,4 +73,25 @@ export const SessionSelect = Event.define({
   },
 })
 
-export const Definitions = Event.inventory(PromptAppend, CommandExecute, ToastShow, SessionSelect)
+export const AgentState = Event.define({
+  type: "tui.agent.state",
+  schema: {
+    agent: Schema.String,
+    model: optional(
+      Schema.Struct({
+        providerID: Schema.String,
+        modelID: Schema.String,
+      }),
+    ),
+    variant: optional(Schema.String),
+  },
+})
+
+export const Definitions = Event.inventory(
+  PromptAppend,
+  PromptSynthetic,
+  CommandExecute,
+  ToastShow,
+  SessionSelect,
+  AgentState,
+)
