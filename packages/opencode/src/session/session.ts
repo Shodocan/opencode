@@ -221,6 +221,15 @@ const Model = Schema.Struct({
 
 export const Metadata = Schema.Record(Schema.String, Schema.Any)
 
+export type TaskOriginMetadata = {
+  "opencode.task.origin": {
+    version: 1
+    parentSessionID: string
+    tool: "task"
+    callID: string
+  }
+}
+
 const HostMetadataPrefix = "opencode."
 
 /** Public metadata cannot forge or erase host-owned correlation records. */
@@ -453,7 +462,7 @@ export interface Interface {
     title: string
     agent: string
     permission: PermissionV1.Ruleset
-    metadata: typeof Metadata.Type
+metadata: TaskOriginMetadata
   }) => Effect.Effect<Info>
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>

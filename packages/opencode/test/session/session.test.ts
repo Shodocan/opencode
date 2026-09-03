@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { EventV2 } from "@opencode-ai/core/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Deferred, Effect, Exit, Layer } from "effect"
-import { Session as SessionNs } from "@/session/session"
+import { Session as SessionNs, type TaskOriginMetadata } from "@/session/session"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -106,6 +106,37 @@ describe("session.created event", () => {
     }),
   )
 
+  it.instance("publishes the exact task-child origin in session.created", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const parent = yield* session.create({ title: "task-parent" })
+      const received = yield* Deferred.make<SessionNs.Info>()
+      const off = yield* events.listen((event) => {
+        if (event.type === SessionNs.Event.Created.type) {
+          const info = (event.data as typeof SessionNs.Event.Created.data.Type).info as SessionNs.Info
+          if (info.parentID === parent.id) Deferred.doneUnsafe(received, Effect.succeed(info))
+        }
+        return Effect.void
+      })
+      yield* Effect.addFinalizer(() => off)
+      const child = yield* session.createTaskChild({
+        parentID: parent.id,
+        title: "task-child",
+        agent: "general",
+        permission: [],
+        metadata: {
+          "opencode.task.origin": { version: 1, parentSessionID: parent.id, tool: "task", callID: "call-1" },
+        },
+      })
+      expect((yield* awaitDeferred(received, "timed out waiting for child")).metadata).toEqual({
+        "opencode.task.origin": { version: 1, parentSessionID: parent.id, tool: "task", callID: "call-1" },
+      })
+      yield* session.remove(child.id)
+      yield* session.remove(parent.id)
+    }),
+  )
+
   it.instance("emits legacy global sync payload", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
@@ -140,7 +171,12 @@ describe("session.created event", () => {
       const parent = yield* session.create({})
 
       // Define the exact approved origin object
-      const origin = { version: 1, parentSessionID: parent.id, tool: "task", callID: "test-call-id-001" }
+      const origin: TaskOriginMetadata["opencode.task.origin"] = {
+        version: 1,
+        parentSessionID: parent.id,
+        tool: "task",
+        callID: "test-call-id-001",
+      }
 
       // Register listener; capture event data + listener-time persisted row
       const received = yield* Deferred.make<{
@@ -453,6 +489,7 @@ describe("Session", () => {
 
       expect((yield* session.messages({ sessionID: beforeWrap.id })).map((msg) => msg.info.time.created)).toEqual([1])
       expect((yield* session.messages({ sessionID: afterWrap.id })).map((msg) => msg.info.time.created)).toEqual([1, 2])
+
     }),
   )
 

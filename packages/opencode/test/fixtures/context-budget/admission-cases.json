@@ -1,0 +1,79 @@
+{
+  "note": "T04 fixture C - golden budget admission rows over identical request content across two routes. 'oversizedSystemChars' grows only the system text; the canonical estimate is ceiling(chars/4) over the T02 budgetProjection. Rows are recomputed with Overflow.ContextBudget.evaluate using the frozen constants (G=16384, M=4096, H=20480, reserve floor 20000). The cross-route qualifier is providerID+modelID: the identical oversized request must be rejected on the small route and admitted on the large route, and the T04 gate must produce zero provider calls on the rejected route.",
+  "constants": { "GROWTH_HEADROOM": 16384, "SAFETY_MARGIN": 4096, "HEADROOM": 20480, "DEFAULT_RESERVED": 20000 },
+  "requests": {
+    "normal": {
+      "system": ["BASE-SYSTEM-MARKER", "USER-SYSTEM-MARKER"],
+      "messagesUserText": "CURRENT-INPUT-MARKER"
+    },
+    "oversized": {
+      "note": "system[1] is replaced by 'D' x oversizedSystemChars (deterministic growth); everything else identical",
+      "oversizedSystemChars": 300000
+    },
+    "compaction": {
+      "note": "agent.name = 'compaction'; same normal content; expected Oc = min(4096, route output 32000) = 4096",
+      "agentName": "compaction"
+    }
+  },
+  "routes": [
+    {
+      "qualifier": { "providerID": "small", "modelID": "small-m" },
+      "model": {
+        "id": "small-m",
+        "providerID": "small",
+        "api": { "id": "small-m", "url": "http://127.0.0.1:59872/v1", "npm": "@ai-sdk/openai-compatible" },
+        "limit": { "context": 32000, "input": 32000, "output": 4096 }
+      }
+    },
+    {
+      "qualifier": { "providerID": "large", "modelID": "large-m" },
+      "model": {
+        "id": "large-m",
+        "providerID": "large",
+        "api": { "id": "large-m", "url": "http://127.0.0.1:59873/v1", "npm": "@ai-sdk/openai-compatible" },
+        "limit": { "context": 262144, "input": 262144, "output": 32000 }
+      }
+    }
+  ],
+  "nativeRoutes": [
+    {
+      "qualifier": { "providerID": "openai", "modelID": "t04-small-native" },
+      "model": {
+        "id": "t04-small-native",
+        "providerID": "openai",
+        "api": { "id": "t04-small-native", "url": "http://127.0.0.1:59872/v1", "npm": "@ai-sdk/openai-compatible" },
+        "limit": { "context": 32000, "input": 32000, "output": 4096 }
+      }
+    },
+    {
+      "qualifier": { "providerID": "openai", "modelID": "t04-large-native" },
+      "model": {
+        "id": "t04-large-native",
+        "providerID": "openai",
+        "api": { "id": "t04-large-native", "url": "http://127.0.0.1:59873/v1", "npm": "@ai-sdk/openai-compatible" },
+        "limit": { "context": 262144, "input": 262144, "output": 32000 }
+      }
+    }
+  ],
+  "expectations": {
+    "normalSmall": {
+      "admitted": true,
+      "budget": 7424,
+      "note": "context limit binds: inputBudget = 32000 - max(20000, 20480) = 11520; contextBudget = 32000 - max(20000, 4096+20480) = 7424; B = 7424"
+    },
+    "normalLarge": {
+      "admitted": true,
+      "budget": 209664,
+      "note": "contextBudget = 262144 - max(20000, 32000+20480) = 209664; inputBudget = 262144 - max(20000, 20480) = 241664; B = 209664"
+    },
+    "oversizedSmall": {
+      "admitted": false,
+      "expectedError": "ContextBudgetExceededError",
+      "expectedZeroCalls": ["llmClient.stream", "doStream", "http"]
+    },
+    "oversizedLarge": {
+      "admitted": true,
+      "note": "identical oversized request is admissible on the larger route - the qualifier is route-local"
+    }
+  }
+}

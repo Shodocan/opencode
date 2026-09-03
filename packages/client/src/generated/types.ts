@@ -1178,6 +1178,29 @@ export type SessionsHistoryOutput = {
         readonly location?: { readonly directory: string; readonly workspaceID?: string }
         readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
       }
+    | {
+        readonly id: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+        readonly type: "session.next.goal.changed"
+        readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+        readonly location?: { readonly directory: string; readonly workspaceID?: string }
+        readonly data: {
+          readonly timestamp: number
+          readonly sessionID: string
+          readonly goalID: string
+          readonly revision: number
+          readonly objective: string
+          readonly phase: "active" | "paused" | "blocked" | "complete"
+          readonly maxRounds: number
+          readonly maxTokens: number
+          readonly roundsStarted: number
+          readonly tokensUsed: number
+          readonly blocked?: {
+            readonly code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+            readonly message: string
+          } | null
+        }
+      }
   >
   readonly hasMore: boolean
 }
@@ -1667,6 +1690,31 @@ export type SessionsEventsOutput =
       readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
       readonly location?: { readonly directory: string; readonly workspaceID?: string }
       readonly data: { readonly timestamp: number; readonly sessionID: string; readonly messageID: string }
+    }
+  | {
+      readonly id: string
+      readonly metadata?: { readonly [x: string]: unknown }
+      readonly type: "session.next.goal.changed"
+      readonly durable?: { readonly aggregateID: string; readonly seq: number; readonly version: number }
+      readonly location?: { readonly directory: string; readonly workspaceID?: string }
+      readonly data: {
+        readonly timestamp: number
+        readonly sessionID: string
+        readonly goalID: string
+        readonly revision: number
+        readonly objective: string
+        readonly phase: "active" | "paused" | "blocked" | "complete"
+        readonly maxRounds: number
+        readonly maxTokens: number
+        readonly roundsStarted: number
+        readonly tokensUsed: number
+        readonly blocked?:
+          | {
+              readonly code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+              readonly message: string
+            }
+          | undefined
+      }
     }
 
 export type SessionsInterruptInput = { readonly sessionID: { readonly sessionID: string }["sessionID"] }

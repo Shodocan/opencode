@@ -209,6 +209,108 @@ function reply(
 }
 
 describe("tool.task", () => {
+  it.instance("blank host call ID is rejected; an absent call ID omits the origin", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const execute = (callID?: string) =>
+        def.execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        ).pipe(Effect.exit)
+
+      // A blank call ID cannot mint a usable origin — the dispatch fails
+      // before creating any child.
+      const blank = yield* execute("   ")
+      expect(Exit.isFailure(blank)).toBe(true)
+      expect(yield* sessions.children(chat.id)).toHaveLength(0)
+
+      // An absent call ID dispatches normally, minting no origin record.
+      const noCall = yield* execute(undefined)
+      expect(Exit.isFailure(noCall)).toBe(false)
+      const kids = yield* sessions.children(chat.id)
+      expect(kids).toHaveLength(1)
+      const child = yield* sessions.get(kids[0]!.id)
+      expect(child.metadata?.["opencode.task.origin"]).toBeUndefined()
+    }),
+  )
+
+  it.instance("preserves a child creation origin while a same-parent continuation carries its new call ID", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const seen: SessionPrompt.InternalPromptInput[] = []
+      const promptOps = stubOps({ onPrompt: (input) => seen.push(input) })
+      const execute = (callID: string, task_id?: string) =>
+        def.execute(
+          { description: "inspect bug", prompt: "inspect", subagent_type: "general", task_id },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+      const first = yield* execute("call-A")
+      const child = yield* sessions.get(first.metadata.sessionId)
+      expect(child.metadata).toEqual({
+        "opencode.task.origin": { version: 1, parentSessionID: chat.id, tool: "task", callID: "call-A" },
+      })
+
+      yield* execute("call-B", child.id)
+      expect(seen.map((input) => input.taskOrigin?.taskCallID)).toEqual(["call-A", "call-B"])
+      expect((yield* sessions.get(child.id)).metadata).toEqual(child.metadata)
+    }),
+  )
+
+  it.instance("denies a task_id owned by another parent without prompting it", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const otherParent = yield* sessions.create({ title: "other parent" })
+      const foreignChild = yield* sessions.create({ parentID: otherParent.id, title: "foreign child" })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const exit = yield* def.execute(
+        { description: "inspect", prompt: "inspect", subagent_type: "general", task_id: foreignChild.id },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          callID: "call-cross-parent",
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        },
+      ).pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      expect(yield* sessions.children(chat.id)).toHaveLength(0)
+    }),
+  )
+
   it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>
@@ -306,6 +408,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-resume-call",
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
@@ -342,6 +445,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-surface-child-error",
             agent: "build",
             abort: new AbortController().signal,
             extra: {
@@ -385,6 +489,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-surface-terminal-error",
             agent: "build",
             abort: new AbortController().signal,
             extra: {
@@ -430,6 +535,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-test-07",
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps, ...extra },
@@ -489,6 +595,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-test-08",
             agent: "build",
             abort: abort.signal,
             extra: { promptOps },
@@ -527,6 +634,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-ask-call",
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps },
@@ -611,6 +719,7 @@ describe("tool.task", () => {
           {
             sessionID: child.id,
             messageID: nestedAssistant.id,
+            callID: "task-nested-depth",
             agent: "general",
             abort: new AbortController().signal,
             extra: { promptOps: stubOps() },
@@ -645,6 +754,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-test-10",
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps },
@@ -710,6 +820,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-test-11",
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps: stubOps() },
@@ -760,6 +871,7 @@ describe("tool.task", () => {
           {
             sessionID: chat.id,
             messageID: assistant.id,
+            callID: "task-test-12",
             agent: "build",
             abort: new AbortController().signal,
             extra: { promptOps },
@@ -807,6 +919,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-cancel-call",
           agent: "build",
           abort: new AbortController().signal,
           extra: {
@@ -966,6 +1079,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-missing-call",
           agent: "build",
           abort: new AbortController().signal,
           extra: { promptOps: stubOps({ text: "background done" }) },
@@ -999,6 +1113,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-permissions-call",
           agent: "build",
           abort: new AbortController().signal,
           extra: {
@@ -1038,6 +1153,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-test-17",
           agent: "build",
           abort: new AbortController().signal,
           extra: {
@@ -1077,6 +1193,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-test-18",
           agent: "build",
           abort: new AbortController().signal,
           extra: {
@@ -1116,6 +1233,7 @@ describe("tool.task", () => {
         {
           sessionID: chat.id,
           messageID: assistant.id,
+          callID: "task-test-19",
           agent: "build",
           abort: new AbortController().signal,
           extra: {
@@ -1474,7 +1592,7 @@ describe("tool.task", () => {
     }),
   )
 
-  it.instance("nonexistent and foreign-parent task_id both create fresh child with current callID origin", () =>
+  it.instance("nonexistent task_id creates fresh child with current callID origin; foreign-parent task_id is denied", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
@@ -1493,22 +1611,21 @@ describe("tool.task", () => {
       expect(c1.parentID).toBe(chat.id)
       expect(c1.metadata).toEqual(originMeta(chat.id, "call_nonexistent"))
 
-      const res2 = yield* def.execute(
-        { description: "task", prompt: "p", subagent_type: "general", task_id: foreignChild.id },
-        taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_foreign" }),
-      )
-      expect(res2.metadata.sessionId).not.toBe(foreignChild.id)
-      const c2 = yield* sessions.get(res2.metadata.sessionId)
-      expect(c2.parentID).toBe(chat.id)
-      expect(c2.metadata).toEqual(originMeta(chat.id, "call_foreign"))
+      const exit2 = yield* def
+        .execute(
+          { description: "task", prompt: "p", subagent_type: "general", task_id: foreignChild.id },
+          taskCtx({ sessionID: chat.id, messageID: assistant.id, callID: "call_foreign" }),
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(exit2)).toBe(true)
 
       const foreignKids = yield* sessions.children(foreignParent.id)
       expect(foreignKids).toHaveLength(1)
       expect(foreignKids[0]?.id).toBe(foreignChild.id)
 
       const kids = yield* sessions.children(chat.id)
-      expect(kids).toHaveLength(2)
-      expect(kids.map((k) => k.id).sort()).toEqual([res1.metadata.sessionId, res2.metadata.sessionId].sort())
+      expect(kids).toHaveLength(1)
+      expect(kids[0]?.id).toBe(res1.metadata.sessionId)
 
       yield* sessions.remove(foreignChild.id)
       yield* sessions.remove(foreignParent.id)

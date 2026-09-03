@@ -7,10 +7,25 @@ import { SessionTodo } from "../src/session-todo"
 import { SessionV1 } from "../src/session-v1"
 import { WorkspaceEvent } from "../src/workspace-event"
 
+const InternalSessionEvent = SessionEvent as typeof SessionEvent & {
+  InternalDurableDefinitions?: readonly { type: string; durable?: { version: number; aggregate: string } }[]
+  CompactionFinalized?: { type: string; durable?: { version: number; aggregate: string } }
+  ContextBudgetLineage?: { type: string; durable?: { version: number; aggregate: string } }
+}
+
+// T06 RED contract: the lineage event is the +2 internal durable entry. The
+// sentinel keeps the failure behavioral (the missing event) rather than a
+// load or environment error.
+function lineageDefinition() {
+  const definition = InternalSessionEvent.ContextBudgetLineage
+  if (!definition) throw new Error("T06 RED: missing ContextBudgetLineage internal durable event")
+  return definition
+}
+
 describe("public event manifest", () => {
   test("owns the complete public event surface", () => {
-    expect(EventManifest.ServerDefinitions.length).toBe(60) // +1 fork: session.next.goal.changed
-    expect(EventManifest.Definitions.length).toBe(92) // +1 fork: session.next.goal.changed
+    expect(EventManifest.ServerDefinitions.length).toBe(60) // upstream v1.18.27 + 2 fork events (goal.changed, stop_recovery)
+    expect(EventManifest.Definitions.length).toBe(92) // upstream v1.18.27 + 2 fork events (goal.changed, stop_recovery)
     expect(SessionV1.Event.Definitions).toEqual([
       SessionV1.Event.Created,
       SessionV1.Event.Updated,
@@ -23,8 +38,8 @@ describe("public event manifest", () => {
       SessionV1.Event.Diff,
       SessionV1.Event.Error,
     ])
-    expect(EventManifest.Latest.size).toBe(92) // +1 fork: session.next.goal.changed
-    expect(EventManifest.Durable.size).toBe(37) // +1 fork: session.next.goal.changed
+    expect(EventManifest.Latest.size).toBe(92) // upstream v1.18.27 + 2 fork events (goal.changed, stop_recovery)
+    expect(EventManifest.Durable.size).toBe(39) // upstream v1.18.27 + 2 fork durables (goal.changed, stop_recovery)
   })
 
   test("uses canonical definitions for current public events", () => {
@@ -42,9 +57,6 @@ describe("public event manifest", () => {
     expect(Reference.Event.Definitions).toEqual([Reference.Event.Updated])
     expect(EventManifest.Latest.has("ide.installed")).toBe(false)
     expect(IdeEvent.Definitions).toEqual([IdeEvent.Installed])
-    // FORK FEATURE (13) autonomy-stack: session.next.goal.changed is appended to the end of
-    // SessionEvent.Definitions, which sits immediately before the SessionV1 live events in the
-    // composed manifest -- so these three shift by exactly 1 (44..46 upstream -> 45..47 here).
     expect(EventManifest.Definitions.slice(45, 48)).toEqual([
       SessionV1.Event.PartDelta,
       SessionV1.Event.Diff,
@@ -52,5 +64,35 @@ describe("public event manifest", () => {
     ])
     expect(EventManifest.Durable.has("session.next.step.ended.1")).toBe(false)
     expect(EventManifest.Durable.get("session.next.step.ended.2")).toBe(SessionEvent.Step.Ended)
+  })
+
+  test("keeps internal durable events out of the public event inventories", () => {
+    const internal = InternalSessionEvent.InternalDurableDefinitions
+    const finalized = InternalSessionEvent.CompactionFinalized
+    const lineage = lineageDefinition()
+
+    // Exactly two internal durable events (the T05 +1 CompactionFinalized and
+    // the T06 +2 ContextBudgetLineage): both live only in
+    // InternalDurableDefinitions, never in the public inventories.
+    expect(internal).toBeDefined()
+    expect(finalized).toBeDefined()
+    expect(internal).toContain(finalized)
+    expect(internal).toContain(lineage)
+    expect(internal).toHaveLength(2)
+    expect(finalized).toMatchObject({ type: "session.next.compaction.finalized", durable: { aggregate: "sessionID", version: 1 } })
+    expect(lineage).toMatchObject({ type: "session.next.context-budget.lineage", durable: { aggregate: "sessionID", version: 1 } })
+    expect(EventManifest.Definitions.some((definition) => definition.type === finalized?.type)).toBe(false)
+    expect(SessionEvent.Definitions.some((definition) => definition.type === finalized?.type)).toBe(false)
+    expect(SessionEvent.DurableDefinitions.some((definition) => definition.type === finalized?.type)).toBe(false)
+    expect(EventManifest.Definitions.some((definition) => definition.type === lineage.type)).toBe(false)
+    expect(SessionEvent.Definitions.some((definition) => definition.type === lineage.type)).toBe(false)
+    expect(SessionEvent.DurableDefinitions.some((definition) => definition.type === lineage.type)).toBe(false)
+    // Public durable inventory: 28 Session durable (upstream v1.18.27) + 2 fork
+    // durable (stop_recovery, goal.changed); the storage-replay manifest gains
+    // exactly the two internal entries (37 public durable + 2 internal).
+    expect(SessionEvent.DurableDefinitions).toHaveLength(30)
+    expect(EventManifest.Durable.size).toBe(39)
+    expect(EventManifest.Durable.has("session.next.compaction.finalized.1")).toBe(true)
+    expect(EventManifest.Durable.has("session.next.context-budget.lineage.1")).toBe(true)
   })
 })

@@ -314,6 +314,30 @@ const layer = Layer.effectDiscard(
         const messageID = event.data.part.messageID
         const sessionID = event.data.part.sessionID
         const data = partData(event.data.part)
+        // T05 — deferred compaction finalization persists the summary message
+        // atomically with its CompactionFinalized checkpoint, so a mid-stream
+        // summary part can project before the parent message row exists.
+        // Backfill a placeholder so the part's foreign key holds; the
+        // authoritative MessageUpdated upserts the full message in place.
+        const parent = yield* db
+          .select({ id: MessageTable.id })
+          .from(MessageTable)
+          .where(eq(MessageTable.id, messageID))
+          .get()
+          .pipe(Effect.orDie)
+        if (!parent) {
+          yield* db
+            .insert(MessageTable)
+            .values({
+              id: messageID,
+              session_id: sessionID,
+              time_created: event.data.time,
+              data: { role: "assistant", time: { created: event.data.time } } as Omit<SessionV1.Info, "id" | "sessionID">,
+            })
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+        }
         const row = yield* db.select().from(PartTable).where(eq(PartTable.id, id)).get().pipe(Effect.orDie)
         yield* db
           .insert(PartTable)
@@ -392,7 +416,30 @@ const layer = Layer.effectDiscard(
     yield* events.project(SessionEvent.Reasoning.Started, (event) => run(db, event))
     yield* events.project(SessionEvent.Reasoning.Ended, (event) => run(db, event))
     // yield* events.project(SessionEvent.Retried, (event) => run(db, event))
-    yield* events.project(SessionEvent.Compaction.Ended, (event) => run(db, event))
+    // T05 — the CompactionFinalized checkpoint pre-creates the parent user
+    // row (seq S-2) inside its own event transaction, so this creator event
+    // (messageID = parent) legitimately finds the row already projected.
+    // Skip the append in that case; the checkpoint row is authoritative.
+    // Every other creator event keeps the fail-closed ID-reuse contract.
+    yield* events.project(SessionEvent.Compaction.Ended, (event) =>
+      Effect.gen(function* () {
+        if (event.durable === undefined)
+          return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        const existing = yield* db
+          .select({ id: SessionMessageTable.id })
+          .from(SessionMessageTable)
+          .where(
+            and(
+              eq(SessionMessageTable.id, SessionMessage.ID.make(event.data.messageID)),
+              eq(SessionMessageTable.session_id, event.data.sessionID),
+            ),
+          )
+          .get()
+          .pipe(Effect.orDie)
+        if (existing) return
+        yield* run(db, event)
+      }),
+    )
     yield* events.project(SessionEvent.RevertEvent.Staged, (event) =>
       db
         .update(SessionTable)
@@ -449,6 +496,50 @@ const layer = Layer.effectDiscard(
           .where(eq(SessionTable.id, event.data.sessionID))
           .run()
           .pipe(Effect.orDie)
+      }),
+    )
+    // T05 — CompactionFinalized checkpoint: writes the complete final state
+    // (marker user message, compaction marker, summary assistant) directly
+    // into the session message table in this event's own transaction. Seqs
+    // S-2 / S-1 / S keep the checkpoint contiguous with the event's durable
+    // seq S — the assistant row carries S and becomes the new compaction
+    // boundary — and onConflictDoNothing keeps replays byte-identical.
+    yield* events.project(SessionEvent.CompactionFinalized, (event) =>
+      Effect.gen(function* () {
+        if (event.durable === undefined)
+          return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        const seq = event.durable.seq
+        const sessionID = event.data.sessionID
+        // All three rows share one logical moment; the ±1ms offsets give them
+        // a deterministic user → marker → assistant ordering under any index
+        // scan (the (session_id, time_created, id) index otherwise falls back
+        // to id order when the timestamps tie).
+        const stamp = DateTime.toEpochMillis(event.data.timestamp)
+        const rows = [
+          { message: event.data.compaction.message, seqOffset: -2, timeOffset: -1 },
+          { message: event.data.compaction.marker, seqOffset: -1, timeOffset: 0 },
+          { message: event.data.compaction.assistant, seqOffset: 0, timeOffset: 1 },
+        ]
+        for (const row of rows) {
+          const encoded = encodeMessage(row.message)
+          const { id, type, ...data } = encoded
+          yield* db
+            .insert(SessionMessageTable)
+            .values({
+              id: SessionMessage.ID.make(id),
+              session_id: sessionID,
+              type,
+              seq: seq + row.seqOffset,
+              time_created: stamp + row.timeOffset,
+              // Pin the updated stamp too: the column default is wall-clock,
+              // which would break byte-identical cold-replay reconstruction.
+              time_updated: stamp + row.timeOffset,
+              data,
+            })
+            .onConflictDoNothing()
+            .run()
+            .pipe(Effect.orDie)
+        }
       }),
     )
   }),

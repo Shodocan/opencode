@@ -12,7 +12,7 @@ import { Snapshot } from "@/snapshot"
 import { Session } from "./session"
 import { LLM } from "./llm"
 import { MessageV2 } from "./message-v2"
-import { isOverflow } from "./overflow"
+import { CompactionImpossibleError, ContextBudgetExceededError, isOverflow } from "./overflow"
 import { PartID } from "./schema"
 import type { SessionID } from "./schema"
 import { SessionRetry } from "./retry"
@@ -119,6 +119,16 @@ const layer = Layer.effect(
           providerID: input.model.providerID,
           aborted,
         })
+
+      // T06 session boundary: the internal budget errors (final pre-network
+      // admission and bounded planner failures) are internal-only; at the
+      // session boundary they surface as the public ContextOverflowError so
+      // the overflow repair path applies. The public shape/text is preserved
+      // — internal names never reach message info.
+      const boundaryError = (e: unknown, parsed: ReturnType<typeof parse>) =>
+        e instanceof ContextBudgetExceededError || e instanceof CompactionImpossibleError
+          ? new SessionV1.ContextOverflowError({ message: "Input exceeds context window of this model" }).toObject()
+          : parsed
 
       const settleToolCall = Effect.fn("SessionProcessor.settleToolCall")(function* (toolCallID: string) {
         const done = ctx.toolcalls[toolCallID]?.done
@@ -448,6 +458,20 @@ const layer = Layer.effect(
           case "step-finish": {
             const completedSnapshot = yield* snapshot.track()
             yield* Effect.forEach(Object.keys(ctx.reasoningMap), finishReasoning)
+            // Anthropic reports thinking blocks it removed before the model saw the
+            // prompt. Prefix mismatches mean opencode changed history behind a signed
+            // block; log them so the churn can be tracked down.
+            const dropped = isRecord(value.providerMetadata?.anthropic)
+              ? value.providerMetadata.anthropic.inputTransformations
+              : undefined
+            if (Array.isArray(dropped) && dropped.length > 0) {
+              yield* Effect.logWarning("thinking blocks dropped by provider", {
+                sessionID: ctx.sessionID,
+                messageID: ctx.assistantMessage.id,
+                model: ctx.model.id,
+                transformations: JSON.stringify(dropped),
+              })
+            }
             const usage = Session.getUsage({
               model: ctx.model,
               usage: value.usage ?? new Usage({}),
@@ -616,7 +640,7 @@ const layer = Layer.effect(
           error: errorMessage(e),
           stack: e instanceof Error ? e.stack : undefined,
         })
-        const error = parse(e)
+        const error = boundaryError(e, parse(e))
         if (SessionV1.ContextOverflowError.isInstance(error)) {
           if ((yield* config.get()).compaction?.auto === false && !ctx.assistantMessage.summary) {
             ctx.assistantMessage.error = error

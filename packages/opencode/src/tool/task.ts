@@ -16,6 +16,7 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { NotFoundError } from "@/storage/storage"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -397,13 +398,19 @@ export const TaskTool = Tool.define(
 
       // Resolve a resumable child session, if a task_id was passed. Only a
       // session whose parent is THIS dispatching session is a legitimate
-      // resume — anything else (no parent match, or not found) is treated as
-      // a fresh dispatch so gates still evaluate (F2: a driver LLM cannot
-      // "resume" its way past a gate by naming an unrelated SessionID).
+      // resume. A missing task_id is a fresh dispatch (gates still evaluate);
+      // a foreign-parent task_id fails the dispatch outright (F2: a driver LLM
+      // cannot "resume" its way past a gate by naming an unrelated SessionID).
       const requestedResume = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
         : undefined
       const session = requestedResume && requestedResume.parentID === ctx.sessionID ? requestedResume : undefined
+
+      // A task_id naming a session owned by another parent is rejected: only the
+      // direct children of the calling session may be resumed.
+      if (requestedResume && requestedResume.parentID !== ctx.sessionID) {
+        return yield* Effect.fail(new Error("TaskTool task_id must name a direct child of the calling session"))
+      }
 
       // FORK FEATURE (10) gates — workflow-agnostic dispatch enforcement.
       // Evaluated at dispatch time (after the subagents allow-list, before the
@@ -451,7 +458,6 @@ export const TaskTool = Tool.define(
           }
         }
       }
-
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,

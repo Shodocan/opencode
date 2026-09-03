@@ -49,6 +49,7 @@ export type Event =
   | EventSessionNextRevertStaged
   | EventSessionNextRevertCleared
   | EventSessionNextRevertCommitted
+  | EventSessionNextGoalChanged
   | EventMessagePartDelta
   | EventSessionDiff
   | EventSessionError
@@ -1233,6 +1234,26 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.goal.changed"
+        properties: {
+          timestamp: number
+          sessionID: string
+          goalID: string
+          revision: number
+          objective: string
+          phase: "active" | "paused" | "blocked" | "complete"
+          maxRounds: number
+          maxTokens: number
+          roundsStarted: number
+          tokensUsed: number
+          blocked?: {
+            code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+            message: string
+          }
+        }
+      }
+    | {
+        id: string
         type: "message.part.delta"
         properties: {
           sessionID: string
@@ -1703,6 +1724,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextRevertStaged
     | SyncEventSessionNextRevertCleared
     | SyncEventSessionNextRevertCommitted
+    | SyncEventSessionNextGoalChanged
 }
 
 /**
@@ -1775,6 +1797,8 @@ export type AgentConfig = {
   permission?: PermissionConfig
   fallback?: Array<string>
   stopRecovery?: boolean
+  goal?: boolean
+  ralph?: boolean
   can_spawn_subagents?: boolean
   subagents?: Array<string>
   gates?: unknown
@@ -1826,11 +1850,14 @@ export type ProviderConfig = {
      */
     timeout?: number | false
     /**
-     * Timeout in milliseconds to wait for response headers. Provider integrations may set defaults. Set to false to disable timeout.
+     * Timeout in milliseconds to wait for response headers (default: 300000). Set to false to disable timeout.
      */
     headerTimeout?: number | false
-    chunkTimeout?: number
-    [key: string]: unknown | string | boolean | number | false | number | false | number | undefined
+    /**
+     * Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
+     */
+    chunkTimeout?: number | false
+    [key: string]: unknown | string | boolean | number | false | number | false | number | false | undefined
   }
   models?: {
     [key: string]: {
@@ -2113,6 +2140,15 @@ export type Config = {
       enabled?: boolean
       text?: string
     }
+  }
+  goal?: {
+    enabled?: boolean
+    maxRounds?: number
+    maxTokens?: number
+  }
+  ralph?: {
+    enabled?: boolean
+    maxRounds?: number
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -2456,6 +2492,8 @@ export type Agent = {
   canSpawnSubagents?: boolean
   subagents?: Array<string>
   stopRecovery?: boolean
+  goal?: boolean
+  ralph?: boolean
   gates?: unknown
   disableModelOverride?: boolean
   model?: {
@@ -2892,6 +2930,7 @@ export type SessionDurableEvent =
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
+  | SessionNextGoalChanged
 
 export type SessionHistory = {
   data: Array<SessionDurableEvent>
@@ -3024,6 +3063,7 @@ export type V2Event =
   | SessionNextRevertStaged
   | SessionNextRevertCleared
   | SessionNextRevertCommitted
+  | SessionNextGoalChanged
   | MessagePartDelta
   | SessionDiff
   | SessionError
@@ -4024,6 +4064,33 @@ export type SyncEventSessionNextRevertCommitted = {
   }
 }
 
+export type SyncEventSessionNextGoalChanged = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.goal.changed.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      goalID: string
+      revision: number
+      objective: string
+      phase: "active" | "paused" | "blocked" | "complete"
+      maxRounds: number
+      maxTokens: number
+      roundsStarted: number
+      tokensUsed: number
+      blocked?: {
+        code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+        message: string
+      }
+    }
+  }
+}
+
 export type ConfigV2ReferenceGit = {
   repository: string
   branch?: string
@@ -5010,6 +5077,36 @@ export type SessionNextRevertCommitted = {
     timestamp: number
     sessionID: string
     messageID: string
+  }
+}
+
+export type SessionNextGoalChanged = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.goal.changed"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    goalID: string
+    revision: number
+    objective: string
+    phase: "active" | "paused" | "blocked" | "complete"
+    maxRounds: number
+    maxTokens: number
+    roundsStarted: number
+    tokensUsed: number
+    blocked?: {
+      code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+      message: string
+    }
   }
 }
 
@@ -6962,6 +7059,27 @@ export type EventSessionNextRevertCommitted = {
     timestamp: number
     sessionID: string
     messageID: string
+  }
+}
+
+export type EventSessionNextGoalChanged = {
+  id: string
+  type: "session.next.goal.changed"
+  properties: {
+    timestamp: number
+    sessionID: string
+    goalID: string
+    revision: number
+    objective: string
+    phase: "active" | "paused" | "blocked" | "complete"
+    maxRounds: number
+    maxTokens: number
+    roundsStarted: number
+    tokensUsed: number
+    blocked?: {
+      code: "round_budget_exceeded" | "token_budget_exceeded" | "halted" | "model_reported"
+      message: string
+    }
   }
 }
 
