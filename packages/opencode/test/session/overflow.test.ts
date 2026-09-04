@@ -592,6 +592,10 @@ describe("internal typed budget errors", () => {
 
 // ─── Compatibility: usable / isOverflow adapters ─────────────────────────────
 
+// Where the default 80% threshold clamp would move the legacy boundary,
+// these tests pin `threshold: 1` (100% of context) to isolate the
+// reserved-window boundary math; the threshold clamp itself is covered by
+// the auto-compaction threshold tests.
 describe("compatibility — usable adapter retains frozen semantics", () => {
   test("without an input limit: usable = context - route output", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
@@ -600,17 +604,17 @@ describe("compatibility — usable adapter retains frozen semantics", () => {
 
   test("with an input limit: usable = input - min(default reserve, route output)", () => {
     const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
-    expect(Overflow.usable({ cfg: cfg(), model })).toBe(180_000)
+    expect(Overflow.usable({ cfg: cfg({ threshold: 1 }), model })).toBe(180_000)
   })
 
   test("configured compaction.reserved replaces the default reserve", () => {
     const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
-    expect(Overflow.usable({ cfg: cfg({ reserved: 30_000 }), model })).toBe(170_000)
+    expect(Overflow.usable({ cfg: cfg({ threshold: 1, reserved: 30_000 }), model })).toBe(170_000)
   })
 
   test("outputTokenMax shrinks the applied reserve", () => {
     const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
-    expect(Overflow.usable({ cfg: cfg(), model, outputTokenMax: 4_096 })).toBe(195_904)
+    expect(Overflow.usable({ cfg: cfg({ threshold: 1 }), model, outputTokenMax: 4_096 })).toBe(195_904)
   })
 
   test("unknown context window yields zero usable tokens", () => {
@@ -629,9 +633,9 @@ describe("compatibility — isOverflow adapter retains frozen semantics", () => 
 
   test("token count includes cache reads to reach the boundary", () => {
     const model = createModel({ context: 200_000, output: 32_000 })
-    expect(Overflow.isOverflow({ cfg: cfg(), model, tokens: tokens(160_000, 8_000) })).toBe(true)
-    expect(Overflow.isOverflow({ cfg: cfg(), model, tokens: tokens(167_999, 0, 1) })).toBe(true)
-    expect(Overflow.isOverflow({ cfg: cfg(), model, tokens: tokens(167_998, 0, 1) })).toBe(false)
+    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(160_000, 8_000) })).toBe(true)
+    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(167_999, 0, 1) })).toBe(true)
+    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(167_998, 0, 1) })).toBe(false)
   })
 
   test("unknown context window never overflows", () => {

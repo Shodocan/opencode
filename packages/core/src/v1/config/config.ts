@@ -161,11 +161,21 @@ export const Info = Schema.Struct({
       preserve_recent_tokens: Schema.optional(NonNegativeInt).annotate({
         description: "Maximum number of tokens from recent turns to preserve verbatim after compaction",
       }),
-      reserved: Schema.optional(NonNegativeInt).annotate({
-        description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
-      }),
-    }),
-  ),
+       reserved: Schema.optional(NonNegativeInt).annotate({
+         description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
+       }),
+       threshold: Schema.optional(
+         Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1)).annotate({
+           description:
+             "Auto-compaction threshold as a fraction (0-1) of the model's context window. Automatic compaction triggers when the previous turn's token usage reaches this fraction of the context (default: 0.8).",
+         }),
+       ),
+       thresholds: Schema.optional(Schema.Record(Schema.String, PositiveInt)).annotate({
+         description:
+           "Absolute auto-compaction thresholds in tokens per model, keyed by 'providerID/modelID'. Overrides `threshold` for the matched model.",
+       }),
+     }),
+   ),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

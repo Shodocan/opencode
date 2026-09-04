@@ -9,6 +9,20 @@ import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
 
+// Auto-compaction triggers at 80% of the model's context window unless the
+// config selects another point: `compaction.thresholds["providerID/modelID"]`
+// (absolute tokens, per model) wins over `compaction.threshold` (fraction of
+// the context window). Zero/absent context limits have no threshold.
+export const DEFAULT_COMPACT_THRESHOLD = 0.8
+
+export function compactThreshold(input: { cfg: ConfigV1.Info; model: Provider.Model }): number {
+  const context = input.model.limit.context
+  if (context <= 0) return Number.POSITIVE_INFINITY
+  const override = input.cfg.compaction?.thresholds?.[`${input.model.providerID}/${input.model.id}`]
+  if (override !== undefined) return Math.max(0, Math.floor(override))
+  return Math.max(0, Math.floor(context * (input.cfg.compaction?.threshold ?? DEFAULT_COMPACT_THRESHOLD)))
+}
+
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context
   if (context === 0) return 0
@@ -16,9 +30,12 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
   const reserved =
     input.cfg.compaction?.reserved ??
     Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
-  return input.model.limit.input
+  const base = input.model.limit.input
     ? Math.max(0, input.model.limit.input - reserved)
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
+  // The threshold only lowers the trigger point; the reserved-window bound
+  // still caps it from above.
+  return Math.min(base, Math.floor(compactThreshold(input)))
 }
 
 export function isOverflow(input: {

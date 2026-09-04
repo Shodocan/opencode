@@ -734,4 +734,58 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
   )
 })
 
+describe("auto-compaction threshold", () => {
+  it.instance("usage at the default 80% threshold auto-compacts without a provider error", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "QCB threshold auto-compact",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // Two small turns; the provider reports heavy usage on the second.
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "QCB-THRESH-1" }],
+      })
+      yield* llm.push(reply().text("history reply 1").stop())
+      yield* prompt.loop({ sessionID: chat.id })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "QCB-THRESH-2" }],
+      })
+      // 210,000 total usage: above the default 80% threshold
+      // (0.8 x 262,144 = 209,715) but below the legacy usable boundary
+      // (262,144 - 32,000 = 230,144) — only the threshold can trigger here.
+      yield* llm.push(reply().text("history reply 2").usage({ input: 150_000, output: 60_000 }).stop())
+      yield* llm.push(reply().text("ok").stop()) // compaction summary
+      yield* llm.push(reply().text("rebuilt ok").stop()) // the pending turn, rebuilt on the compacted history
+      const compacted = yield* prompt.loop({ sessionID: chat.id })
+      expect((yield* llm.hits)).toHaveLength(4) // history x2 + one summary + one rebuilt turn
+      if (compacted.info.role === "assistant") expect(compacted.info.error).toBeUndefined()
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(1)
+
+      // The next prompt dispatches against the compacted history — no
+      // provider error, no second compaction.
+      yield* llm.push(reply().text("final ok").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(5) // history x2 + summary + rebuilt turn + final dispatch
+      expect(maxTokens(hits[2]!.body)).toBe(4_096)
+      expect(maxTokens(hits[3]!.body)).toBe(32_000)
+      expect(maxTokens(hits[4]!.body)).toBe(32_000)
+    }),
+    120_000,
+  )
+})
+
 

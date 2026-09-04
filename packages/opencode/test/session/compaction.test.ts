@@ -620,7 +620,7 @@ describe("session.compaction.isOverflow", () => {
     ),
   )
 
-  it.live(
+   it.live(
     "returns false when compaction.auto is disabled",
     provideTmpdirInstance(
       () =>
@@ -633,6 +633,114 @@ describe("session.compaction.isOverflow", () => {
       {
         config: {
           compaction: { auto: false },
+        },
+      },
+    ),
+  )
+
+  // ─── Auto-compaction threshold ─────────────────────────────────────────
+  // compaction.threshold (fraction of the context window, default 0.8) and
+  // compaction.thresholds (absolute tokens per "providerID/modelID") lower
+  // the usable boundary. They never raise it above the reserved-window bound.
+
+  it.live(
+    "default threshold triggers at 80% of context",
+    provideTmpdirInstance(() =>
+      Effect.gen(function* () {
+        const compact = yield* SessionCompaction.Service
+        // usable = min(256k - 32k = 224k, 80% of 256k = 204,800)
+        const model = createModel({ context: 256_000, output: 32_000 })
+        expect(
+          yield* compact.isOverflow({ tokens: { input: 150_000, output: 60_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+        ).toBe(true)
+        expect(
+          yield* compact.isOverflow({ tokens: { input: 150_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+        ).toBe(false)
+      }),
+    ),
+  )
+
+  it.live(
+    "threshold fraction lowers the trigger point below the legacy usable boundary",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          // Legacy usable = 1,000k - 384k = 616k; 40% threshold = 400k.
+          const model = createModel({ context: 1_000_000, output: 384_000 })
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 380_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(true)
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 350_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(false)
+        }),
+      {
+        config: {
+          compaction: { threshold: 0.4 },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "per-model absolute threshold override applies to the matched model only",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          // Legacy usable = 224k; override to 200k for test/test-model.
+          const model = createModel({ context: 256_000, output: 32_000 })
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 160_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(true)
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 159_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(false)
+        }),
+      {
+        config: {
+          compaction: { thresholds: { "test/test-model": 200_000 } },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "per-model absolute threshold wins over the fraction",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          // Legacy usable = 616k; fraction 0.8 would be 800k; override = 400k.
+          const model = createModel({ context: 1_000_000, output: 384_000 })
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 380_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { threshold: 0.8, thresholds: { "test/test-model": 400_000 } },
+        },
+      },
+    ),
+  )
+
+  it.live(
+    "a higher threshold never raises usable above the reserved-window bound",
+    provideTmpdirInstance(
+      () =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          // Threshold 1.0 = 100k, but the reserved-window bound is 100k - 32k = 68k.
+          const model = createModel({ context: 100_000, output: 32_000 })
+          expect(
+            yield* compact.isOverflow({ tokens: { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+          ).toBe(true)
+        }),
+      {
+        config: {
+          compaction: { threshold: 1 },
         },
       },
     ),
