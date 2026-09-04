@@ -468,6 +468,59 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
     120_000,
   )
 
+  it.instance("a later overflow compacts again instead of stopping (lineage gate is evidence-only)", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "QCB repeat overflow",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* buildHistory(prompt, llm, chat.id)
+      expect(yield* llm.hits).toHaveLength(2)
+      // First overflow: one compaction, one rebuild, admitted.
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("rebuild ok").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      yield* prompt.loop({ sessionID: chat.id })
+      expect((yield* llm.hits)).toHaveLength(5)
+
+      // Second prompt in the same session: the durable lineage one-shot is
+      // spent (compaction_count === 1), so the old behavior terminated with
+      // the public overflow error. Now the overflow must start compaction
+      // right away — one more compaction, one more rebuild, no error.
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      yield* llm.push(reply().text("ok2"))
+      yield* llm.push(reply().text("rebuild ok2").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const hits = yield* llm.hits
+      // history×2 + (overflow, compaction, rebuild)×2
+      expect(hits).toHaveLength(8)
+      expect(maxTokens(hits[3]!.body)).toBe(4_096)
+      expect(maxTokens(hits[6]!.body)).toBe(4_096)
+      expect(maxTokens(hits[4]!.body)).toBe(32_000)
+      expect(maxTokens(hits[7]!.body)).toBe(32_000)
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      // Two compaction parts: the run never stopped on the second overflow.
+      expect(messages.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(2)
+      const rows = yield* lineageRows(chat.id)
+      if (rows.length === 0) throw new Error("T06 RED: missing durable-lineage one-shot compact/rebuild orchestration")
+      const state = decodeLineage(rows)
+      // The durable record still reflects the single settled one-shot cycle:
+      // the spent counter is terminal for RECORDING (no further durable
+      // publishes), but never for the repair itself.
+      expect(state.compaction_count).toBe(1)
+      expect(state.overflowHashes.length).toBeGreaterThanOrEqual(1)
+    }),
+    120_000,
+  )
+
   itNative.instance("the same one-shot cycle completes on the native runtime", () =>
     Effect.gen(function* () {
       // Fixture/transport assumptions for the native runtime:

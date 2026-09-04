@@ -337,10 +337,12 @@ const layer = Layer.effect(
       })
 
     // Record the overflow outcome (before any repair) and run the pre-repair
-    // gates. Returns "terminal" when the one-shot cycle must stop: a
+    // gates. Returns "terminal" when the durable record must be skipped: a
     // pre-dispatch entry is missing, the counter is already spent, the hash
     // is a known pending/overflow hash (restart cannot redispatch it), or
-    // durable output appeared since the overflow was recorded.
+    // durable output appeared since the overflow was recorded. Skipping the
+    // record does NOT stop the run — repair is gated only on the bounded
+    // planner, so an overflow always starts compaction.
     const lineageOverflow = Effect.fn("SessionPrompt.lineageOverflow")(function* (
       draft: LineageDraft,
       userMessageID: string,
@@ -1655,14 +1657,14 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result === "compact") {
-              // T06: record the overflow before any repair; the bounded
-              // planner gates the one-shot repair on an unchanged durable
-              // output watermark.
-              const recorded = yield* lineageOverflow(lineageDraft, lastUser.id)
-              if (recorded === "terminal") {
-                yield* lineageTerminate(msg)
-                return "break" as const
-              }
+              // T06: record the overflow before any repair. The durable
+              // lineage state is evidence-only and never stops the run: an
+              // overflow (provider-reported or budget-gate rejection) starts
+              // compaction right away and the loop re-evaluates on the
+              // rebuilt request. Only a bounded-planner verdict below remains
+              // terminal — compaction that cannot reduce the estimate would
+              // spin forever.
+              yield* lineageOverflow(lineageDraft, lastUser.id)
               const cfg = yield* config.get()
               try {
                 const plan = CompactionPlanner.plan({
