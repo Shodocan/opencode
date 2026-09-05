@@ -1049,7 +1049,11 @@ function plannerPlan(input: CompactionPlannerInput): CompactionPlannerPlan {
   // without any history content: only the skeleton, prompt wrapper, and reserve.
   const overheadEstimate = estimateRequest(plannerRequest([], [], promptText, -1))
   if (overheadEstimate > budget) fail("fixed-overhead", { estimate: overheadEstimate, chunkCount: 0 })
-  const latestRequest = requestFor(latestChat, -1)
+  // Latest-turn admission measures the turn exactly once — the same shape as
+  // every real compaction request (chunk + latest tail + prompt). Passing the
+  // turn through requestFor would measure it twice (chunk slot + tail slot)
+  // and reject turns between half-budget and budget.
+  const latestRequest = plannerRequest([], latestChat, promptText, -1)
   const latestEstimate = estimateRequest(latestRequest)
   if (latestEstimate > budget) fail("latest-turn-too-large", { estimate: latestEstimate, chunkCount: 0 })
 
