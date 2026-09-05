@@ -1,7 +1,7 @@
 export * as ConfigCompaction from "./compaction"
 
 import { Schema } from "effect"
-import { NonNegativeInt, PositiveInt } from "../schema"
+import { NonNegativeInt } from "../schema"
 
 const ThresholdFraction = Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))
 
@@ -15,5 +15,5 @@ export class Info extends Schema.Class<Info>("ConfigV2.Compaction")({
   keep: Keep.pipe(Schema.optional),
   buffer: NonNegativeInt.pipe(Schema.optional),
   threshold: ThresholdFraction.pipe(Schema.optional),
-  thresholds: Schema.Record(Schema.String, PositiveInt).pipe(Schema.optional),
+  thresholds: Schema.Record(Schema.String, ThresholdFraction).pipe(Schema.optional),
 }) {}

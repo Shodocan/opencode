@@ -640,8 +640,9 @@ describe("session.compaction.isOverflow", () => {
 
   // ─── Auto-compaction threshold ─────────────────────────────────────────
   // compaction.threshold (fraction of the context window, default 0.8) and
-  // compaction.thresholds (absolute tokens per "providerID/modelID") lower
-  // the usable boundary. They never raise it above the reserved-window bound.
+  // compaction.thresholds (per-model fraction keyed by "providerID/modelID")
+  // lower the usable boundary. They never raise it above the reserved-window
+  // bound.
 
   it.live(
     "default threshold triggers at 80% of context",
@@ -684,35 +685,36 @@ describe("session.compaction.isOverflow", () => {
   )
 
   it.live(
-    "per-model absolute threshold override applies to the matched model only",
+    "per-model threshold override applies to the matched model only",
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
           const compact = yield* SessionCompaction.Service
-          // Legacy usable = 224k; override to 200k for test/test-model.
+          // Legacy usable = 224k; 75% of 256k = 192k for test/test-model.
           const model = createModel({ context: 256_000, output: 32_000 })
           expect(
-            yield* compact.isOverflow({ tokens: { input: 160_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+            yield* compact.isOverflow({ tokens: { input: 152_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
           ).toBe(true)
           expect(
-            yield* compact.isOverflow({ tokens: { input: 159_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
+            yield* compact.isOverflow({ tokens: { input: 151_999, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
           ).toBe(false)
         }),
       {
         config: {
-          compaction: { thresholds: { "test/test-model": 200_000 } },
+          compaction: { thresholds: { "test/test-model": 0.75 } },
         },
       },
     ),
   )
 
   it.live(
-    "per-model absolute threshold wins over the fraction",
+    "per-model threshold wins over the global fraction",
     provideTmpdirInstance(
       () =>
         Effect.gen(function* () {
           const compact = yield* SessionCompaction.Service
-          // Legacy usable = 616k; fraction 0.8 would be 800k; override = 400k.
+          // Legacy usable = 616k; global fraction 0.8 would be 800k;
+          // per-model 0.4 = 400k wins.
           const model = createModel({ context: 1_000_000, output: 384_000 })
           expect(
             yield* compact.isOverflow({ tokens: { input: 380_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
@@ -720,7 +722,7 @@ describe("session.compaction.isOverflow", () => {
         }),
       {
         config: {
-          compaction: { threshold: 0.8, thresholds: { "test/test-model": 400_000 } },
+          compaction: { threshold: 0.8, thresholds: { "test/test-model": 0.4 } },
         },
       },
     ),

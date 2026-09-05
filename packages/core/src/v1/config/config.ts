@@ -19,6 +19,12 @@ import { ConfigSkillsV1 } from "./skills"
 
 export type Layout = ConfigLayoutV1.Layout
 
+// Fraction (0, 1] of a model's context window at which automatic compaction
+// triggers. `compaction.threshold` applies to all models;
+// `compaction.thresholds` selects a per-model fraction keyed by
+// "providerID/modelID" and wins over `threshold` for the matched model.
+const ThresholdFraction = Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))
+
 export const WellKnown = Schema.Struct({
   config: Schema.optional(Schema.Json),
   remote_config: Schema.optional(Schema.Json),
@@ -165,15 +171,17 @@ export const Info = Schema.Struct({
          description: "Token buffer for compaction. Leaves enough window to avoid overflow during compaction.",
        }),
        threshold: Schema.optional(
-         Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1)).annotate({
+         ThresholdFraction.annotate({
            description:
              "Auto-compaction threshold as a fraction (0-1) of the model's context window. Automatic compaction triggers when the previous turn's token usage reaches this fraction of the context (default: 0.8).",
          }),
        ),
-       thresholds: Schema.optional(Schema.Record(Schema.String, PositiveInt)).annotate({
-         description:
-           "Absolute auto-compaction thresholds in tokens per model, keyed by 'providerID/modelID'. Overrides `threshold` for the matched model.",
-       }),
+       thresholds: Schema.optional(
+         Schema.Record(Schema.String, ThresholdFraction).annotate({
+           description:
+             "Per-model auto-compaction thresholds as a fraction (0-1) of each model's context window, keyed by 'providerID/modelID'. Overrides `threshold` for the matched model.",
+         }),
+       ),
      }),
    ),
   experimental: Schema.optional(
