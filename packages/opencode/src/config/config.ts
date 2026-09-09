@@ -11,7 +11,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
 import { Auth } from "../auth"
 import { Env } from "../env"
 import { applyEdits, modify } from "jsonc-parser"
-import { InstallationLocal, InstallationVersion } from "@opencode-ai/core/installation/version"
+import { InstallationPluginVersion, InstallationVersion } from "@opencode-ai/core/installation/version"
 import { existsSync } from "fs"
 import { Account } from "@/account/account"
 import { isRecord } from "@/util/record"
@@ -449,14 +449,22 @@ const layer = Layer.effect(
 
           yield* ensureGitignore(dir).pipe(Effect.orDie)
 
+          const manifest = yield* fs.readJson(path.join(dir, "package.json")).pipe(Effect.orElseSucceed(() => ({})))
+          const declared =
+            isRecord(manifest) &&
+            ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"].some(
+              (field) => isRecord(manifest[field]) && Object.hasOwn(manifest[field], "@opencode-ai/plugin"),
+            )
           const dep = yield* npmSvc
             .install(dir, {
-              add: [
-                {
-                  name: "@opencode-ai/plugin",
-                  version: InstallationLocal ? undefined : InstallationVersion,
-                },
-              ],
+              add: declared
+                ? []
+                : [
+                    {
+                      name: "@opencode-ai/plugin",
+                      version: InstallationPluginVersion,
+                    },
+                  ],
             })
             .pipe(
               Effect.exit,

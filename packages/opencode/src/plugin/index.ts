@@ -22,7 +22,7 @@ import { DigitalOceanAuthPlugin } from "./digitalocean"
 import { XaiAuthPlugin } from "./xai"
 import { CerebrasPlugin } from "./cerebras"
 import { SnowflakeCortexAuthPlugin } from "./snowflake-cortex"
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Cause, Exit } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { InstanceState } from "@/effect/instance-state"
 import { errorMessage } from "@/util/error"
@@ -152,6 +152,7 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
         const input: PluginInput = {
           client,
+          workflowRuntime: { version: 1, taskStart: true, taskTerminal: true, toolError: true },
           project: ctx.project,
           worktree: ctx.worktree,
           directory: ctx.directory,
@@ -281,6 +282,29 @@ const layer = Layer.effect(
       }),
     )
 
+    const notifyErrorObservers = Effect.fn("Plugin.notifyErrorObservers")(function* (
+      hooks: Hooks[],
+      input: Parameters<NonNullable<Hooks["tool.execute.error"]>>[0],
+      output: Parameters<NonNullable<Hooks["tool.execute.error"]>>[1],
+    ) {
+      let failures: Cause.Cause<never> | undefined
+      for (const hook of hooks) {
+        const notify = hook["tool.execute.error"]
+        if (!notify) continue
+        const notification = yield* Effect.exit(Effect.promise(() => notify(input, output)))
+        if (Exit.isFailure(notification)) failures = failures
+          ? Cause.combine(failures, notification.cause)
+          : notification.cause
+      }
+      // Complete every observer before reporting failures. Keep the original
+      // tool error visible alongside any notification failure at the bridge.
+      if (failures) {
+        const notification = Cause.squash(failures)
+        return yield* Effect.die(new AggregateError([output.error, notification],
+          `${errorMessage(output.error)}; Tool error notification failed: ${errorMessage(notification)}`))
+      }
+    })
+
     const trigger = Effect.fn("Plugin.trigger")(function* <
       Name extends TriggerName,
       Input = Parameters<Required<Hooks>[Name]>[0],
@@ -288,11 +312,35 @@ const layer = Layer.effect(
     >(name: Name, input: Input, output: Output) {
       if (!name) return output
       const s = yield* InstanceState.get(state)
-      for (const hook of s.hooks) {
-        const fn = hook[name] as any
-        if (!fn) continue
-        yield* Effect.promise(async () => fn(input, output))
+      if (name === "tool.execute.error") {
+        yield* notifyErrorObservers(s.hooks,
+          input as Parameters<NonNullable<Hooks["tool.execute.error"]>>[0],
+          output as Parameters<NonNullable<Hooks["tool.execute.error"]>>[1])
+        return output
       }
+      const before = name === "tool.execute.before"
+        ? input as Parameters<NonNullable<Hooks["tool.execute.before"]>>[0]
+        : undefined
+      const taskArgs = before?.tool === "task"
+        ? structuredClone((output as { args: unknown }).args)
+        : undefined
+      yield* Effect.gen(function* () {
+        for (const hook of s.hooks) {
+          const fn = hook[name] as any
+          if (!fn) continue
+          yield* Effect.promise(async () => fn(input, output))
+        }
+      }).pipe(Effect.onExit((exit) => {
+        if (Exit.isSuccess(exit) || before?.tool !== "task") return Effect.void
+        // Earlier hooks may already have reserved this invocation. No Task can
+        // start until this ordered before chain returns, so its failure carries
+        // affirmative local proof even when no Task context was created.
+        return notifyErrorObservers(s.hooks, { ...before, args: taskArgs }, {
+          error: Cause.squash(exit.cause),
+          interrupted: Exit.hasInterrupts(exit),
+          metadata: { taskExecution: { started: false, localQuiescence: true } },
+        })
+      }))
       return output
     })
 

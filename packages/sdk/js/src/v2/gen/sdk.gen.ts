@@ -3462,12 +3462,13 @@ export class Session2 extends HeyApiClient {
   /**
    * Get session status
    *
-   * Retrieve the current status of all sessions, including active, idle, and completed states.
+   * Retrieve active session statuses, or the explicit status of one existing session in the current directory.
    */
   public status<ThrowOnError extends boolean = false>(
     parameters?: {
       directory?: string
       workspace?: string
+      sessionID?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3478,6 +3479,7 @@ export class Session2 extends HeyApiClient {
           args: [
             { in: "query", key: "directory" },
             { in: "query", key: "workspace" },
+            { in: "query", key: "sessionID" },
           ],
         },
       ],

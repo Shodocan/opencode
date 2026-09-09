@@ -33,10 +33,11 @@ import {
   PromptPayload,
   RevertPayload,
   ShellPayload,
+  StatusQuery,
   SummarizePayload,
   UpdatePayload,
 } from "../groups/session"
-import { PermissionNotFoundError } from "../errors"
+import { PermissionNotFoundError, notFound } from "../errors"
 import * as SessionError from "./session-errors"
 
 const tryParseJson = (text: string) =>
@@ -74,8 +75,13 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       })
     })
 
-    const status = Effect.fn("SessionHttpApi.status")(function* () {
-      return Object.fromEntries(yield* statusSvc.list())
+    const status = Effect.fn("SessionHttpApi.status")(function* (ctx: { query: typeof StatusQuery.Type }) {
+      if (!ctx.query.sessionID) return Object.fromEntries(yield* statusSvc.list())
+      const info = yield* requireSession(ctx.query.sessionID)
+      if (info.directory !== (yield* InstanceState.directory)) {
+        return yield* notFound(`Session not found in the current directory: ${ctx.query.sessionID}`)
+      }
+      return { [ctx.query.sessionID]: yield* statusSvc.get(ctx.query.sessionID) }
     })
 
     const requireSession = Effect.fn("SessionHttpApi.requireSession")(function* (sessionID: SessionID) {

@@ -2423,6 +2423,29 @@ noLLMServer.instance(
       if (override.info.role !== "user") throw new Error("expected user message")
       expect(override.info.model.variant).toBe("high")
 
+      const exact = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+        taskModelExact: true,
+        noReply: true,
+        parts: [{ type: "text", text: "exact route without variant" }],
+      })
+      if (exact.info.role !== "user") throw new Error("expected user message")
+      expect(exact.info.model.variant).toBeUndefined()
+      expect((yield* sessions.get(session.id)).model?.variant).toBe("default")
+
+      const legacy = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("test"), modelID: ModelV2.ID.make("test-model") },
+        noReply: true,
+        parts: [{ type: "text", text: "later invocation inherits agent variant" }],
+      })
+      if (legacy.info.role !== "user") throw new Error("expected user message")
+      expect(legacy.info.model.variant).toBe("xhigh")
+      expect((yield* sessions.get(session.id)).model?.variant).toBe("xhigh")
+
       yield* sessions.remove(session.id)
     }),
   {

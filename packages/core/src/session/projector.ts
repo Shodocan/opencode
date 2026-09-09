@@ -14,8 +14,85 @@ import { SessionInput } from "./input"
 import { WorkspaceV2 } from "../workspace"
 import { MessageTable, PartTable, SessionInputTable, SessionMessageTable, SessionTable } from "./sql"
 import type { DeepMutable } from "../schema"
+import { isDeepStrictEqual } from "node:util"
 
 type DatabaseService = Database.Interface["db"]
+
+function taskMetadata(
+  current: Record<string, unknown> | null | undefined,
+  incoming: Record<string, unknown> | undefined,
+) {
+  const merged = { ...incoming }
+  const origin = current?.["opencode.task.origin"]
+  if (origin !== undefined) {
+    if (
+      incoming?.["opencode.task.origin"] !== undefined &&
+      !isDeepStrictEqual(origin, incoming["opencode.task.origin"])
+    ) {
+      throw new Error("Native Task origin cannot be replaced by a later session snapshot")
+    }
+    merged["opencode.task.origin"] = origin
+  }
+  const history = (value: unknown): Record<string, unknown> => {
+    if (value === undefined) return {}
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      throw new Error("Invalid native Task receipt history")
+    return value as Record<string, unknown>
+  }
+  const receipts = { ...history(current?.["opencode.task.terminals"]) }
+  // Older runtimes stored only the latest receipt. Retain that proof when
+  // the first complete per-call history is projected during an upgrade.
+  const previous = current?.["opencode.task.terminal"]
+  if (
+    typeof previous === "object" &&
+    previous !== null &&
+    "callID" in previous &&
+    typeof previous.callID === "string"
+  ) {
+    if (!Object.hasOwn(receipts, previous.callID))
+      Object.defineProperty(receipts, previous.callID, {
+        value: previous,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+  }
+  const offered = { ...history(incoming?.["opencode.task.terminals"]) }
+  const latest = incoming?.["opencode.task.terminal"]
+  if (typeof latest === "object" && latest !== null && "callID" in latest && typeof latest.callID === "string") {
+    if (!Object.hasOwn(offered, latest.callID))
+      Object.defineProperty(offered, latest.callID, {
+        value: latest,
+        enumerable: true,
+        configurable: true,
+        writable: true,
+      })
+  }
+  for (const [callID, receipt] of Object.entries(offered)) {
+    if (Object.hasOwn(receipts, callID) && !isDeepStrictEqual(receipts[callID], receipt)) {
+      throw new Error(`Native Task terminal receipt is immutable for call ${callID}`)
+    }
+    Object.defineProperty(receipts, callID, { value: receipt, enumerable: true, configurable: true, writable: true })
+  }
+  if (Object.keys(receipts).length > 0) {
+    merged["opencode.task.terminals"] = receipts
+    const ordered = Object.entries(receipts)
+      .flatMap(([callID, receipt]) => {
+        if (
+          typeof receipt !== "object" ||
+          receipt === null ||
+          !("completedAt" in receipt) ||
+          typeof receipt.completedAt !== "number" ||
+          !Number.isFinite(receipt.completedAt)
+        )
+          return []
+        return [{ callID, receipt, completedAt: receipt.completedAt }]
+      })
+      .sort((a, b) => b.completedAt - a.completedAt || (a.callID < b.callID ? -1 : a.callID > b.callID ? 1 : 0))
+    if (ordered[0]) merged["opencode.task.terminal"] = ordered[0].receipt
+  }
+  return Object.keys(merged).length > 0 ? merged : incoming
+}
 
 const decodeMessage = Schema.decodeUnknownSync(SessionMessage.Message)
 const encodeMessage = Schema.encodeSync(SessionMessage.Message)
@@ -232,12 +309,23 @@ const layer = Layer.effectDiscard(
       }),
     )
     yield* events.project(SessionV1.Event.Updated, (event) =>
-      db
-        .update(SessionTable)
-        .set(sessionRow(event.data.info))
-        .where(eq(SessionTable.id, event.data.sessionID))
-        .run()
-        .pipe(Effect.orDie),
+      Effect.gen(function* () {
+        // EventV2 runs projectors inside its SQLite immediate transaction.
+        // Merge against the committed row there, not a caller's stale snapshot.
+        const current = yield* db
+          .select({ metadata: SessionTable.metadata })
+          .from(SessionTable)
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .get()
+          .pipe(Effect.orDie)
+        const row = sessionRow(event.data.info)
+        yield* db
+          .update(SessionTable)
+          .set({ ...row, metadata: taskMetadata(current?.metadata, row.metadata ?? undefined) })
+          .where(eq(SessionTable.id, event.data.sessionID))
+          .run()
+          .pipe(Effect.orDie)
+      }),
     )
     yield* events.project(SessionEvent.Moved, (event) =>
       Effect.gen(function* () {
@@ -331,7 +419,10 @@ const layer = Layer.effectDiscard(
               id: messageID,
               session_id: sessionID,
               time_created: event.data.time,
-              data: { role: "assistant", time: { created: event.data.time } } as Omit<SessionV1.Info, "id" | "sessionID">,
+              data: { role: "assistant", time: { created: event.data.time } } as Omit<
+                SessionV1.Info,
+                "id" | "sessionID"
+              >,
             })
             .onConflictDoNothing()
             .run()
@@ -421,8 +512,7 @@ const layer = Layer.effectDiscard(
     // Every other creator event keeps the fail-closed ID-reuse contract.
     yield* events.project(SessionEvent.Compaction.Ended, (event) =>
       Effect.gen(function* () {
-        if (event.durable === undefined)
-          return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
         const existing = yield* db
           .select({ id: SessionMessageTable.id })
           .from(SessionMessageTable)
@@ -504,8 +594,7 @@ const layer = Layer.effectDiscard(
     // boundary — and onConflictDoNothing keeps replays byte-identical.
     yield* events.project(SessionEvent.CompactionFinalized, (event) =>
       Effect.gen(function* () {
-        if (event.durable === undefined)
-          return yield* Effect.die("Durable Session event is missing aggregate sequence")
+        if (event.durable === undefined) return yield* Effect.die("Durable Session event is missing aggregate sequence")
         const seq = event.durable.seq
         const sessionID = event.data.sessionID
         // All three rows share one logical moment; the ±1ms offsets give them

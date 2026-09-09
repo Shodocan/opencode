@@ -59,6 +59,8 @@ export type PluginInput = {
   project: Project
   directory: string
   worktree: string
+  /** Trusted native workflow lifecycle capabilities; absent in older runtimes. */
+  workflowRuntime?: { version: 1; taskStart: true; taskTerminal: true; toolError: true }
   experimental_workspace: {
     register(type: string, adapter: WorkspaceAdapter): void
   }
@@ -278,6 +280,39 @@ export interface Hooks {
       title: string
       output: string
       metadata: any
+    },
+  ) => Promise<void>
+  /** Runs exactly once when an admitted tool fails, defects, or is interrupted. */
+  "tool.execute.error"?: (
+    input: { tool: string; sessionID: string; callID: string; args: unknown; taskOrigin?: TaskOrigin },
+    output: { error: unknown; interrupted: boolean; metadata: Record<string, unknown> },
+  ) => Promise<void>
+  /** Awaited after native child allocation and before any child prompt or work. */
+  "task.execute.start"?: (
+    input: {
+      sessionID: string
+      callID: string
+      childSessionID: string
+      model: { providerID: string; id: string; variant?: string }
+      args: unknown
+    },
+    output: { managedRetry?: boolean },
+  ) => Promise<void>
+  /** Awaited after native cleanup and durable terminal persistence. */
+  "task.execute.end"?: (
+    input: {
+      sessionID: string
+      callID: string
+      childSessionID: string
+      model: { providerID: string; id: string; variant?: string }
+      args: unknown
+    },
+    output: {
+      status: "completed" | "failed" | "cancelled"
+      localQuiescence: true
+      remoteOutcome: "completed" | "unknown"
+      executionFailure?: { kind: "provider" | "tool"; error: unknown }
+      output?: string
     },
   ) => Promise<void>
   "experimental.chat.messages.transform"?: (

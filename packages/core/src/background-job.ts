@@ -21,6 +21,7 @@ export type Info = {
 type Active = {
   info: Info
   done: Deferred.Deferred<Info>
+  closed: Deferred.Deferred<void>
   scope: Scope.Closeable
   token: object
   pending: number
@@ -40,6 +41,7 @@ type FinishResult = {
   info?: Info
   done?: Deferred.Deferred<Info>
   scope?: Scope.Closeable
+  closed?: Deferred.Deferred<void>
 }
 
 type PromoteResult = {
@@ -73,6 +75,8 @@ export type StartInput = {
 export type ExtendInput = {
   id: string
   run: Effect.Effect<string, unknown>
+  /** Includes cancellation while queued before run begins. */
+  onExit?: (exit: Exit.Exit<string, unknown>) => Effect.Effect<void>
 }
 
 export type WaitInput = {
@@ -122,6 +126,8 @@ export const make = Effect.gen(function* () {
     jobs: yield* SynchronizedRef.make(new Map()),
     scope: yield* Scope.Scope,
   }
+  const close = (scope: Scope.Closeable, closed: Deferred.Deferred<void>) =>
+    Scope.close(scope, Exit.void).pipe(Effect.onExit((exit) => Deferred.done(closed, exit)))
 
   const settle = Effect.fn("BackgroundJob.settle")(function* (
     id: string,
@@ -161,11 +167,14 @@ export const make = Effect.gen(function* () {
           ...(Exit.isFailure(exit) ? { error: errorText(Cause.squash(exit.cause)) } : {}),
         },
       }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
+      return [
+        { info: snapshot(next), done: job.done, scope: job.scope, closed: job.closed },
+        new Map(jobs).set(id, next),
+      ]
     })
     if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
-    if (result.scope) {
-      yield* Scope.close(result.scope, Exit.void).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
+    if (result.scope && result.closed) {
+      yield* close(result.scope, result.closed).pipe(Effect.forkIn(state.scope, { startImmediately: true }))
     }
     return result.info
   })
@@ -205,6 +214,7 @@ export const make = Effect.gen(function* () {
         const id = input.id ?? Identifier.ascending("job")
         const started_at = yield* Clock.currentTimeMillis
         const done = yield* Deferred.make<Info>()
+        const closed = yield* Deferred.make<void>()
         const promoted = yield* Deferred.make<Info>()
         const tail = yield* Deferred.make<void>()
         const result = yield* SynchronizedRef.modifyEffect(
@@ -226,6 +236,7 @@ export const make = Effect.gen(function* () {
                 metadata: input.metadata,
               },
               done,
+              closed,
               scope,
               token,
               pending: 1,
@@ -281,6 +292,7 @@ export const make = Effect.gen(function* () {
           result.sequence,
           Deferred.await(result.previous).pipe(
             Effect.andThen(restore(input.run)),
+            Effect.onExit((exit) => input.onExit?.(exit) ?? Effect.void),
             Effect.ensuring(Deferred.succeed(result.tail, undefined)),
           ),
         )
@@ -292,10 +304,15 @@ export const make = Effect.gen(function* () {
   const wait: Interface["wait"] = Effect.fn("BackgroundJob.wait")(function* (input) {
     const job = (yield* SynchronizedRef.get(state.jobs)).get(input.id)
     if (!job) return { timedOut: false }
-    if (job.info.status !== "running") return { info: snapshot(job), timedOut: false }
-    if (input.timeout === undefined) return { info: yield* Deferred.await(job.done), timedOut: false }
-    if (input.timeout <= 0) return { info: snapshot(job), timedOut: true }
-    const info = yield* Deferred.await(job.done).pipe(Effect.timeoutOption(input.timeout))
+    const settled = Deferred.await(job.done).pipe(
+      Effect.flatMap((info) => Deferred.await(job.closed).pipe(Effect.as(info))),
+    )
+    if (input.timeout === undefined) return { info: yield* settled, timedOut: false }
+    if (input.timeout <= 0) {
+      if (yield* Deferred.isDone(job.closed)) return { info: yield* settled, timedOut: false }
+      return { info: snapshot(job), timedOut: true }
+    }
+    const info = yield* settled.pipe(Effect.timeoutOption(input.timeout))
     if (info._tag === "Some") return { info: info.value, timedOut: false }
     return { info: snapshot(job), timedOut: true }
   })
@@ -339,7 +356,7 @@ export const make = Effect.gen(function* () {
     const result = yield* SynchronizedRef.modify(state.jobs, (jobs): readonly [FinishResult, Map<string, Active>] => {
       const job = jobs.get(id)
       if (!job) return [{}, jobs]
-      if (job.info.status !== "running") return [{ info: snapshot(job) }, jobs]
+      if (job.info.status !== "running") return [{ info: snapshot(job), closed: job.closed }, jobs]
       const next = {
         ...job,
         onPromote: undefined,
@@ -350,12 +367,16 @@ export const make = Effect.gen(function* () {
           completed_at,
         },
       }
-      return [{ info: snapshot(next), done: job.done, scope: job.scope }, new Map(jobs).set(id, next)]
+      return [
+        { info: snapshot(next), done: job.done, scope: job.scope, closed: job.closed },
+        new Map(jobs).set(id, next),
+      ]
     })
     if (result.info && result.done) yield* Deferred.succeed(result.done, result.info).pipe(Effect.ignore)
-    if (result.scope) yield* Scope.close(result.scope, Exit.void)
+    if (result.scope && result.closed) yield* close(result.scope, result.closed)
+    else if (result.closed) yield* Deferred.await(result.closed)
     return result.info
-  })
+  }, Effect.uninterruptible)
 
   return Service.of({ list, get, start, extend, wait, waitForPromotion, promote, cancel })
 })
