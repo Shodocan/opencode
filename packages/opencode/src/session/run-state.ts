@@ -10,7 +10,8 @@ import { SessionStatus } from "./status"
 
 export interface Interface {
   readonly assertNotBusy: (sessionID: SessionID) => Effect.Effect<void, Session.BusyError>
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly registerTask: (sessionID: SessionID) => Effect.Effect<{ signal: AbortSignal; release: Effect.Effect<void> }>
+  readonly cancel: (sessionID: SessionID, options?: { excludeJobID: string }) => Effect.Effect<void>
   readonly ensureRunning: (
     sessionID: SessionID,
     onInterrupt: Effect.Effect<SessionV1.WithParts>,
@@ -36,8 +37,13 @@ const layer = Layer.effect(
       Effect.fn("SessionRunState.state")(function* () {
         const scope = yield* Scope.Scope
         const runners = new Map<SessionID, Runner.Runner<SessionV1.WithParts>>()
+        const tasks = new Map<SessionID, Set<AbortController>>()
         yield* Effect.addFinalizer(
           Effect.fnUntraced(function* () {
+            for (const registrations of tasks.values()) {
+              for (const registration of registrations) registration.abort()
+            }
+            tasks.clear()
             yield* Effect.forEach(runners.values(), (runner) => runner.cancel, {
               concurrency: "unbounded",
               discard: true,
@@ -45,7 +51,7 @@ const layer = Layer.effect(
             runners.clear()
           }),
         )
-        return { runners, scope }
+        return { runners, tasks, scope }
       }),
     )
 
@@ -74,15 +80,35 @@ const layer = Layer.effect(
       if (existing?.busy) yield* busyError(sessionID)
     })
 
-    const cancel = Effect.fn("SessionRunState.cancel")(function* (sessionID: SessionID) {
-      yield* cancelBackgroundJobs(background, sessionID)
+    const registerTask: Interface["registerTask"] = Effect.fn("SessionRunState.registerTask")(function* (sessionID) {
       const data = yield* InstanceState.get(state)
-      const existing = data.runners.get(sessionID)
-      if (!existing) {
-        yield* status.set(sessionID, { type: "idle" })
-        return
+      const controller = new AbortController()
+      const registrations = data.tasks.get(sessionID) ?? new Set<AbortController>()
+      registrations.add(controller)
+      data.tasks.set(sessionID, registrations)
+      return {
+        signal: controller.signal,
+        release: Effect.sync(() => {
+          registrations.delete(controller)
+          if (registrations.size === 0 && data.tasks.get(sessionID) === registrations) data.tasks.delete(sessionID)
+        }),
       }
-      yield* existing.cancel
+    })
+
+    const cancel = Effect.fn("SessionRunState.cancel")(function* (
+      sessionID: SessionID,
+      options?: { excludeJobID: string },
+    ) {
+      const data = yield* InstanceState.get(state)
+      if (!options?.excludeJobID) {
+        for (const registration of data.tasks.get(sessionID) ?? []) registration.abort()
+      }
+      const existing = data.runners.get(sessionID)
+      // Freeze the producer before scanning jobs, so it cannot dispatch a new
+      // descendant while cancellation is awaiting older descendants' cleanup.
+      if (existing) yield* existing.cancel
+      yield* cancelBackgroundJobs(background, sessionID, options?.excludeJobID)
+      if (!existing) yield* status.set(sessionID, { type: "idle" })
     })
 
     const ensureRunning = Effect.fn("SessionRunState.ensureRunning")(function* (
@@ -104,30 +130,30 @@ const layer = Layer.effect(
         .pipe(Effect.catchTag("RunnerBusy", () => Effect.fail(busyError(sessionID))))
     })
 
-    return Service.of({ assertNotBusy, cancel, ensureRunning, startShell })
+    return Service.of({ assertNotBusy, registerTask, cancel, ensureRunning, startShell })
   }),
 )
 
 const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(function* (
   background: BackgroundJob.Interface,
   sessionID: SessionID,
+  excludeJobID?: string,
 ) {
-  const jobs = yield* background.list()
   const pending = new Set<string>([sessionID])
   const cancelled = new Set<string>()
   const matches = (job: BackgroundJob.Info) => {
-    if (job.status !== "running") return false
+    if (job.id === excludeJobID) return false
     if (cancelled.has(job.id)) return false
     if (pending.has(job.id)) return true
     if (typeof job.metadata?.sessionId === "string" && pending.has(job.metadata.sessionId)) return true
     return typeof job.metadata?.parentSessionId === "string" && pending.has(job.metadata.parentSessionId)
   }
-  let batch = jobs.filter(matches)
+  let batch = (yield* background.list()).filter(matches)
   while (batch.length > 0) {
     yield* Effect.forEach(
       batch,
       (job) =>
-        background.cancel(job.id).pipe(
+        background.cancel(job.id, { quiescent: true }).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
               cancelled.add(job.id)
@@ -138,7 +164,7 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
         ),
       { concurrency: "unbounded", discard: true },
     )
-    batch = jobs.filter(matches)
+    batch = (yield* background.list()).filter(matches)
   }
 })
 

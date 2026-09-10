@@ -2046,6 +2046,13 @@ export type Config = {
     tail_turns?: number
     preserve_recent_tokens?: number
     reserved?: number
+    threshold?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    /**
+     * Per-model auto-compaction thresholds as a fraction (0-1) of each model's context window, keyed by 'providerID/modelID'. Overrides `threshold` for the matched model.
+     */
+    thresholds?: {
+      [key: string]: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+    }
   }
   experimental?: {
     disable_paste_summary?: boolean
@@ -9643,6 +9650,7 @@ export type SessionStatusData = {
   query?: {
     directory?: string
     workspace?: string
+    sessionID?: string
   }
   url: "/session/status"
 }
@@ -9652,6 +9660,10 @@ export type SessionStatusErrors = {
    * BadRequest | InvalidRequestError
    */
   400: EffectHttpApiErrorBadRequest | InvalidRequestError
+  /**
+   * NotFoundError
+   */
+  404: NotFoundError
 }
 
 export type SessionStatusError = SessionStatusErrors[keyof SessionStatusErrors]

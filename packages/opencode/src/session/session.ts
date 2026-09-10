@@ -38,7 +38,8 @@ import { SessionID, MessageID, PartID } from "./schema"
 
 import type { Provider } from "@/provider/provider"
 import { Global } from "@opencode-ai/core/global"
-import { Effect, Layer, Option, Context, Schema, Types } from "effect"
+import { Effect, Layer, Option, Context, Schema, Semaphore, Types } from "effect"
+import { isRecord } from "@/util/record"
 import { NonNegativeInt, optional } from "@opencode-ai/core/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -230,6 +231,19 @@ export type TaskOriginMetadata = {
   }
 }
 
+export type TaskTerminal = {
+  version: 1
+  parentSessionID: string
+  callID: string
+  childSessionID: string
+  model: { providerID: string; id: string; variant?: string }
+  status: "completed" | "failed" | "cancelled"
+  completedAt: number
+  localQuiescence: true
+  remoteOutcome: "completed" | "unknown"
+  executionFailure?: { kind: "provider" | "tool"; error: unknown }
+}
+
 const HostMetadataPrefix = "opencode."
 
 /** Public metadata cannot forge or erase host-owned correlation records. */
@@ -242,11 +256,11 @@ function publicMetadata(input: Record<string, unknown> | undefined): Record<stri
 function mergePublicMetadata(
   current: Record<string, unknown> | undefined,
   input: Record<string, unknown>,
-): Record<string, unknown> | undefined {
+): Record<string, unknown> {
   const host = Object.fromEntries(Object.entries(current ?? {}).filter(([key]) => key.startsWith(HostMetadataPrefix)))
   const user = publicMetadata(input) ?? {}
-  const merged = { ...host, ...user }
-  return Object.keys(merged).length > 0 ? merged : undefined
+  // An explicit empty object resets public metadata; undefined omits the update.
+  return { ...host, ...user }
 }
 
 export const Info = Schema.Struct({
@@ -464,6 +478,8 @@ export interface Interface {
   readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
   readonly setArchived: (input: { sessionID: SessionID; time?: number }) => Effect.Effect<void>
   readonly setMetadata: (input: typeof SetMetadataInput.Type) => Effect.Effect<void>
+  /** Internal native receipt writer. Deliberately unavailable through public session routes. */
+  readonly setTaskTerminal: (input: TaskTerminal) => Effect.Effect<void>
   readonly setAgentModel: (input: {
     sessionID: SessionID
     agent: string
@@ -783,9 +799,13 @@ const layer: Layer.Layer<
       return session
     })
 
-    const patch = (sessionID: SessionID, info: Patch) =>
+    // Updates publish a complete session snapshot. Serialize their read/merge/
+    // publish boundary so ordinary edits cannot overwrite a newer host receipt.
+    const patchLock = yield* Semaphore.make(1)
+    const patch = (sessionID: SessionID, update: Patch | ((current: Info) => Patch)) =>
       Effect.gen(function* () {
         const current = yield* get(sessionID)
+        const info = typeof update === "function" ? update(current) : update
         const next = {
           ...current,
           ...info,
@@ -796,7 +816,7 @@ const layer: Layer.Layer<
           permission: info.permission === null ? undefined : (info.permission ?? current.permission),
         } as Info
         yield* events.publish(SessionV1.Event.Updated, { sessionID, info: next })
-      })
+      }).pipe(patchLock.withPermits(1))
 
     const touch = Effect.fn("Session.touch")(function* (sessionID: SessionID) {
       yield* patch(sessionID, { time: { updated: Date.now() } }).pipe(Effect.orDie)
@@ -811,11 +831,37 @@ const layer: Layer.Layer<
     })
 
     const setMetadata = Effect.fn("Session.setMetadata")(function* (input: typeof SetMetadataInput.Type) {
-        const current = yield* get(input.sessionID).pipe(Effect.orDie)
-        yield* patch(input.sessionID, {
-          metadata: mergePublicMetadata(current.metadata, input.metadata),
+      yield* patch(input.sessionID, (current) => ({
+        metadata: mergePublicMetadata(current.metadata, input.metadata),
+        time: { updated: Date.now() },
+      })).pipe(Effect.orDie)
+    })
+
+    const setTaskTerminal: Interface["setTaskTerminal"] = Effect.fn("Session.setTaskTerminal")(function* (input) {
+      const sessionID = SessionID.make(input.childSessionID)
+      yield* patch(sessionID, (current) => {
+        const origin = current.metadata?.["opencode.task.origin"]
+        if (
+          !input.callID.trim() ||
+          current.parentID !== input.parentSessionID ||
+          (origin !== undefined &&
+            (!isRecord(origin) ||
+              origin.version !== 1 ||
+              origin.tool !== "task" ||
+              origin.parentSessionID !== input.parentSessionID))
+        )
+          throw new Error("Task terminal receipt requires trusted direct-child provenance")
+        const receipts = current.metadata?.["opencode.task.terminals"]
+        if (receipts !== undefined && !isRecord(receipts)) throw new Error("Invalid native task receipt history")
+        return {
+          metadata: {
+            ...current.metadata,
+            "opencode.task.terminal": input,
+            "opencode.task.terminals": { ...receipts, [input.callID]: input },
+          },
           time: { updated: Date.now() },
-        }).pipe(Effect.orDie)
+        }
+      }).pipe(Effect.orDie)
     })
 
     const setAgentModel = Effect.fn("Session.setAgentModel")(function* (input: {
@@ -970,6 +1016,7 @@ const layer: Layer.Layer<
       setTitle,
       setArchived,
       setMetadata,
+      setTaskTerminal,
       setAgentModel,
       setPermission,
       setRevert,
@@ -999,12 +1046,11 @@ const cancelBackgroundJobs = Effect.fn("Session.cancelBackgroundJobs")(function*
   const jobs = yield* background.list()
   yield* Effect.forEach(
     jobs.filter((job) => {
-      if (job.status !== "running") return false
       if (job.id === sessionID) return true
       if (job.metadata?.sessionId === sessionID) return true
       return job.metadata?.parentSessionId === sessionID
     }),
-    (job) => background.cancel(job.id),
+    (job) => background.cancel(job.id, { quiescent: true }),
     { concurrency: "unbounded", discard: true },
   )
 })

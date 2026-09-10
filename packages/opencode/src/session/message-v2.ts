@@ -17,6 +17,7 @@ import {
 } from "@opencode-ai/core/v1/session"
 
 import { NamedError } from "@opencode-ai/core/util/error"
+import { LLMError } from "@opencode-ai/llm"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -625,6 +626,29 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
+    case e instanceof LLMError: {
+      // Native transport failures carry structured HTTP facts. Preserve them
+      // across the session boundary instead of reducing the error to prose.
+      const reason = e.reason
+      const http = "http" in reason ? reason.http : undefined
+      if (reason._tag === "InvalidRequest" && reason.classification === "context-overflow") {
+        return new ContextOverflowError({ message: reason.message, responseBody: http?.body }, { cause: e }).toObject()
+      }
+      return new APIError(
+        {
+          message: e.message,
+          statusCode: http?.response?.status,
+          isRetryable: e.retryable,
+          responseHeaders: http?.response?.headers,
+          responseBody: http?.body,
+          metadata: {
+            nativeReason: reason._tag,
+            ...(reason._tag === "Transport" && reason.kind ? { code: reason.kind } : {}),
+          },
+        },
+        { cause: e },
+      ).toObject()
+    }
     case (e as SystemError)?.code === "ECONNRESET":
       return new APIError(
         {

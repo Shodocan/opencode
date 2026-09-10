@@ -71,6 +71,8 @@ export interface Def<
   description: string
   parameters: Parameters
   jsonSchema?: JSONSchema7
+  /** Trusted native setup that must run even when argument decoding fails. */
+  prepare?(ctx: Context): Effect.Effect<void>
   execute(args: Schema.Schema.Type<Parameters>, ctx: Context): Effect.Effect<ExecuteResult<M>>
   formatValidationError?(error: unknown): string
 }
@@ -129,6 +131,7 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           ...(ctx.callID ? { "tool.call_id": ctx.callID } : {}),
         }
         return Effect.gen(function* () {
+          if (toolInfo.prepare) yield* toolInfo.prepare(ctx)
           const decoded = yield* decode(args).pipe(
             Effect.mapError(
               (error) =>

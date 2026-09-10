@@ -59,6 +59,7 @@ import { CompactionImpossibleError, ContextBudget } from "./overflow"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { ToolExecution } from "./tool-execution"
 import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
@@ -155,7 +156,7 @@ type LineageDraft = {
 }
 
 export interface Interface {
-  readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
+  readonly cancel: (sessionID: SessionID, options?: { excludeJobID: string }) => Effect.Effect<void>
   readonly prompt: (input: InternalPromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
@@ -373,7 +374,9 @@ const layer = Layer.effect(
 
     const lineageTerminate = (msg: SessionV1.Assistant) =>
       Effect.gen(function* () {
-        msg.error = new SessionV1.ContextOverflowError({ message: "Input exceeds context window of this model" }).toObject()
+        msg.error = new SessionV1.ContextOverflowError({
+          message: "Input exceeds context window of this model",
+        }).toObject()
         msg.finish = "error"
         msg.time.completed = Date.now()
         yield* sessions.updateMessage(msg)
@@ -383,15 +386,18 @@ const layer = Layer.effect(
 
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
-        cancel: (sessionID: SessionID) => cancel(sessionID),
+        cancel: (sessionID: SessionID, options?: { excludeJobID: string }) => cancel(sessionID, options),
         resolvePromptParts: (template: string) => resolvePromptParts(template),
         prompt: (input: InternalPromptInput) => prompt(input).pipe(Effect.catch(Effect.die)),
       } satisfies TaskPromptOps
     })
 
-    const cancel = Effect.fn("SessionPrompt.cancel")(function* (sessionID: SessionID) {
+    const cancel = Effect.fn("SessionPrompt.cancel")(function* (
+      sessionID: SessionID,
+      options?: { excludeJobID: string },
+    ) {
       yield* Effect.logInfo("cancel", { "session.id": sessionID })
-      yield* state.cancel(sessionID)
+      yield* state.cancel(sessionID, options)
     })
 
     const resolvePromptParts = Effect.fn("SessionPrompt.resolvePromptParts")(function* (template: string) {
@@ -562,8 +568,8 @@ const layer = Layer.effect(
 
       let error: Error | undefined
       const taskAbort = new AbortController()
-      const result = yield* taskTool
-        .execute(taskArgs, {
+      const result = yield* Effect.suspend(() =>
+        taskTool.execute(taskArgs, {
           agent: task.agent,
           messageID: assistantMessage.id,
           sessionID,
@@ -588,38 +594,43 @@ const layer = Layer.effect(
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
               })
               .pipe(Effect.orDie),
-        })
-        .pipe(
-          Effect.catchCause((cause) => {
-            const defect = Cause.squash(cause)
-            error = defect instanceof Error ? defect : new Error(String(defect))
-            return Effect.logError("subtask execution failed", {
-              error,
-              agent: task.agent,
-              description: task.description,
-            })
+        }),
+      ).pipe(
+        ToolExecution.observeFailure(
+          plugin,
+          { tool: TaskTool.id, sessionID, callID: part.callID, args: taskArgs, taskOrigin },
+          () => (part.state.status === "pending" ? {} : (part.state.metadata ?? {})),
+        ),
+        Effect.catchCause((cause) => {
+          const defect = Cause.squash(cause)
+          error = defect instanceof Error ? defect : new Error(String(defect))
+          return Effect.logError("subtask execution failed", {
+            error,
+            agent: task.agent,
+            description: task.description,
+          })
+        }),
+        Effect.onInterrupt(() =>
+          Effect.gen(function* () {
+            taskAbort.abort()
+            assistantMessage.finish = "tool-calls"
+            assistantMessage.time.completed = Date.now()
+            yield* sessions.updateMessage(assistantMessage)
+            if (part.state.status === "running") {
+              yield* sessions.updatePart({
+                ...part,
+                state: {
+                  status: "error",
+                  error: "Cancelled",
+                  time: { start: part.state.time.start, end: Date.now() },
+                  metadata: part.state.metadata,
+                  input: part.state.input,
+                },
+              } satisfies SessionV1.ToolPart)
+            }
           }),
-          Effect.onInterrupt(() =>
-            Effect.gen(function* () {
-              taskAbort.abort()
-              assistantMessage.finish = "tool-calls"
-              assistantMessage.time.completed = Date.now()
-              yield* sessions.updateMessage(assistantMessage)
-              if (part.state.status === "running") {
-                yield* sessions.updatePart({
-                  ...part,
-                  state: {
-                    status: "error",
-                    error: "Cancelled",
-                    time: { start: part.state.time.start, end: Date.now() },
-                    metadata: part.state.metadata,
-                    input: part.state.input,
-                  },
-                } satisfies SessionV1.ToolPart)
-              }
-            }),
-          ),
-        )
+        ),
+      )
 
       const attachments = result?.attachments?.map((attachment) => ({
         ...attachment,
@@ -628,11 +639,13 @@ const layer = Layer.effect(
         messageID: assistantMessage.id,
       }))
 
-      yield* plugin.trigger(
-        "tool.execute.after",
-        { tool: TaskTool.id, sessionID, callID: part.callID, args: taskArgs, taskOrigin },
-        result,
-      )
+      if (result) {
+        yield* plugin.trigger(
+          "tool.execute.after",
+          { tool: TaskTool.id, sessionID, callID: part.callID, args: taskArgs, taskOrigin },
+          result,
+        )
+      }
 
       assistantMessage.finish = "tool-calls"
       assistantMessage.time.completed = Date.now()
@@ -874,7 +887,7 @@ const layer = Layer.effect(
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
-    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
+    const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: InternalPromptInput) {
       const agentName = input.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
@@ -888,12 +901,14 @@ const layer = Layer.effect(
       const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
-        !input.variant && ag.variant && same
+        !input.taskModelExact && !input.variant && ag.variant && same
           ? yield* provider
               .getModel(model.providerID, model.modelID)
               .pipe(Effect.catchIf(Provider.ModelNotFoundError.isInstance, () => Effect.succeed(undefined)))
           : undefined
-      const variant = input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined)
+      const variant = input.taskModelExact
+        ? input.variant
+        : (input.variant ?? (ag.variant && full?.variants?.[ag.variant] ? ag.variant : undefined))
 
       const info: SessionV1.User = {
         id: input.messageID ?? MessageID.ascending(),
@@ -1336,8 +1351,8 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
-    const runLoop: (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
-      function* (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) {
+    const runLoop: (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) => Effect.Effect<SessionV1.WithParts> =
+      Effect.fn("SessionPrompt.run")(function* (sessionID: SessionID, taskOrigin?: Tool.TaskOrigin) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
@@ -1702,8 +1717,7 @@ const layer = Layer.effect(
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
         return yield* lastAssistant(sessionID)
-      },
-    )
+      })
 
     const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
@@ -1892,7 +1906,7 @@ export const PromptInput = Schema.Struct({
 export type PromptInput = Schema.Schema.Type<typeof PromptInput>
 
 /** Internal-only prompt carrier; HTTP payload schemas intentionally omit it. */
-export type InternalPromptInput = PromptInput & { taskOrigin?: Tool.TaskOrigin }
+export type InternalPromptInput = PromptInput & { taskOrigin?: Tool.TaskOrigin; taskModelExact?: boolean }
 
 export class LoopInput extends Schema.Class<LoopInput>("SessionPrompt.LoopInput")({
   sessionID: SessionID,

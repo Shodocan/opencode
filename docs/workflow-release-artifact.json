@@ -1,0 +1,36 @@
+{
+  "startedAtUTC": "2026-09-09T22:29:22Z",
+  "completedAtUTC": "2026-09-09T22:32:00Z",
+  "gitHead": "7b06adb89e7642cc27c640e48152aa84d0495336",
+  "sourceManifestSHA256": "31a558396318133d7e3c0c766762c725617e3348bda8aa864b420b431b0c7bd7",
+  "modelsSnapshot": {
+    "path": "/home/wdcas/.cache/opencode/models.json",
+    "sha256": "105288924be2dc7ebf7abda00dc064d710797a09811708329232518d515a8410",
+    "unchangedAfterBuild": true
+  },
+  "version": "1.18.28-harness.4.3.0",
+  "pluginSDK": "1.17.11",
+  "channel": "latest",
+  "embeddedWebUI": true,
+  "command": "env -u OPENCODE_RELEASE -u SENTRY_AUTH_TOKEN OPENCODE_CHANNEL=latest OPENCODE_VERSION=1.18.28-harness.4.3.0 OPENCODE_PLUGIN_VERSION=1.17.11 MODELS_DEV_API_JSON=/home/wdcas/.cache/opencode/models.json bun run script/build.ts --single --skip-install",
+  "nativeBuildSourcesUnchanged": true,
+  "binary": {
+    "path": "/tmp/opencode-v4.3.0/packages/opencode/dist/opencode-linux-x64/bin/opencode",
+    "sha256": "1a07574949b4f6d37334162c82f9409c8ab9a73a38d92fc817dabd13ec3028cf",
+    "bytes": 186218624,
+    "version": "1.18.28-harness.4.3.0"
+  },
+  "archive": {
+    "path": "/tmp/native-release-v4.3.0/opencode-linux-x64.tar.gz",
+    "sha256": "3751573b5e879b99eea457fcd1306620bb8397fd0040f299058833f53f11ec67",
+    "bytes": 61046597,
+    "members": [
+      "opencode"
+    ],
+    "binaryMode": "0o755",
+    "containedBinarySHA256Matches": true
+  },
+  "embeddedUIFiles": 952,
+  "embeddedUIBytes": 36048833,
+  "note": "Binary compiled from the recorded candidate source manifest; final source commit is recorded in the GitHub release. Full manifest and independent UI/process proof are release assets."
+}

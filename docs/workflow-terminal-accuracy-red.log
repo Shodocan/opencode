@@ -1,0 +1,508 @@
+bun test v1.3.14 (0d9b296a)
+
+test/tool/workflow-task-terminal-accuracy.test.ts:
+(pass) native terminal accurately describes success [1333.28ms]
+(pass) native terminal accurately describes HTTP429 response [896.95ms]
+[18:31:48.173] ERROR (#58058): 76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f4191ffew56kegjItsycDn",
++   "completedAt": 1788978708082,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "isRetryable": true,
++         "message": "socket closed",
++       },
++       "name": "APIError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f4292ffe9dRAD4jeu7d5Y4",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 16
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+
+76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f4191ffew56kegjItsycDn",
++   "completedAt": 1788978708082,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "isRetryable": true,
++         "message": "socket closed",
++       },
++       "name": "APIError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f4292ffe9dRAD4jeu7d5Y4",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 16
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at processTicksAndRejections (unknown:7:39)
+(fail) native terminal accurately describes APIError without HTTP response [445.41ms]
+[18:31:48.599] ERROR (#82980): 76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3fe9ffeJ4q8a9sO39h3Qq",
++   "completedAt": 1788978708506,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "isRetryable": true,
++         "message": "connection refused",
++         "statusCode": 0,
++       },
++       "name": "APIError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f40ccffeUGAyPR7lpvcghI",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 17
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+
+76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3fe9ffeJ4q8a9sO39h3Qq",
++   "completedAt": 1788978708506,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "isRetryable": true,
++         "message": "connection refused",
++         "statusCode": 0,
++       },
++       "name": "APIError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f40ccffeUGAyPR7lpvcghI",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 17
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at processTicksAndRejections (unknown:7:39)
+(fail) native terminal accurately describes APIError with non-HTTP zero status [426.28ms]
+[18:31:48.999] ERROR (#107902): 76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3e4effePERXg98b63vGpP",
++   "completedAt": 1788978708915,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "message": "local runtime failure",
++       },
++       "name": "UnknownError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f3f20ffeHjCCRRbCMj4X9x",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 15
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+
+76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3e4effePERXg98b63vGpP",
++   "completedAt": 1788978708915,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "message": "local runtime failure",
++       },
++       "name": "UnknownError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f3f20ffeHjCCRRbCMj4X9x",
+-   "remoteOutcome": "unknown",
++   "remoteOutcome": "completed",
+    "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 1
++ Received  + 15
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at processTicksAndRejections (unknown:7:39)
+(fail) native terminal accurately describes local UnknownError [399.26ms]
+[18:31:49.405] ERROR (#132824): 76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3cbfffeGy69T0C9Wa66YW",
++   "completedAt": 1788978709314,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "message": "child execution interrupted",
++       },
++       "name": "MessageAbortedError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f3d94ffeAsyFzucoydMNuo",
+-   "remoteOutcome": "unknown",
+-   "status": "cancelled",
++   "remoteOutcome": "completed",
++   "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 2
++ Received  + 16
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+
+76 |     expect(abort.signal.aborted).toBe(false)
+77 |     expect(Exit.isSuccess(outcome)).toBe(item.status === "completed")
+78 |     const children = yield* sessions.children(fixture.parent.id)
+79 |     expect(children).toHaveLength(1)
+80 |     const receipt = (yield* sessions.get(children[0].id)).metadata?.["opencode.task.terminal"] as Session.TaskTerminal
+81 |     expect(receipt).toMatchObject({ version: 1, parentSessionID: fixture.parent.id, callID: "accuracy-call",
+     ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "callID": "accuracy-call",
+    "childSessionID": "ses_f788f3cbfffeGy69T0C9Wa66YW",
++   "completedAt": 1788978709314,
++   "executionFailure": {
++     "error": {
++       "data": {
++         "message": "child execution interrupted",
++       },
++       "name": "MessageAbortedError",
++     },
++     "kind": "provider",
++   },
+    "localQuiescence": true,
++   "model": {
++     "id": "test-model",
++     "providerID": "test",
++   },
+    "parentSessionID": "ses_f788f3d94ffeAsyFzucoydMNuo",
+-   "remoteOutcome": "unknown",
+-   "status": "cancelled",
++   "remoteOutcome": "completed",
++   "status": "failed",
+    "version": 1,
+  }
+
+- Expected  - 2
++ Received  + 16
+
+      at toMatchObject (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:81:21
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at processTicksAndRejections (unknown:7:39)
+(fail) native terminal accurately describes returned MessageAbortedError [406.91ms]
+(pass) native terminal accurately describes completed failing child tool [407.56ms]
+[18:31:49.982] ERROR (#182668): 110 |   yield* Deferred.succeed(release, undefined)
+111 |   yield* awaitWithTimeout(Deferred.await(stopped), "owned cleanup did not finish")
+112 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(first), "first cancel stalled"))).toBe(true)
+113 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(second), "second cancel stalled"))).toBe(true)
+114 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(waiting), "wait stalled"))).toBe(true)
+115 |   expect(earlyCancel, "a second cancel must await the first cancellation's cleanup").toBeUndefined()
+      ^
+error: a second cancel must await the first cancellation's cleanup
+
+Received: {
+  _id: "Exit",
+  _tag: "Success",
+  value: {
+    id: "job_08770c595001S8y3r1xQYiPANL",
+    type: "cleanup-order",
+    title: undefined,
+    status: "cancelled",
+    started_at: 1788978709909,
+    metadata: undefined,
+    completed_at: 1788978709909,
+  },
+}
+
+      at toBeUndefined (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:115:86
+
+110 |   yield* Deferred.succeed(release, undefined)
+111 |   yield* awaitWithTimeout(Deferred.await(stopped), "owned cleanup did not finish")
+112 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(first), "first cancel stalled"))).toBe(true)
+113 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(second), "second cancel stalled"))).toBe(true)
+114 |   expect(Exit.isSuccess(yield* awaitWithTimeout(Fiber.await(waiting), "wait stalled"))).toBe(true)
+115 |   expect(earlyCancel, "a second cancel must await the first cancellation's cleanup").toBeUndefined()
+      ^
+error: a second cancel must await the first cancellation's cleanup
+
+Received: {
+  _id: "Exit",
+  _tag: "Success",
+  value: {
+    id: "job_08770c595001S8y3r1xQYiPANL",
+    type: "cleanup-order",
+    title: undefined,
+    status: "cancelled",
+    started_at: 1788978709909,
+    metadata: undefined,
+    completed_at: 1788978709909,
+  },
+}
+
+      at toBeUndefined (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:115:86
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at doneUnsafe (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Deferred.js:657:20)
+      at ~effect/Effect/evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:612:37)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at processTicksAndRejections (native:7:39)
+(fail) concurrent cancel and wait cannot acknowledge while owned scope cleanup is pending [168.89ms]
+[18:31:50.186] ERROR (#207599): 143 |   yield* awaitWithTimeout(Fiber.await(runner), "live runner survived cancellation")
+144 |   const remaining = (yield* jobs.list()).filter((job) => job.metadata?.parentSessionId === parent.id && job.status === "running")
+145 |   // Always stop a leaked fixture before asserting the observed release bug.
+146 |   yield* Effect.forEach(remaining, (job) => jobs.cancel(job.id), { discard: true })
+147 |   expect((yield* jobs.get(older.id))?.status).toBe("cancelled")
+148 |   expect(remaining).toEqual([])
+      ^
+error: expect(received).toEqual(expected)
+
+- []
++ [
++   {
++     "id": "ses_f788f39a8ffer5ca46sb5EZDIV",
++     "metadata": {
++       "parentSessionId": "ses_f788f39a9ffevLbZcmPjNN6gED",
++       "sessionId": "ses_f788f39a8ffer5ca46sb5EZDIV",
++     },
++     "started_at": 1788978710107,
++     "status": "running",
++     "title": undefined,
++     "type": "late-descendant",
++   },
++ ]
+
+- Expected  - 1
++ Received  + 13
+
+      at toEqual (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:148:21
+
+143 |   yield* awaitWithTimeout(Fiber.await(runner), "live runner survived cancellation")
+144 |   const remaining = (yield* jobs.list()).filter((job) => job.metadata?.parentSessionId === parent.id && job.status === "running")
+145 |   // Always stop a leaked fixture before asserting the observed release bug.
+146 |   yield* Effect.forEach(remaining, (job) => jobs.cancel(job.id), { discard: true })
+147 |   expect((yield* jobs.get(older.id))?.status).toBe("cancelled")
+148 |   expect(remaining).toEqual([])
+      ^
+error: expect(received).toEqual(expected)
+
+- []
++ [
++   {
++     "id": "ses_f788f39a8ffer5ca46sb5EZDIV",
++     "metadata": {
++       "parentSessionId": "ses_f788f39a9ffevLbZcmPjNN6gED",
++       "sessionId": "ses_f788f39a8ffer5ca46sb5EZDIV",
++     },
++     "started_at": 1788978710107,
++     "status": "running",
++     "title": undefined,
++     "type": "late-descendant",
++   },
++ ]
+
+- Expected  - 1
++ Received  + 13
+
+      at toEqual (unknown:1:1)
+      at /tmp/opencode-v4.3.0/packages/opencode/test/tool/workflow-task-terminal-accuracy.test.ts:148:21
+      at ~effect/Effect/successCont (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:910:23)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at onExit (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:1009:2)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:1028:5
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:397:14)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:2356:7
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:397:14)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at loop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:533:4)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:531:9
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:397:14)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:397:14)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at onExit (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:975:3)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:991:17
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:397:14)
+      at /tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:734:14
+      at doneUnsafe (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Deferred.js:657:20)
+      at ~effect/Effect/evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:612:37)
+      at runLoop (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:420:66)
+      at evaluate (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/internal/effect.js:380:20)
+      at runTasks (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Scheduler.js:150:15)
+      at afterScheduled (/tmp/opencode-v4.3.0/node_modules/.bun/effect@4.0.0-beta.83/node_modules/effect/dist/Scheduler.js:140:10)
+(fail) session cancellation cannot leave descendants spawned while its live runner is stopping [204.27ms]
+
+ 3 pass
+ 6 fail
+ 45 expect() calls
+Ran 9 tests across 1 file. [6.38s]

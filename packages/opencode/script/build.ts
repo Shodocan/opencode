@@ -4,6 +4,8 @@ import { $ } from "bun"
 import path from "path"
 import { fileURLToPath } from "url"
 import { createSolidTransformPlugin } from "@opentui/solid/bun-plugin"
+import semver from "semver"
+import { Script } from "@opencode-ai/script"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -11,9 +13,17 @@ const dir = path.resolve(__dirname, "..")
 
 process.chdir(dir)
 
+// A fork's binary version need not name a published plugin SDK package.
+const pluginVersion = process.env.OPENCODE_PLUGIN_VERSION?.trim()
+if (process.env.OPENCODE_VERSION && !pluginVersion) {
+  throw new Error("Custom builds require OPENCODE_PLUGIN_VERSION to name the published plugin SDK version")
+}
+if (pluginVersion !== undefined && !semver.valid(pluginVersion)) {
+  throw new Error("OPENCODE_PLUGIN_VERSION must be an exact published plugin SDK version")
+}
+
 const generated = await import("./generate.ts")
 
-import { Script } from "@opencode-ai/script"
 import pkg from "../package.json"
 
 const singleFlag = process.argv.includes("--single")
@@ -192,6 +202,7 @@ for (const item of targets) {
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
       OPENCODE_VERSION: `'${Script.version}'`,
+      OPENCODE_PLUGIN_VERSION: JSON.stringify(pluginVersion ?? Script.version),
       OPENCODE_MODELS_DEV: generated.modelsData,
       OTUI_TREE_SITTER_WORKER_PATH: bunfsRoot + treeSitterWorkerPath,
       OPENCODE_WORKER_PATH: workerPath,

@@ -8,6 +8,7 @@ import { Agent } from "../../src/agent/agent"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Config } from "@/config/config"
+import { Plugin } from "@/plugin"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Session } from "@/session/session"
@@ -24,6 +25,7 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { Provider } from "@/provider/provider"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -41,6 +43,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       BackgroundJob.node,
       EventV2Bridge.node,
       Config.node,
+      Plugin.node,
       CrossSpawnSpawner.node,
       Session.node,
       SessionProjector.node,
@@ -51,6 +54,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       Database.node,
       RuntimeFlags.node,
       Ripgrep.node,
+      Provider.node,
     ]),
     [[RuntimeFlags.node, RuntimeFlags.layer(flags)]],
   )
@@ -224,13 +228,13 @@ describe("tool.task", () => {
 
       const first = yield* execute("call-A")
       const child = yield* sessions.get(first.metadata.sessionId)
-      expect(child.metadata).toEqual({
+      expect(child.metadata).toMatchObject({
         "opencode.task.origin": { version: 1, parentSessionID: chat.id, tool: "task", callID: "call-A" },
       })
 
       yield* execute("call-B", child.id)
       expect(seen.map((input) => input.taskOrigin?.taskCallID)).toEqual(["call-A", "call-B"])
-      expect((yield* sessions.get(child.id)).metadata).toEqual(child.metadata)
+      expect((yield* sessions.get(child.id)).metadata?.["opencode.task.origin"]).toEqual(child.metadata?.["opencode.task.origin"])
     }),
   )
 
@@ -562,7 +566,7 @@ describe("tool.task", () => {
       expect(yield* Effect.promise(() => cancelled.promise)).toBe(input.sessionID)
 
       const exit = yield* Fiber.await(fiber)
-      expect(Exit.isSuccess(exit)).toBe(true)
+      expect(Exit.isFailure(exit)).toBe(true)
     }),
   )
 

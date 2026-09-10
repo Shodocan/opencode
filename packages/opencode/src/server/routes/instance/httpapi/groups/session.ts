@@ -46,6 +46,10 @@ export const MessagesQuery = Schema.Struct({
   before: Schema.optional(Schema.String),
 })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
+export const StatusQuery = Schema.Struct({
+  ...WorkspaceRoutingQueryFields,
+  sessionID: Schema.optional(SessionID),
+})
 export const UpdatePayload = Schema.Struct({
   title: Schema.optional(Schema.String),
   metadata: Schema.optional(Session.Metadata),
@@ -119,14 +123,15 @@ export const SessionApi = HttpApi.make("session")
           }),
         ),
         HttpApiEndpoint.get("status", SessionPaths.status, {
-          query: WorkspaceRoutingQuery,
+          query: StatusQuery,
           success: described(StatusMap, "Get session status"),
-          error: HttpApiError.BadRequest,
+          error: [HttpApiError.BadRequest, ApiNotFoundError],
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.status",
             summary: "Get session status",
-            description: "Retrieve the current status of all sessions, including active, idle, and completed states.",
+            description:
+              "Retrieve active session statuses, or the explicit status of one existing session in the current directory.",
           }),
         ),
         HttpApiEndpoint.get("get", SessionPaths.get, {

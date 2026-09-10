@@ -626,6 +626,21 @@ describe("CompactionPlanner - pre-call rejections before any chunk planning", ()
     expect(data.reason).toBe("latest-turn-too-large")
     expect(data.phase).toBe("compaction")
   })
+
+  test("a single-turn session whose latest turn fits intact is admitted and chunked, not rejected as latest-turn-too-large", () => {
+    const P = planner()
+    // 190,000 chars = 47,500 tokens: the whole history is one latest turn
+    // measured once (47.5k < 237,568 budget), but the pre-fix gate measured
+    // it twice (chunk slot + tail slot) and rejected it. A single-turn
+    // session has no old turns, so zero chunks are planned.
+    const text = "s".repeat(190_000)
+    const messages = [userMessage({ parts: [{ id: partID(), sessionID, messageID: "pending" as SessionV1.TextPart["messageID"], type: "text", text }] }), assistantMessage({})]
+
+    const plan = P.plan({ messages, model: qwen(), cfg: cfg() })
+    expect(plan.chunks).toHaveLength(0)
+    expect(plan.latestTurn).toHaveLength(2)
+    expect(plan.proposals).toHaveLength(0)
+  })
 })
 
 // T05 expected RED: the current source exports the bounded planner, but no

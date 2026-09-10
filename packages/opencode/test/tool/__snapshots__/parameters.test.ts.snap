@@ -313,6 +313,25 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "description": "A short (3-5 words) description of the task",
       "type": "string",
     },
+    "model": {
+      "description": "Exact provider/model/variant override. Omitted variant does not inherit defaults.",
+      "properties": {
+        "id": {
+          "type": "string",
+        },
+        "providerID": {
+          "type": "string",
+        },
+        "variant": {
+          "type": "string",
+        },
+      },
+      "required": [
+        "id",
+        "providerID",
+      ],
+      "type": "object",
+    },
     "prompt": {
       "description": "The task for the agent to perform",
       "type": "string",
