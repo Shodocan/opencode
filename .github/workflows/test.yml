@@ -66,6 +66,11 @@ jobs:
       - name: Install pinned workflow integration dependencies
         run: npm ci --prefix "$WORKFLOWS_REPO_ROOT" --no-audit --no-fund
 
+      - name: Prepare Windows ripgrep
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/setup-ripgrep.ps1
+
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"
@@ -82,7 +87,9 @@ jobs:
 
       - name: Run unit tests
         timeout-minutes: 20
-        run: GITHUB_ACTIONS=false bun turbo test
+        run: |
+          GITHUB_ACTIONS=false bun turbo test --filter='!opencode'
+          GITHUB_ACTIONS=false bun run --cwd packages/opencode test --max-concurrency=2
         env:
           OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
 
@@ -152,10 +159,16 @@ jobs:
         working-directory: packages/app
         run: bunx playwright install chromium
 
+      - name: Prepare Windows ripgrep
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./.github/scripts/setup-ripgrep.ps1
+
       - name: Run app e2e tests
         run: bun --cwd packages/app test:e2e:local
         env:
           CI: true
+          PLAYWRIGHT_WORKERS: ${{ runner.os == 'Windows' && '2' || '5' }}
         timeout-minutes: 30
 
       - name: Upload Playwright artifacts

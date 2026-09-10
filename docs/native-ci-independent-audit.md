@@ -54,3 +54,39 @@ is not established. Windows core tests report 1091 passed and five Ripgrep
 extraction timeouts; Turbo interrupts remaining native work. Windows E2E remains
 pending. Logs: `/tmp/native-pr6-68fa-unit-{linux,windows}-author.log` and
 `/tmp/native-unknown-model-{candidate,baseline}-author.log`.
+
+A controlled two-run comparison reproduced the unknown-model failure on the
+untouched inherited source with CPU affinity restricted to two CPUs. The
+unchanged 13-case CLI file at Bun's default concurrency of 20 produced 12 passes
+and one failure: the unknown-model subprocess took 15,258ms against the unchanged
+15,000ms limit. The same file with `--max-concurrency=2` passed all 13 cases. Both
+runs executed 47 assertions, taking 43.90s and 43.28s respectively. Its SHA256
+remained `77f87af8e7da987bb33a0ec847c29b62770a6f30427e930c7c211107e5457255`,
+and its bytes exactly match inherited commit
+`7b06adb89e7642cc27c640e48152aa84d0495336`. No assertions, deadlines, source,
+or test files were changed for this comparison.
+
+This demonstrates a local resource-contention mechanism reproducing the CI
+symptom without candidate source. It supports limiting native CLI/test
+concurrency in hosted CI; it does not establish every scheduling factor behind
+the original hosted failure. The two planned runs are preserved in
+`/tmp/native-cli-contention-{default,two}-author.log`, with commands, environment,
+result counts, and log hashes in
+`/tmp/native-cli-contention-result-author.json`. The passing run's quiet output
+does not report individual subprocess durations, so none is inferred.
+
+The CI unit command now runs the other Turbo test tasks unchanged, then runs the
+native package's existing script with concurrency two. Independent Turbo graph
+comparison preserved all nine other executed commands and their dependency edges.
+Native test discovery, assertions, the 30-second test timeout, and inherited
+workflow-fixture environment remain unchanged.
+
+Windows CI also prepares the official ripgrep 15.1.0 executable before tests,
+verifying the release archive SHA256 before extraction. This avoids first-use
+download/extraction inside short test deadlines. The Windows browser job uses
+the existing `PLAYWRIGHT_WORKERS` setting with two workers; Linux retains five.
+The previous Windows browser run had 97 passes, eight cases passing on retry,
+and one final file-content visibility failure, with several teardown stalls.
+Reduced scheduling contention is a bounded investigation, not proof that this
+browser failure is repaired. Both platforms' complete final-head checks must
+pass before release; no assertions, retries, or test deadlines were weakened.
