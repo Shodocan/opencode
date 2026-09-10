@@ -49,6 +49,23 @@ jobs:
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
 
+      - name: Checkout pinned workflow integration fixture
+        if: github.repository == 'Shodocan/opencode' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: Shodocan/opencode-workflows
+          ref: d3c2b0b7e9248737692c43aa9b82afaf44ea10f9
+          ssh-key: ${{ secrets.WORKFLOWS_DEPLOY_KEY }}
+          ssh-strict: true
+          persist-credentials: false
+          path: .ci/workflows
+
+      - name: Prepare private workflow integration fixture
+        run: node .github/scripts/prepare-workflow-fixture.cjs
+
+      - name: Install pinned workflow integration dependencies
+        run: npm ci --prefix "$WORKFLOWS_REPO_ROOT" --no-audit --no-fund
+
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"
@@ -109,6 +126,8 @@ jobs:
 
       - name: Setup Bun
         uses: ./.github/actions/setup-bun
+        with:
+          node-version: "24.15"
 
       - name: Read Playwright version
         id: playwright-version
