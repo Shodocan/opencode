@@ -81,7 +81,7 @@ comparison preserved all nine other executed commands and their dependency edges
 Native test discovery, assertions, the 30-second test timeout, and inherited
 workflow-fixture environment remain unchanged.
 
-Windows CI also prepares the official ripgrep 15.1.0 executable before tests,
+The earlier Windows CI candidate prepared the official ripgrep 15.1.0 executable before tests,
 verifying the release archive SHA256 before extraction. This avoids first-use
 download/extraction inside short test deadlines. The Windows browser job uses
 the existing `PLAYWRIGHT_WORKERS` setting with two workers; Linux retains five.
@@ -89,4 +89,20 @@ The previous Windows browser run had 97 passes, eight cases passing on retry,
 and one final file-content visibility failure, with several teardown stalls.
 Reduced scheduling contention is a bounded investigation, not proof that this
 browser failure is repaired. Both platforms' complete final-head checks must
-pass before release; no assertions, retries, or test deadlines were weakened.
+pass before release under that earlier support scope; no assertions, retries, or test deadlines were weakened.
+
+The operator subsequently explicitly withdrew Windows support: "i dont have a
+windows machine anymore" and "so we dont need to support windows". This custom
+release and its target hosts are Linux-only. The final CI matrix therefore
+retains Linux unit and browser tests and removes Windows jobs and their unused
+ripgrep setup helper. Every Linux command, assertion, dependency fixture,
+timeout, and worker count remains unchanged. Typecheck, Storybook, Nix and PR
+checks remain required. All final-head checks must pass before release.
+
+The Windows installation failures remain preserved as failures. Both attempts
+at `fb25df529149b6dc174ec8972cea1adf5e88ac3e` failed before tests while Bun 1.3.14
+renamed a patched package into its cache. The failure reproduced without a
+restored dependency cache; no Windows validation is claimed. Investigation and
+retries stopped when the operator removed that platform from scope. This
+support decision changes CI only; the qualified Linux runtime and artifact
+inputs remain byte-identical to the successful Linux `fb25df5291` build.

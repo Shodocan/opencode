@@ -29,8 +29,6 @@ jobs:
         settings:
           - name: linux
             host: ubuntu-24.04
-          - name: windows
-            host: windows-2025
     runs-on: ${{ matrix.settings.host }}
     defaults:
       run:
@@ -66,11 +64,6 @@ jobs:
       - name: Install pinned workflow integration dependencies
         run: npm ci --prefix "$WORKFLOWS_REPO_ROOT" --no-audit --no-fund
 
-      - name: Prepare Windows ripgrep
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./.github/scripts/setup-ripgrep.ps1
-
       - name: Configure git identity
         run: |
           git config --global user.email "bot@opencode.ai"
@@ -91,7 +84,7 @@ jobs:
           GITHUB_ACTIONS=false bun turbo test --filter='!opencode'
           GITHUB_ACTIONS=false bun run --cwd packages/opencode test --max-concurrency=2
         env:
-          OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: ${{ runner.os == 'Windows' && 'true' || 'false' }}
+          OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER: "false"
 
       - name: Check generated client
         if: runner.os == 'Linux'
@@ -111,8 +104,6 @@ jobs:
         settings:
           - name: linux
             host: ubuntu-24.04
-          - name: windows
-            host: windows-2025
     runs-on: ${{ matrix.settings.host }}
     env:
       PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/.playwright-browsers
@@ -159,16 +150,11 @@ jobs:
         working-directory: packages/app
         run: bunx playwright install chromium
 
-      - name: Prepare Windows ripgrep
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: ./.github/scripts/setup-ripgrep.ps1
-
       - name: Run app e2e tests
         run: bun --cwd packages/app test:e2e:local
         env:
           CI: true
-          PLAYWRIGHT_WORKERS: ${{ runner.os == 'Windows' && '2' || '5' }}
+          PLAYWRIGHT_WORKERS: "5"
         timeout-minutes: 30
 
       - name: Upload Playwright artifacts
