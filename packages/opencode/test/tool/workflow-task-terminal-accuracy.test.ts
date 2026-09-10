@@ -102,8 +102,8 @@ it.instance("concurrent cancel and wait cannot acknowledge while owned scope cle
   yield* awaitWithTimeout(Deferred.await(running), "owned work did not start")
   const first = yield* jobs.cancel(job.id).pipe(Effect.forkChild({ startImmediately: true }))
   yield* awaitWithTimeout(Deferred.await(cleanup), "cancellation did not enter owned cleanup")
-  const second = yield* jobs.cancel(job.id).pipe(Effect.forkChild({ startImmediately: true }))
-  const waiting = yield* jobs.wait({ id: job.id }).pipe(Effect.forkChild({ startImmediately: true }))
+  const second = yield* jobs.cancel(job.id, { quiescent: true }).pipe(Effect.forkChild({ startImmediately: true }))
+  const waiting = yield* jobs.wait({ id: job.id, quiescent: true }).pipe(Effect.forkChild({ startImmediately: true }))
   const earlyCancel = second.pollUnsafe()
   const earlyWait = waiting.pollUnsafe()
   // Release before asserting so a failing regression still cleans its scope.

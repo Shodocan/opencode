@@ -153,7 +153,7 @@ const cancelBackgroundJobs = Effect.fn("SessionRunState.cancelBackgroundJobs")(f
     yield* Effect.forEach(
       batch,
       (job) =>
-        background.cancel(job.id).pipe(
+        background.cancel(job.id, { quiescent: true }).pipe(
           Effect.tap(() =>
             Effect.sync(() => {
               cancelled.add(job.id)

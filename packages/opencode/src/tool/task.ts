@@ -430,7 +430,7 @@ export const TaskTool = Tool.define(
       })
 
       const notify = Effect.fn("TaskTool.notifyBackgroundResult")(function* (jobID: string) {
-        yield* background.wait({ id: jobID }).pipe(
+        yield* background.wait({ id: jobID, quiescent: true }).pipe(
           Effect.flatMap((result) => {
             if (result.info?.status === "completed") return inject("completed", result.info.output ?? "")
             if (result.info?.status === "error") return inject("error", result.info.error ?? "")
@@ -458,82 +458,78 @@ export const TaskTool = Tool.define(
         }
       }
 
-      const info = yield* background.start({
-        id: nextSession.id,
-        type: id,
-        title: params.description,
-        metadata,
-        onPromote: Effect.all([
-          ctx.metadata({
-            title: params.description,
-            metadata: { ...metadata, background: true, jobId: nextSession.id },
-          }),
-          notify(nextSession.id),
-        ]),
-        run: runTask().pipe(Effect.onExit(terminal)),
-      })
-
-      function backgroundResult() {
-        lifetime.background = true
-        return {
-          title: params.description,
-          metadata: {
-            ...metadata,
-            background: true,
-            jobId: info.id,
-          },
-          output: renderOutput({
-            sessionID: nextSession.id,
-            state: "running",
-            summary: "Background task started",
-            text: BACKGROUND_STARTED,
-          }),
-        }
-      }
-
-      if (runInBackground) {
-        yield* notify(info.id)
-        return backgroundResult()
-      }
-
-      const runCancel = yield* EffectBridge.make()
-      const cancel = ops.cancel(nextSession.id)
-
-      function onAbort() {
-        runCancel.fork(cancel)
-      }
-
+      // Mask acquisition and install cleanup before a started child can outlive
+      // an interrupted caller. Background ownership transfers only on success.
       return yield* Effect.acquireUseRelease(
-        Effect.sync(() => {
-          ctx.abort.addEventListener("abort", onAbort)
-          if (ctx.abort.aborted) onAbort()
-        }),
-        () =>
-          Effect.gen(function* () {
-            const result = yield* Effect.raceFirst(
-              background.wait({ id: nextSession.id }).pipe(Effect.map((waited) => waited.info)),
-              background.waitForPromotion(nextSession.id),
-            )
-            if (result?.metadata?.background === true) return backgroundResult()
-            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
-            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
-            return {
+        background.start({
+          id: nextSession.id,
+          type: id,
+          title: params.description,
+          metadata,
+          onPromote: Effect.all([
+            ctx.metadata({
               title: params.description,
-              metadata,
-              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+              metadata: { ...metadata, background: true, jobId: nextSession.id },
+            }),
+            notify(nextSession.id),
+          ]),
+          run: runTask().pipe(Effect.onExit(terminal)),
+        }),
+        (info) =>
+          Effect.gen(function* () {
+            function backgroundResult() {
+              return {
+                title: params.description,
+                metadata: { ...metadata, background: true, jobId: info.id },
+                output: renderOutput({
+                  sessionID: nextSession.id,
+                  state: "running",
+                  summary: "Background task started",
+                  text: BACKGROUND_STARTED,
+                }),
+              }
             }
+
+            if (runInBackground) {
+              yield* notify(info.id)
+              return backgroundResult()
+            }
+
+            const runCancel = yield* EffectBridge.make()
+            const onAbort = () => runCancel.fork(ops.cancel(nextSession.id))
+            return yield* Effect.acquireUseRelease(
+              Effect.sync(() => {
+                ctx.abort.addEventListener("abort", onAbort)
+                if (ctx.abort.aborted) onAbort()
+              }),
+              () => Effect.gen(function* () {
+                const result = yield* Effect.raceFirst(
+                  background.wait({ id: nextSession.id, quiescent: true }).pipe(Effect.map((waited) => waited.info)),
+                  background.waitForPromotion(nextSession.id),
+                )
+                if (result?.metadata?.background === true) return backgroundResult()
+                if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
+                if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
+                return {
+                  title: params.description,
+                  metadata,
+                  output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+                }
+              }),
+              () => Effect.sync(() => ctx.abort.removeEventListener("abort", onAbort)),
+            )
           }),
         (_, exit) =>
           Effect.gen(function* () {
-            if (Exit.hasInterrupts(exit))
-              yield* Effect.all([cancel, background.cancel(nextSession.id)], { discard: true })
-          }).pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                ctx.abort.removeEventListener("abort", onAbort)
-              }),
-            ),
-          ),
+            if (Exit.isSuccess(exit)) {
+              lifetime.background = exit.value.metadata.background === true
+              return
+            }
+            yield* Effect.all([
+              ops.cancel(nextSession.id),
+              background.cancel(nextSession.id, { quiescent: true }),
+            ], { discard: true })
+          }),
       )
     })
 

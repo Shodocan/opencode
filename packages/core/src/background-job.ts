@@ -82,11 +82,18 @@ export type ExtendInput = {
 export type WaitInput = {
   id: string
   timeout?: number
+  /** Wait for local cleanup as well as settlement before acknowledging completion. */
+  quiescent?: boolean
 }
 
 export type WaitResult = {
   info?: Info
   timedOut: boolean
+}
+
+export type CancelOptions = {
+  /** Join cleanup even when this job has already settled. */
+  quiescent?: boolean
 }
 
 export interface Interface {
@@ -97,7 +104,7 @@ export interface Interface {
   readonly wait: (input: WaitInput) => Effect.Effect<WaitResult>
   readonly waitForPromotion: (id: string) => Effect.Effect<Info>
   readonly promote: (id: string) => Effect.Effect<Info | undefined>
-  readonly cancel: (id: string) => Effect.Effect<Info | undefined>
+  readonly cancel: (id: string, options?: CancelOptions) => Effect.Effect<Info | undefined>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/BackgroundJob") {}
@@ -304,17 +311,25 @@ export const make = Effect.gen(function* () {
   const wait: Interface["wait"] = Effect.fn("BackgroundJob.wait")(function* (input) {
     const job = (yield* SynchronizedRef.get(state.jobs)).get(input.id)
     if (!job) return { timedOut: false }
-    const settled = Deferred.await(job.done).pipe(
-      Effect.flatMap((info) => Deferred.await(job.closed).pipe(Effect.as(info))),
-    )
+    // General callers may need the settled result to release a held finalizer.
+    // Native Task callers explicitly request the stronger cleanup acknowledgement.
+    if (!input.quiescent && job.info.status !== "running") return { info: snapshot(job), timedOut: false }
+    const settled = input.quiescent
+      ? Deferred.await(job.done).pipe(Effect.flatMap((info) => Deferred.await(job.closed).pipe(Effect.as(info))))
+      : Deferred.await(job.done)
+    // The ID may have been reused while this generation was cleaning up.
+    const latest = Effect.gen(function* () {
+      if (input.quiescent && (yield* Deferred.isDone(job.done))) return yield* Deferred.await(job.done)
+      return snapshot(job)
+    })
     if (input.timeout === undefined) return { info: yield* settled, timedOut: false }
     if (input.timeout <= 0) {
-      if (yield* Deferred.isDone(job.closed)) return { info: yield* settled, timedOut: false }
-      return { info: snapshot(job), timedOut: true }
+      if (input.quiescent && (yield* Deferred.isDone(job.closed))) return { info: yield* settled, timedOut: false }
+      return { info: yield* latest, timedOut: true }
     }
     const info = yield* settled.pipe(Effect.timeoutOption(input.timeout))
     if (info._tag === "Some") return { info: info.value, timedOut: false }
-    return { info: snapshot(job), timedOut: true }
+    return { info: yield* latest, timedOut: true }
   })
 
   const waitForPromotion: Interface["waitForPromotion"] = Effect.fn("BackgroundJob.waitForPromotion")(function* (id) {
@@ -351,12 +366,13 @@ export const make = Effect.gen(function* () {
     return result.info
   })
 
-  const cancel: Interface["cancel"] = Effect.fn("BackgroundJob.cancel")(function* (id) {
+  const cancel: Interface["cancel"] = Effect.fn("BackgroundJob.cancel")(function* (id, options) {
     const completed_at = yield* Clock.currentTimeMillis
     const result = yield* SynchronizedRef.modify(state.jobs, (jobs): readonly [FinishResult, Map<string, Active>] => {
       const job = jobs.get(id)
       if (!job) return [{}, jobs]
-      if (job.info.status !== "running") return [{ info: snapshot(job), closed: job.closed }, jobs]
+      if (job.info.status !== "running")
+        return [{ info: snapshot(job), ...(options?.quiescent ? { closed: job.closed } : {}) }, jobs]
       const next = {
         ...job,
         onPromote: undefined,
