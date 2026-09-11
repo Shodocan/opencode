@@ -455,6 +455,22 @@ describe("session.llm-native.request", () => {
     ).toEqual({ type: "unsupported", reason: "API key is not configured" })
   })
 
+  test("carries a request-scoped category through native step finish", async () => {
+    const category = { source: "host_policy_resolution" as const, category: "inspect" as const,
+      matrixSHA256: "c".repeat(64) }
+    const llmClient = {
+      prepare: () => Effect.die("unused"),
+      stream: () => Stream.make(LLMEvent.stepFinish({ index: 0, reason: "stop" })),
+      generate: () => Effect.die("unused"),
+    } as LLMClientShape
+    const native = LLMNativeRuntime.stream({ model: baseModel, provider: providerInfo, auth: undefined,
+      llmClient, messages: [], tools: {}, headers: {}, abort: new AbortController().signal, category })
+    expect(native.type).toBe("supported")
+    if (native.type === "unsupported") throw new Error(native.reason)
+    const events = Array.from(await Effect.runPromise(Stream.runCollect(native.stream)))
+    expect(events[0]).toMatchObject({ type: "step-finish", category })
+  })
+
   test("enables native runtime for Anthropic API-key models", () => {
     expect(
       LLMNativeRuntime.status({

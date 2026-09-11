@@ -258,6 +258,12 @@ export const InferenceTransportRoute = Schema.Struct({
   observation_id: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
 })
 
+export const InferenceCategory = Schema.Struct({
+  source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"]),
+  matrix_sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+})
+
 const InferenceReceipt = Schema.Struct({
   requested: Schema.Struct({
     provider_id: InferenceIdentifier,
@@ -270,6 +276,7 @@ const InferenceReceipt = Schema.Struct({
     upstream_actual_identity: Schema.Literal("unknown"),
   }),
   transport_route: Schema.optional(InferenceTransportRoute),
+  category: Schema.optional(InferenceCategory),
   usage: Schema.optional(InferenceUsageReceipt),
   cost: Schema.Struct({
     amount: Schema.Finite,

@@ -1,4 +1,4 @@
-import { FinishReason, LLMEvent, ProviderMetadata, ToolResultValue } from "@opencode-ai/llm"
+import { FinishReason, LLMEvent, ProviderMetadata, ToolResultValue, type InferenceCategory } from "@opencode-ai/llm"
 import { Effect, Schema } from "effect"
 import { type streamText } from "ai"
 import { errorMessage } from "@/util/error"
@@ -9,8 +9,7 @@ type Result = Awaited<ReturnType<typeof streamText>>
 type AISDKEvent = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
 
 type RouteBinding = { providerID: string; nonce: string; sessionID: string }
-
-export function adapterState(route?: RouteBinding) {
+export function adapterState(route?: RouteBinding, category?: InferenceCategory) {
   return {
     step: 0,
     text: 0,
@@ -20,6 +19,7 @@ export function adapterState(route?: RouteBinding) {
     toolNames: {} as Record<string, string>,
     copilotTotalNanoAiu: undefined as number | undefined,
     route,
+    category,
   }
 }
 
@@ -156,6 +156,7 @@ export function toLLMEvents(
             reason: finishReason(event.finishReason),
             responseModel: responseModel(event.response.modelId),
             transportRoute: transportRoute(state, event.response.headers),
+            category: state.category,
             usage: usage(event.usage),
             providerMetadata: metadata,
           }),
@@ -173,7 +174,7 @@ export function toLLMEvents(
         ]
         // Reset so the adapter can be reused for a follow-up stream without leaking
         // counters or block IDs. adapterState() is the single source of truth for shape.
-        Object.assign(state, adapterState(state.route))
+        Object.assign(state, adapterState(state.route, state.category))
         return events
       })
 

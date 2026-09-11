@@ -17,6 +17,7 @@ export {
   Format,
   Info,
   InferenceIdentifier,
+  InferenceCategory,
   InferenceTransportRoute,
   MessageID,
   OutputFormatJsonSchema,

@@ -124,6 +124,39 @@ function assertNoFunctions(value: unknown, path = "$") {
 }
 
 describe("session.llm-request-budget (T02)", () => {
+  test("accepts category only from chat.params and strips the reserved option", async () => {
+    const spoof = { source: "workflow_frozen_matrix", category: "planning", matrix_sha256: "f".repeat(64) }
+    const trusted = { source: "host_policy_resolution", category: "coordinate", matrix_sha256: "a".repeat(64) }
+    const plugin = {
+      trigger: (name: string, _input: unknown, output: any) =>
+        Effect.succeed(name === "chat.params" ? { ...output, options: { ...output.options, __opencodeModelCategory: trusted } } : output),
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    } as never
+    const prepared = await run(prepareInput({ model: { options: { __opencodeModelCategory: spoof } },
+      agent: { options: { __opencodeModelCategory: spoof } }, plugin }))
+    expect(prepared.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(prepared.params.options).not.toHaveProperty("__opencodeModelCategory")
+    expect(prepared.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
+
+    const absent = await run(prepareInput({ model: { options: { __opencodeModelCategory: spoof } },
+      agent: { options: { __opencodeModelCategory: spoof } } }))
+    expect(absent.category).toBeUndefined()
+    expect(JSON.stringify(absent)).not.toContain("__opencodeModelCategory")
+
+    for (const category of [["coordinate"], { toString: () => { throw new Error("must not coerce") } }]) {
+      const malformedPlugin = {
+        trigger: (name: string, _input: unknown, output: any) => Effect.succeed(name === "chat.params"
+          ? { ...output, options: { ...output.options, __opencodeModelCategory: { ...trusted, category } } }
+          : output),
+        list: () => Effect.succeed([]),
+        init: () => Effect.void,
+      } as never
+      const malformed = await run(prepareInput({ plugin: malformedPlugin }))
+      expect(malformed.category).toBeUndefined()
+      expect(malformed.params.options).not.toHaveProperty("__opencodeModelCategory")
+    }
+  })
   test("returns a separate data-only budgetProjection while Prepared.tools stays executable", async () => {
     const gitlabOutput = { output: "ran-inline" }
     const prepared = await run(

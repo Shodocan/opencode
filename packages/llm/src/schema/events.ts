@@ -189,6 +189,13 @@ export const TransportRoute = Schema.Struct({
 }).annotate({ identifier: "LLM.Event.TransportRoute" })
 export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
 
+export const InferenceCategory = Schema.Struct({
+  source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"]),
+  matrixSHA256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+}).annotate({ identifier: "LLM.Event.InferenceCategory" })
+export type InferenceCategory = Schema.Schema.Type<typeof InferenceCategory>
+
 export const StepFinish = Schema.Struct({
   type: Schema.tag("step-finish"),
   index: Schema.Number,
@@ -197,6 +204,7 @@ export const StepFinish = Schema.Struct({
   responseModel: Schema.optional(Schema.String),
   /** Managed gateway selection receipt; it does not prove provider-side model weights or effort. */
   transportRoute: Schema.optional(TransportRoute),
+  category: Schema.optional(InferenceCategory),
   usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.StepFinish" })

@@ -236,6 +236,15 @@ describe("session.llm.ai-sdk adapter", () => {
       && events[0].transportRoute === undefined)).toBe(true)
   })
 
+  test("carries a request-scoped category through AI SDK step finish", async () => {
+    const category = { source: "workflow_frozen_matrix" as const, category: "review" as const,
+      matrixSHA256: "a".repeat(64) }
+    const events = await Effect.runPromise(LLMAISDK.toLLMEvents(LLMAISDK.adapterState(undefined, category),
+      uncheckedAdapterEvent({ type: "finish-step", response: { id: "r", timestamp: new Date(0), modelId: "m" },
+        finishReason: "stop", rawFinishReason: "stop", usage: {} })))
+    expect(events[0]).toMatchObject({ type: "step-finish", category })
+  })
+
   test("maps AI SDK stream chunks without losing session-visible fields", async () => {
     const metadata = { openai: { itemID: "item-1" } }
     const events = await adapt([

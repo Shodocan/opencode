@@ -271,6 +271,7 @@ const live: Layer.Layer<
           abort: input.abort,
           cfg,
           phase,
+          category: prepared.category,
         })
         if (native.type === "supported") {
           yield* Effect.logInfo("llm runtime selected", {
@@ -420,6 +421,7 @@ const live: Layer.Layer<
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
         type: "ai-sdk" as const,
+        category: prepared.category,
         route:
           input.model.providerID === "opencode-route"
             ? {
@@ -502,7 +504,7 @@ const live: Layer.Layer<
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
-            const state = LLMAISDK.adapterState(result.route)
+            const state = LLMAISDK.adapterState(result.route, result.category)
             return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(

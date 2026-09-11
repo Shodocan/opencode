@@ -15,6 +15,7 @@ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import z from "zod"
+import type { InferenceCategory } from "@opencode-ai/llm"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
@@ -50,6 +51,20 @@ export type Prepared = {
   readonly messageTransformOptions: Record<string, any>
   readonly headers: Record<string, string>
   readonly budgetProjection: BudgetProjection
+  readonly category?: InferenceCategory
+}
+
+const CATEGORY_OPTION = "__opencodeModelCategory"
+
+function inferenceCategory(value: unknown): InferenceCategory | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  const item = value as Record<string, unknown>
+  if (!Object.keys(item).every((key) => ["source", "category", "matrix_sha256"].includes(key))) return
+  if (item.source !== "host_policy_resolution" && item.source !== "workflow_frozen_matrix") return
+  if (typeof item.category !== "string") return
+  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"].includes(item.category)) return
+  if (typeof item.matrix_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(item.matrix_sha256)) return
+  return { source: item.source, category: item.category as InferenceCategory["category"], matrixSHA256: item.matrix_sha256 }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +172,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  // This value is trusted only when a hook adds it after merged caller/config options are purged.
+  delete options[CATEGORY_OPTION]
   if (
     input.model.api.npm === "@ai-sdk/azure" &&
     (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)
@@ -198,6 +215,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       options,
     },
   )
+  const category = inferenceCategory(params.options[CATEGORY_OPTION])
+  delete params.options[CATEGORY_OPTION]
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",
@@ -315,6 +334,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         : {}),
     },
     budgetProjection,
+    category,
   }
 })
 

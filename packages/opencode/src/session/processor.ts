@@ -458,6 +458,11 @@ const layer = Layer.effect(
               ...(value.transportRoute.effort === undefined ? {} : { effort: value.transportRoute.effort }),
               observation_id: value.transportRoute.observationID,
             }
+            const inferenceCategory = value.category && {
+              source: value.category.source,
+              category: value.category.category,
+              matrix_sha256: value.category.matrixSHA256,
+            }
             if (Array.isArray(dropped) && dropped.length > 0) {
               yield* Effect.logWarning("thinking blocks dropped by provider", {
                 sessionID: ctx.sessionID,
@@ -518,6 +523,9 @@ const layer = Layer.effect(
                       ...(ctx.model.providerID === "opencode-route" &&
                       Schema.is(SessionV1.InferenceTransportRoute)(transportRoute)
                         ? { transport_route: transportRoute }
+                        : {}),
+                      ...(inferenceCategory && Schema.is(SessionV1.InferenceCategory)(inferenceCategory)
+                        ? { category: inferenceCategory }
                         : {}),
                       ...(reportedUsage && Object.keys(reportedUsage).length > 0
                         ? { usage: { source: "llm_normalized", ...reportedUsage } }
