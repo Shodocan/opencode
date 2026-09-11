@@ -328,6 +328,19 @@ const layer = Layer.effect(
         for (const hook of s.hooks) {
           const fn = hook[name] as any
           if (!fn) continue
+          if (name === "experimental.chat.messages.transform") {
+            yield* Effect.callback<void>((resume, signal) => {
+              const pending: Promise<void> = Promise.resolve().then(() => fn({ ...input, signal }, output))
+              pending.then(
+                () => resume(Effect.void),
+                (error) => resume(Effect.die(error)),
+              )
+              // Effect aborts its signal before running this finalizer. Join the
+              // hook's cleanup so interruption cannot leave a transform running.
+              return Effect.promise(() => pending).pipe(Effect.exit, Effect.asVoid)
+            })
+            continue
+          }
           yield* Effect.promise(async () => fn(input, output))
         }
       }).pipe(Effect.onExit((exit) => {

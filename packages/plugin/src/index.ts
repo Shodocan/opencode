@@ -316,7 +316,14 @@ export interface Hooks {
     },
   ) => Promise<void>
   "experimental.chat.messages.transform"?: (
-    input: {},
+    input: {
+      /**
+       * Native cancellation signal. Abort pending work and settle the hook after
+       * cleanup; native interruption waits for this Promise to settle. A hook
+       * that ignores cancellation can delay interruption indefinitely.
+       */
+      signal?: AbortSignal
+    },
     output: {
       messages: {
         info: Message
