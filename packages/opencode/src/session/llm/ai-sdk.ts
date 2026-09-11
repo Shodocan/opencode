@@ -60,8 +60,14 @@ function usage(value: unknown) {
     reasoningTokens: item.outputTokenDetails?.reasoningTokens ?? item.reasoningTokens,
     cacheReadInputTokens: item.inputTokenDetails?.cacheReadTokens ?? item.cachedInputTokens,
     cacheWriteInputTokens: item.inputTokenDetails?.cacheWriteTokens,
-  }).filter((entry) => entry[1] !== undefined)
+  }).filter((entry) => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0)
   return entries.length === 0 ? undefined : Object.fromEntries(entries)
+}
+
+function responseModel(value: unknown) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value))
+    return
+  return value
 }
 
 function currentTextID(state: ReturnType<typeof adapterState>, id: string | undefined) {
@@ -105,6 +111,7 @@ export function toLLMEvents(
           LLMEvent.stepFinish({
             index: state.step++,
             reason: finishReason(event.finishReason),
+            responseModel: responseModel(event.response.modelId),
             usage: usage(event.usage),
             providerMetadata: metadata,
           }),

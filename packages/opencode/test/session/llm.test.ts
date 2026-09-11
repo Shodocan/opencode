@@ -281,6 +281,7 @@ describe("session.llm.ai-sdk adapter", () => {
         type: "step-finish",
         index: 0,
         reason: "unknown",
+        responseModel: "gpt-test",
         usage: {
           inputTokens: 10,
           outputTokens: 5,
@@ -384,6 +385,54 @@ describe("session.llm.ai-sdk adapter", () => {
     const stepFinish = events[0]
     if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
     expect(stepFinish.usage).toBeUndefined()
+    expect(stepFinish.responseModel).toBe("gpt-test")
+  })
+
+  test("omits invalid provider usage counters while preserving reported zeros", async () => {
+    const events = await adapt([
+      {
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "gpt-test" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: Number.NaN,
+          outputTokens: 7,
+          totalTokens: Number.POSITIVE_INFINITY,
+          inputTokenDetails: { noCacheTokens: undefined, cacheReadTokens: 0, cacheWriteTokens: -1 },
+          outputTokenDetails: { textTokens: 7, reasoningTokens: -1 },
+        },
+      },
+    ])
+    expect(events).toHaveLength(1)
+    const step = events[0]
+    if (step.type !== "step-finish") throw new Error("expected step-finish")
+    expect(step.usage).toMatchObject({ outputTokens: 7, cacheReadInputTokens: 0 })
+    expect(Object.keys(step.usage ?? {}).sort()).toEqual(["cacheReadInputTokens", "outputTokens"])
+    expect(step.responseModel).toBe("gpt-test")
+  })
+
+  test("drops unsafe provider response model identifiers", async () => {
+    const events = await adapt([
+      {
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: `model\n${"x".repeat(210)}` },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          outputTokenDetails: { textTokens: 0, reasoningTokens: 0 },
+        },
+      },
+    ])
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: "step-finish" })
+    expect("responseModel" in events[0] ? events[0].responseModel : undefined).toBeUndefined()
   })
 
   test("reuses adapter state cleanly across streams once finish has fired", async () => {

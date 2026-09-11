@@ -184,6 +184,8 @@ export const StepFinish = Schema.Struct({
   type: Schema.tag("step-finish"),
   index: Schema.Number,
   reason: FinishReason,
+  /** Model identifier reported by the provider response; not physical-route proof. */
+  responseModel: Schema.optional(Schema.String),
   usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.StepFinish" })

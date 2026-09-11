@@ -237,12 +237,45 @@ export const StepStartPart = Schema.Struct({
 }).annotate({ identifier: "StepStartPart" })
 export type StepStartPart = Types.DeepMutable<Schema.Schema.Type<typeof StepStartPart>>
 
+const UsageCount = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
+export const InferenceIdentifier = Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,200}$/))
+
+const InferenceUsageReceipt = Schema.Struct({
+  source: Schema.Literal("llm_normalized"),
+  input_tokens: Schema.optional(UsageCount),
+  output_tokens: Schema.optional(UsageCount),
+  total_tokens: Schema.optional(UsageCount),
+  reasoning_tokens: Schema.optional(UsageCount),
+  cache_read_input_tokens: Schema.optional(UsageCount),
+  cache_write_input_tokens: Schema.optional(UsageCount),
+})
+
+const InferenceReceipt = Schema.Struct({
+  requested: Schema.Struct({
+    provider_id: InferenceIdentifier,
+    model_id: InferenceIdentifier,
+    effort: Schema.optional(InferenceIdentifier),
+  }),
+  response: Schema.Struct({
+    model_id: Schema.optional(InferenceIdentifier),
+    source: Schema.Literal("provider_response"),
+    upstream_actual_identity: Schema.Literal("unknown"),
+  }),
+  usage: Schema.optional(InferenceUsageReceipt),
+  cost: Schema.Struct({
+    amount: Schema.Finite,
+    semantics: Schema.Literal("configured_rate_estimate"),
+    actual_bill: Schema.Literal("unknown"),
+  }),
+})
+
 export const StepFinishPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("step-finish"),
   reason: Schema.String,
   snapshot: Schema.optional(Schema.String),
   cost: Schema.Finite,
+  inference: Schema.optional(InferenceReceipt),
   tokens: Schema.Struct({
     total: Schema.optional(Schema.Finite),
     input: Schema.Finite,

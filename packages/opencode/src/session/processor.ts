@@ -467,6 +467,18 @@ const layer = Layer.effect(
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            const reportedUsage = value.usage
+              ? Object.fromEntries(
+                  Object.entries({
+                    input_tokens: value.usage.inputTokens,
+                    output_tokens: value.usage.outputTokens,
+                    total_tokens: value.usage.totalTokens,
+                    reasoning_tokens: value.usage.reasoningTokens,
+                    cache_read_input_tokens: value.usage.cacheReadInputTokens,
+                    cache_write_input_tokens: value.usage.cacheWriteInputTokens,
+                  }).filter((entry) => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0),
+                )
+              : undefined
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -476,6 +488,36 @@ const layer = Layer.effect(
               type: "step-finish",
               tokens: usage.tokens,
               cost: usage.cost,
+              // Optional accounting must never prevent a completed step from
+              // sealing when a custom route cannot be represented safely.
+              inference:
+                Schema.is(SessionV1.InferenceIdentifier)(ctx.model.providerID) &&
+                Schema.is(SessionV1.InferenceIdentifier)(ctx.model.id)
+                  ? {
+                      requested: {
+                        provider_id: ctx.model.providerID,
+                        model_id: ctx.model.id,
+                        ...(Schema.is(SessionV1.InferenceIdentifier)(ctx.assistantMessage.variant)
+                          ? { effort: ctx.assistantMessage.variant }
+                          : {}),
+                      },
+                      response: {
+                        ...(Schema.is(SessionV1.InferenceIdentifier)(value.responseModel)
+                          ? { model_id: value.responseModel }
+                          : {}),
+                        source: "provider_response",
+                        upstream_actual_identity: "unknown",
+                      },
+                      ...(reportedUsage && Object.keys(reportedUsage).length > 0
+                        ? { usage: { source: "llm_normalized", ...reportedUsage } }
+                        : {}),
+                      cost: {
+                        amount: usage.cost,
+                        semantics: "configured_rate_estimate",
+                        actual_bill: "unknown",
+                      },
+                    }
+                  : undefined,
             })
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {

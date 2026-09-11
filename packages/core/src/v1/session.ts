@@ -16,6 +16,7 @@ export {
   FileSource,
   Format,
   Info,
+  InferenceIdentifier,
   MessageID,
   OutputFormatJsonSchema,
   OutputFormatText,

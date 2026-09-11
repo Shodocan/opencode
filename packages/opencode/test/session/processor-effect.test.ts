@@ -244,11 +244,12 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         const database = yield* Database.Service
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.text("hello")
+        yield* llm.text("hello", { usage: { input: 11, output: 7 } })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "hi")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        msg.variant = "xhigh"
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
         const handle = yield* processors.create({
           assistantMessage: msg,
@@ -280,10 +281,70 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+        const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+        expect(finish?.inference).toEqual({
+          requested: { provider_id: "test", model_id: "test-model", effort: "xhigh" },
+          response: {
+            model_id: "test-model",
+            source: "provider_response",
+            upstream_actual_identity: "unknown",
+          },
+          usage: {
+            source: "llm_normalized",
+            input_tokens: 11,
+            output_tokens: 7,
+            total_tokens: 18,
+            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+          cost: { amount: 0, semantics: "configured_rate_estimate", actual_bill: "unknown" },
+        })
       }),
     { config: (url) => providerCfg(url) },
   ),
 )
+
+for (const malformed of ["effort", "model"] as const) {
+  it.live(`session.processor seals completed steps with unrepresentable receipt ${malformed}`, () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          yield* llm.text("completed", { usage: { input: 11, output: 7 } })
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          msg.variant = malformed === "effort" ? "unsafe\neffort" : "xhigh"
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: malformed === "model" ? { ...mdl, id: ModelV2.ID.make("x".repeat(201)) } : mdl,
+          })
+          const result = yield* handle.process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "hi" }],
+            tools: {},
+          })
+          const parts = yield* MessageV2.parts(msg.id)
+          const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+          expect(result).toBe("continue")
+          expect(finish).toBeDefined()
+          expect(finish?.tokens.output).toBe(7)
+          if (malformed === "model") expect(finish?.inference).toBeUndefined()
+          if (malformed === "effort") {
+            expect(finish?.inference?.requested).toEqual({ provider_id: "test", model_id: "test-model" })
+            expect(finish?.inference?.usage?.output_tokens).toBe(7)
+          }
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
 
 it.live("session.processor effect tests preserve text start time", () =>
   provideTmpdirServer(
