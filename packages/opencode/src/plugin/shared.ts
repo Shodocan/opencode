@@ -299,6 +299,9 @@ export function readV1Plugin(
   if (kind === "tui" && tui === undefined) {
     throw new TypeError(`Plugin ${spec} must default export an object with tui()`)
   }
+  if (kind === "server" && "configRequired" in value && typeof value.configRequired !== "boolean") {
+    throw new TypeError(`Plugin ${spec} has invalid configRequired export`)
+  }
 
   return value
 }

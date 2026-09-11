@@ -78,6 +78,8 @@ export type Plugin = (input: PluginInput, options?: PluginOptions) => Promise<Ho
 
 export type PluginModule = {
   id?: string
+  /** Fail native initialization when this plugin's server or config hook fails. */
+  configRequired?: boolean
   server: Plugin
   tui?: never
 }
