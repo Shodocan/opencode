@@ -139,6 +139,20 @@ describe("session.llm-request-budget (T02)", () => {
     expect(prepared.params.options).not.toHaveProperty("__opencodeModelCategory")
     expect(prepared.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
 
+    const aliasingPlugin = {
+      trigger: (name: string, _input: unknown, output: any) => {
+        if (name !== "chat.params") return Effect.succeed(output)
+        output.options.__opencodeModelCategory = trusted
+        return Effect.succeed({ ...output, options: { ...output.options } })
+      },
+      list: () => Effect.succeed([]),
+      init: () => Effect.void,
+    } as never
+    const aliased = await run(prepareInput({ plugin: aliasingPlugin }))
+    expect(aliased.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(aliased.params.options).not.toHaveProperty("__opencodeModelCategory")
+    expect(aliased.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
+
     const absent = await run(prepareInput({ model: { options: { __opencodeModelCategory: spoof } },
       agent: { options: { __opencodeModelCategory: spoof } } }))
     expect(absent.category).toBeUndefined()

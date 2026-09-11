@@ -217,6 +217,7 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   )
   const category = inferenceCategory(params.options[CATEGORY_OPTION])
   delete params.options[CATEGORY_OPTION]
+  delete options[CATEGORY_OPTION]
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",
