@@ -272,6 +272,33 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           ),
   })
 
+  const preparedHeaders = {
+    ...(input.model.providerID.startsWith("opencode")
+      ? {
+          ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
+          "x-opencode-session": input.sessionID,
+          "x-opencode-request": input.user.id,
+          "x-opencode-client": input.flags?.client,
+          "User-Agent": USER_AGENT,
+        }
+      : {
+          "x-session-affinity": input.sessionID,
+          "X-Session-Id": input.sessionID,
+          "User-Agent": USER_AGENT,
+        }),
+    ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+    ...input.model.headers,
+    ...headers,
+  }
+  const protectedHeaders =
+    input.model.providerID === "opencode-route"
+      ? Object.fromEntries(
+          Object.entries(preparedHeaders).filter(
+            ([name]) => !["x-opencode-session", "x-opencode-inference-nonce"].includes(name.toLowerCase()),
+          ),
+        )
+      : preparedHeaders
+
   return {
     system,
     messages,
@@ -279,22 +306,13 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params,
     messageTransformOptions: options,
     headers: {
-      ...(input.model.providerID.startsWith("opencode")
+      ...protectedHeaders,
+      ...(input.model.providerID === "opencode-route"
         ? {
-            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
             "x-opencode-session": input.sessionID,
-            "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags?.client,
-            "User-Agent": USER_AGENT,
+            "x-opencode-inference-nonce": crypto.randomUUID().replaceAll("-", ""),
           }
-        : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
-            "User-Agent": USER_AGENT,
-          }),
-      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-      ...input.model.headers,
-      ...headers,
+        : {}),
     },
     budgetProjection,
   }

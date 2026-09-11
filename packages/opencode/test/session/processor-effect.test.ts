@@ -209,6 +209,31 @@ const providerErrorLLM = Layer.succeed(
 const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
 
+const transportReceiptLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({
+          index: 0,
+          reason: "stop",
+          responseModel: "qwen3.8-thinking",
+          usage: { inputTokens: 10, outputTokens: 4 },
+          transportRoute: {
+            source: "managed_gateway_attestation",
+            provider: "ollama",
+            model: "deepseek-v4.1-flash",
+            effort: "high",
+            observationID: "a".repeat(32),
+          },
+        }),
+        LLMEvent.finish({ reason: "stop" }),
+      ),
+  }),
+)
+const itTransportReceipt = testEffect(LayerNode.compile(root, [...replacements, [LLM.node, transportReceiptLLM]]))
+
 const fragmentFailureLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -286,7 +311,7 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
           requested: { provider_id: "test", model_id: "test-model", effort: "xhigh" },
           response: {
             model_id: "test-model",
-            source: "provider_response",
+            source: "transport_response",
             upstream_actual_identity: "unknown",
           },
           usage: {
@@ -343,6 +368,51 @@ for (const malformed of ["effort", "model"] as const) {
         }),
       { config: (url) => providerCfg(url) },
     ),
+  )
+}
+
+for (const providerID of ["opencode-route", "test"]) {
+  itTransportReceipt.live(
+    `session.processor stores managed route receipts only for configured transport ${providerID}`,
+    () =>
+      provideTmpdirInstance(
+        (dir) =>
+          Effect.gen(function* () {
+            const { processors, session, provider } = yield* boot()
+            const chat = yield* session.create({})
+            const parent = yield* user(chat.id, "accounting")
+            const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+            const mdl = {
+              ...(yield* provider.getModel(ref.providerID, ref.modelID)),
+              providerID: ProviderV2.ID.make(providerID),
+            }
+            const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+            const result = yield* handle.process({
+              user: parent,
+              sessionID: chat.id,
+              model: mdl,
+              agent: agent(),
+              system: [],
+              messages: [{ role: "user", content: "accounting" }],
+              tools: {},
+            })
+            const parts = yield* MessageV2.parts(msg.id)
+            const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+            expect(result).toBe("continue")
+            expect(finish?.inference?.response.model_id).toBe("qwen3.8-thinking")
+            expect(finish?.inference?.usage?.input_tokens).toBe(10)
+            if (providerID === "test") expect(finish?.inference?.transport_route).toBeUndefined()
+            if (providerID === "opencode-route")
+              expect(finish?.inference?.transport_route).toEqual({
+                source: "managed_gateway_attestation",
+                provider: "ollama",
+                model: "deepseek-v4.1-flash",
+                effort: "high",
+                observation_id: "a".repeat(32),
+              })
+          }),
+        { config: cfg },
+      ),
   )
 }
 

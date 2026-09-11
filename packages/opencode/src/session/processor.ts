@@ -451,6 +451,13 @@ const layer = Layer.effect(
             const dropped = isRecord(value.providerMetadata?.anthropic)
               ? value.providerMetadata.anthropic.inputTransformations
               : undefined
+            const transportRoute = value.transportRoute && {
+              source: value.transportRoute.source,
+              provider: value.transportRoute.provider,
+              model: value.transportRoute.model,
+              ...(value.transportRoute.effort === undefined ? {} : { effort: value.transportRoute.effort }),
+              observation_id: value.transportRoute.observationID,
+            }
             if (Array.isArray(dropped) && dropped.length > 0) {
               yield* Effect.logWarning("thinking blocks dropped by provider", {
                 sessionID: ctx.sessionID,
@@ -505,9 +512,13 @@ const layer = Layer.effect(
                         ...(Schema.is(SessionV1.InferenceIdentifier)(value.responseModel)
                           ? { model_id: value.responseModel }
                           : {}),
-                        source: "provider_response",
+                        source: "transport_response",
                         upstream_actual_identity: "unknown",
                       },
+                      ...(ctx.model.providerID === "opencode-route" &&
+                      Schema.is(SessionV1.InferenceTransportRoute)(transportRoute)
+                        ? { transport_route: transportRoute }
+                        : {}),
                       ...(reportedUsage && Object.keys(reportedUsage).length > 0
                         ? { usage: { source: "llm_normalized", ...reportedUsage } }
                         : {}),

@@ -180,12 +180,23 @@ export const ToolError = Schema.Struct({
 }).annotate({ identifier: "LLM.Event.ToolError" })
 export type ToolError = Schema.Schema.Type<typeof ToolError>
 
+export const TransportRoute = Schema.Struct({
+  source: Schema.Literal("managed_gateway_attestation"),
+  provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
+  model: Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,200}$/)),
+  effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
+  observationID: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
+}).annotate({ identifier: "LLM.Event.TransportRoute" })
+export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
+
 export const StepFinish = Schema.Struct({
   type: Schema.tag("step-finish"),
   index: Schema.Number,
   reason: FinishReason,
-  /** Model identifier reported by the provider response; not physical-route proof. */
+  /** Model identifier reported by the transport response; not physical-route proof. */
   responseModel: Schema.optional(Schema.String),
+  /** Managed gateway selection receipt; it does not prove provider-side model weights or effort. */
+  transportRoute: Schema.optional(TransportRoute),
   usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.StepFinish" })

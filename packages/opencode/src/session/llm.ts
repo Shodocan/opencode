@@ -420,6 +420,14 @@ const live: Layer.Layer<
       // LLMAISDK.toLLMEvents below normalizes fullStream parts for the processor.
       return {
         type: "ai-sdk" as const,
+        route:
+          input.model.providerID === "opencode-route"
+            ? {
+                providerID: input.model.providerID,
+                nonce: prepared.headers["x-opencode-inference-nonce"] ?? "",
+                sessionID: input.sessionID,
+              }
+            : undefined,
         result: streamText({
           onError(error) {
             bridge.fork(
@@ -494,7 +502,7 @@ const live: Layer.Layer<
 
             // Adapter seam: both runtimes expose the same LLMEvent stream. Native
             // already returns one; AI SDK streams are converted here.
-            const state = LLMAISDK.adapterState()
+            const state = LLMAISDK.adapterState(result.route)
             return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
               e instanceof Error ? e : new Error(String(e)),
             ).pipe(

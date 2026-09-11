@@ -250,6 +250,14 @@ const InferenceUsageReceipt = Schema.Struct({
   cache_write_input_tokens: Schema.optional(UsageCount),
 })
 
+export const InferenceTransportRoute = Schema.Struct({
+  source: Schema.Literal("managed_gateway_attestation"),
+  provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
+  model: InferenceIdentifier,
+  effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
+  observation_id: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
+})
+
 const InferenceReceipt = Schema.Struct({
   requested: Schema.Struct({
     provider_id: InferenceIdentifier,
@@ -258,9 +266,10 @@ const InferenceReceipt = Schema.Struct({
   }),
   response: Schema.Struct({
     model_id: Schema.optional(InferenceIdentifier),
-    source: Schema.Literal("provider_response"),
+    source: Schema.Literal("transport_response"),
     upstream_actual_identity: Schema.Literal("unknown"),
   }),
+  transport_route: Schema.optional(InferenceTransportRoute),
   usage: Schema.optional(InferenceUsageReceipt),
   cost: Schema.Struct({
     amount: Schema.Finite,
