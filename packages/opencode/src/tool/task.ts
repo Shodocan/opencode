@@ -376,7 +376,9 @@ export const TaskTool = Tool.define(
           }
           const local = error.name === "UnknownError" || error.name === "StructuredOutputError"
           execution.failure = { kind: local ? "tool" : "provider", error }
-          if (error.name === "APIError" && error.data.hardQuota)
+          if (error.name === "APIError" && error.data.quotaReplaySuppressed)
+            execution.failure = { kind: "provider", error, quotaReplaySuppressed: true }
+          if (error.name === "APIError" && !error.data.quotaReplaySuppressed && error.data.hardQuota)
             execution.failure = { kind: "provider", error, hardQuota: error.data.hardQuota }
           if (error.name === "APIError") {
             const code = error.data.statusCode

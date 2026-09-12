@@ -32,7 +32,7 @@ import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
-import { FallbackFailedError, HardQuotaError } from "./llm/quota"
+import { FallbackFailedError, HardQuotaError, QuotaReplaySuppressedError } from "./llm/quota"
 import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
@@ -630,6 +630,11 @@ export function fromError(
           hardQuota: e.evidence,
           ...(e.evidence.source === "provider_rejection" ? { statusCode: e.evidence.status_code } : {}),
         },
+        { cause: e },
+      ).toObject()
+    case e instanceof QuotaReplaySuppressedError:
+      return new APIError(
+        { message: e.message, isRetryable: false, quotaReplaySuppressed: true },
         { cause: e },
       ).toObject()
     case e instanceof FallbackFailedError:

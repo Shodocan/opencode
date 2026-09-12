@@ -65,6 +65,7 @@ export const APIError = NamedError.create("APIError", {
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   hardQuota: Schema.optional(HardQuotaEvidence),
   quotaFallbackFailed: Schema.optional(Schema.Boolean),
+  quotaReplaySuppressed: Schema.optional(Schema.Literal(true)),
 })
 export type APIError = Schema.Schema.Type<typeof APIError.Schema>
 export const ContextOverflowError = NamedError.create("ContextOverflowError", {

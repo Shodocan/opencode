@@ -98,6 +98,13 @@ export function fromAISDKError(error: unknown): LLMError | undefined {
   })
 }
 
+export class QuotaReplaySuppressedError extends Error {
+  constructor() {
+    super("Quota fallback suppressed: prior or uncertain child execution makes fresh-child replay unsafe")
+    this.name = "QuotaReplaySuppressedError"
+  }
+}
+
 export class HardQuotaError extends Error {
   constructor(readonly evidence: HardQuotaEvidence) { super("Provider account quota exhausted"); this.name = "HardQuotaError" }
 }
@@ -111,6 +118,8 @@ export class FallbackFailedError extends Error {
 export function guard<R>(input: {
   binding: "standalone" | "workflow"
   policy: QuotaPolicy
+  /** Host-owned durable child history check; missing evidence fails closed. */
+  priorActivity?: boolean
   primary: () => Stream.Stream<LLMEvent, unknown, R>
   fallback: () => Stream.Stream<LLMEvent, unknown, R>
 }): Stream.Stream<LLMEvent, unknown, R> {
@@ -137,9 +146,12 @@ export function guard<R>(input: {
       })),
       Stream.flatMap((events) => Stream.fromIterable(events)),
       Stream.catchCause((cause) => {
-        if (exposed || Cause.hasInterruptsOnly(cause)) return Stream.failCause(cause)
+        if (Cause.hasInterruptsOnly(cause)) return Stream.failCause(cause)
         const evidence = rejection(Cause.squash(cause), input.policy)
         if (!evidence) return Stream.failCause(cause)
+        if (input.binding === "workflow" && (exposed || input.priorActivity !== false))
+          return Stream.fail(new QuotaReplaySuppressedError())
+        if (exposed) return Stream.failCause(cause)
         return fallback(evidence)
       }),
     )

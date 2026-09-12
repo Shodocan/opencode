@@ -340,7 +340,7 @@ export interface Hooks {
       localQuiescence: true
       remoteOutcome: "completed" | "unknown"
       executionFailure?:
-        | { kind: "provider"; error: unknown; hardQuota?: HardQuotaEvidence }
+        | { kind: "provider"; error: unknown; hardQuota?: HardQuotaEvidence; quotaReplaySuppressed?: true }
         | { kind: "tool"; error: unknown }
       output?: string
     },

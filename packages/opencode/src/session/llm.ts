@@ -68,6 +68,8 @@ export type StreamInput = {
   lineage?: (input: LineageFinal) => Effect.Effect<void>
   /** Native-owned recursion guard for the single quota substitution. */
   quotaFallback?: boolean
+  /** Authoritative session history, never projected/model-visible messages. */
+  quotaPriorActivity?: boolean
 }
 
 export type StreamRequest = StreamInput & {
@@ -541,6 +543,7 @@ const live: Layer.Layer<
             const quota = result.quota.policy
             return Quota.guard({
               binding: result.quota.binding,
+              priorActivity: input.quotaPriorActivity,
               policy: quota,
               primary: () => events(result),
               fallback: () =>

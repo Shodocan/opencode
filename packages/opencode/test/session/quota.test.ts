@@ -178,7 +178,7 @@ describe("native hard quota classification", () => {
   test("workflow quota fails with evidence and never invokes native fallback", async () => {
     let fallbacks = 0
     const error = await Effect.runPromise(Stream.runDrain(Quota.guard({
-      binding: "workflow", policy,
+      binding: "workflow", policy, priorActivity: false,
       primary: () => Stream.fail(quotaError()),
       fallback: () => { fallbacks++; return Stream.empty },
     })).pipe(Effect.flip))
@@ -225,6 +225,42 @@ describe("native hard quota classification", () => {
       })))).rejects.toBeDefined()
       expect(fallbacks).toBe(0)
     }
+  })
+
+  test("workflow quota with prior or unknown history is a nonretryable terminal without fallback evidence", async () => {
+    for (const priorActivity of [true, undefined]) {
+      let fallbacks = 0
+      const error = await Effect.runPromise(Stream.runDrain(Quota.guard({
+        binding: "workflow", policy, priorActivity,
+        primary: () => Stream.fail(quotaError()),
+        fallback: () => { fallbacks++; return Stream.empty },
+      })).pipe(Effect.flip))
+      expect(error).toBeInstanceOf(Quota.QuotaReplaySuppressedError)
+      const serialized = MessageV2.fromError(error, { providerID: ProviderV2.ID.make("opencode-route") })
+      expect(serialized).toMatchObject({ name: "APIError", data: { isRetryable: false, quotaReplaySuppressed: true } })
+      expect(serialized).not.toHaveProperty("data.hardQuota")
+      expect(fallbacks).toBe(0)
+    }
+  })
+
+  test("workflow quota after current-turn output is suppression rather than generic provider retry", async () => {
+    const error = await Effect.runPromise(Stream.runDrain(Quota.guard({
+      binding: "workflow", policy, priorActivity: false,
+      primary: () => Stream.make(LLMEvent.toolCall({ id: "call", name: "write", input: {} })).pipe(Stream.concat(Stream.fail(quotaError()))),
+      fallback: () => Stream.empty,
+    })).pipe(Effect.flip))
+    expect(error).toBeInstanceOf(Quota.QuotaReplaySuppressedError)
+    expect(Quota.rejection(error, policy)).toBeUndefined()
+  })
+
+  test("standalone quota keeps existing history eligible for in-session continuation", async () => {
+    let fallbacks = 0
+    await Effect.runPromise(Stream.runDrain(Quota.guard({
+      binding: "standalone", policy, priorActivity: true,
+      primary: () => Stream.fail(quotaError()),
+      fallback: () => { fallbacks++; return Stream.empty },
+    })))
+    expect(fallbacks).toBe(1)
   })
 
 })

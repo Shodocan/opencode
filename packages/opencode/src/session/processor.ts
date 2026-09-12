@@ -727,7 +727,20 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            // A workflow quota switch creates a fresh child, so an earlier
+            // provider turn cannot be replayed safely. Read durable unfiltered
+            // history; compaction and message plugins must not erase this fence.
+            const history = streamInput.parentSessionID
+              ? yield* session.messages({ sessionID: input.sessionID })
+              : undefined
+            const stream = llm.stream({
+              ...streamInput,
+              quotaPriorActivity: history?.some((message) => message.info.role === "assistant" && (
+                message.info.id !== input.assistantMessage.id || message.parts.some((part) =>
+                  part.type !== "step-start" && part.type !== "step-finish" && part.type !== "snapshot",
+                )
+              )),
+            })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),
