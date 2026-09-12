@@ -52,7 +52,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           repository: Shodocan/opencode-workflows
-          ref: e94ddd14c0591991828589642d60f59721394f6e
+          ref: ba5937b7668745523630bd17da3a22035069c22d
           ssh-key: ${{ secrets.WORKFLOWS_DEPLOY_KEY }}
           ssh-strict: true
           persist-credentials: false
