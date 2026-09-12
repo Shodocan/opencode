@@ -2348,6 +2348,8 @@ describe("session.compaction.fallback", () => {
     "same-model",
     "unset",
     "primary-success",
+    "primary-length",
+    "primary-empty",
     "empty",
     "length",
     "no-progress",
@@ -2398,7 +2400,14 @@ describe("session.compaction.fallback", () => {
                     ),
                   )
             }
-            if (scenario === "primary-success") return reply("Complete primary summary")(input)
+            if (["primary-success", "primary-length", "primary-empty"].includes(scenario))
+              return reply(scenario === "primary-empty" ? "" : "Complete primary summary")(input).pipe(
+                Stream.map((event) =>
+                  scenario === "primary-length" && (event.type === "finish" || event.type === "step-finish")
+                    ? { ...event, reason: "length" as const }
+                    : event,
+                ),
+              )
             return Stream.fail(
               scenario === "auth" || scenario === "quota" || scenario === "transport"
                 ? new APICallError({
@@ -2463,7 +2472,11 @@ describe("session.compaction.fallback", () => {
           llm: stream,
           config: cfg({
             fallback_model:
-              scenario === "unset" ? undefined : scenario === "same-model" ? "test/test-model" : "test/large",
+              scenario === "unset"
+                ? undefined
+                : scenario === "same-model" || scenario === "primary-length"
+                  ? "test/test-model"
+                  : "test/large",
           }),
         }),
       )
