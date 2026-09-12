@@ -264,7 +264,7 @@ export const InferenceTransportRoute = Schema.Struct({
 
 export const InferenceCategory = Schema.Struct({
   source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
-  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"]),
   matrix_sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
 })
 

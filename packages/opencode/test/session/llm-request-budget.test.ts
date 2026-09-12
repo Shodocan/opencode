@@ -124,9 +124,9 @@ function assertNoFunctions(value: unknown, path = "$") {
 }
 
 describe("session.llm-request-budget (T02)", () => {
-  test("accepts category only from chat.params and strips the reserved option", async () => {
+  test.each(["coordinate", "consolidation"])("accepts %s category only from chat.params and strips the reserved option", async (categoryName) => {
     const spoof = { source: "workflow_frozen_matrix", category: "planning", matrix_sha256: "f".repeat(64) }
-    const trusted = { source: "host_policy_resolution", category: "coordinate", matrix_sha256: "a".repeat(64) }
+    const trusted = { source: "host_policy_resolution", category: categoryName, matrix_sha256: "a".repeat(64) }
     const plugin = {
       trigger: (name: string, _input: unknown, output: any) =>
         Effect.succeed(name === "chat.params" ? { ...output, options: { ...output.options, __opencodeModelCategory: trusted } } : output),
@@ -135,7 +135,7 @@ describe("session.llm-request-budget (T02)", () => {
     } as never
     const prepared = await run(prepareInput({ model: { options: { __opencodeModelCategory: spoof } },
       agent: { options: { __opencodeModelCategory: spoof } }, plugin }))
-    expect(prepared.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(prepared.category).toEqual({ source: "host_policy_resolution", category: categoryName, matrixSHA256: "a".repeat(64) })
     expect(prepared.params.options).not.toHaveProperty("__opencodeModelCategory")
     expect(prepared.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
 
@@ -149,7 +149,7 @@ describe("session.llm-request-budget (T02)", () => {
       init: () => Effect.void,
     } as never
     const aliased = await run(prepareInput({ plugin: aliasingPlugin }))
-    expect(aliased.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(aliased.category).toEqual({ source: "host_policy_resolution", category: categoryName, matrixSHA256: "a".repeat(64) })
     expect(aliased.params.options).not.toHaveProperty("__opencodeModelCategory")
     expect(aliased.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
 

@@ -192,7 +192,7 @@ export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
 
 export const InferenceCategory = Schema.Struct({
   source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
-  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"]),
   matrixSHA256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
 }).annotate({ identifier: "LLM.Event.InferenceCategory" })
 export type InferenceCategory = Schema.Schema.Type<typeof InferenceCategory>
