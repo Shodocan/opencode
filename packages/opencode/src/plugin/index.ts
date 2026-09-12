@@ -162,7 +162,7 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
         const input: PluginInput = {
           client,
-          workflowRuntime: { version: 1, taskStart: true, taskTerminal: true, toolError: true },
+          workflowRuntime: { version: 2, taskStart: true, taskTerminal: true, toolError: true, quotaFallback: true },
           project: ctx.project,
           worktree: ctx.worktree,
           directory: ctx.directory,

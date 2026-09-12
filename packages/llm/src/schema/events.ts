@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { ContentBlockID, FinishReason, ProtocolID, ProviderMetadata, RouteID, ToolCallID } from "./ids"
 import { ModelSchema } from "./options"
 import { Message, ToolCallPart, ToolOutput, ToolResultPart, ToolResultValue, type ContentPart } from "./messages"
@@ -191,7 +192,7 @@ export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
 
 export const InferenceCategory = Schema.Struct({
   source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
-  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review"]),
   matrixSHA256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
 }).annotate({ identifier: "LLM.Event.InferenceCategory" })
 export type InferenceCategory = Schema.Schema.Type<typeof InferenceCategory>
@@ -205,6 +206,7 @@ export const StepFinish = Schema.Struct({
   /** Managed gateway selection receipt; it does not prove provider-side model weights or effort. */
   transportRoute: Schema.optional(TransportRoute),
   category: Schema.optional(InferenceCategory),
+  quotaFallback: Schema.optional(QuotaFallback),
   usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.StepFinish" })

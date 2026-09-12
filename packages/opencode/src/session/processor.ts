@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
@@ -463,6 +464,7 @@ const layer = Layer.effect(
               category: value.category.category,
               matrix_sha256: value.category.matrixSHA256,
             }
+            const quotaFallback = value.quotaFallback
             if (Array.isArray(dropped) && dropped.length > 0) {
               yield* Effect.logWarning("thinking blocks dropped by provider", {
                 sessionID: ctx.sessionID,
@@ -526,6 +528,9 @@ const layer = Layer.effect(
                         : {}),
                       ...(inferenceCategory && Schema.is(SessionV1.InferenceCategory)(inferenceCategory)
                         ? { category: inferenceCategory }
+                        : {}),
+                      ...(quotaFallback && Schema.is(QuotaFallback)(quotaFallback)
+                        ? { quota_fallback: quotaFallback }
                         : {}),
                       ...(reportedUsage && Object.keys(reportedUsage).length > 0
                         ? { usage: { source: "llm_normalized", ...reportedUsage } }

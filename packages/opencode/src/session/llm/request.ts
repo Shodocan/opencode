@@ -62,7 +62,7 @@ function inferenceCategory(value: unknown): InferenceCategory | undefined {
   if (!Object.keys(item).every((key) => ["source", "category", "matrix_sha256"].includes(key))) return
   if (item.source !== "host_policy_resolution" && item.source !== "workflow_frozen_matrix") return
   if (typeof item.category !== "string") return
-  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"].includes(item.category)) return
+  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review"].includes(item.category)) return
   if (typeof item.matrix_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(item.matrix_sha256)) return
   return { source: item.source, category: item.category as InferenceCategory["category"], matrixSHA256: item.matrix_sha256 }
 }

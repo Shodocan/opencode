@@ -31,6 +31,10 @@ import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNative } from "./llm/native-request"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { Quota } from "./llm/quota"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
+import type { QuotaBinding } from "@opencode-ai/plugin"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -62,6 +66,8 @@ export type StreamInput = {
    * before any native/streamText/HTTP/provider call. The sole pre-dispatch
    * lineage hook. */
   lineage?: (input: LineageFinal) => Effect.Effect<void>
+  /** Native-owned recursion guard for the single quota substitution. */
+  quotaFallback?: boolean
 }
 
 export type StreamRequest = StreamInput & {
@@ -128,6 +134,24 @@ const live: Layer.Layer<
         flags,
         isWorkflow,
       })
+      const quota: QuotaBinding = input.quotaFallback
+        ? { binding: "unknown" as const }
+        : Quota.authority(
+            yield* plugin.trigger(
+              "experimental.chat.quota",
+              {
+                sessionID: input.sessionID,
+                agent: input.agent.name,
+                model: {
+                  providerID: input.model.providerID,
+                  id: input.model.id,
+                  ...(input.user.model.variant ? { variant: input.user.model.variant } : {}),
+                },
+              },
+              { binding: "unknown" } as QuotaBinding,
+            ),
+            `${input.model.providerID}/${input.model.id}`,
+          )
 
       // T04 outgoing output: a defined outgoing cap is clamped down to the
       // route/runtime allowance (compaction: min(4_096, route output, runtime
@@ -328,6 +352,7 @@ const live: Layer.Layer<
           return {
             type: "native" as const,
             stream: native.stream,
+            quota,
           }
         }
         yield* Effect.logInfo("llm runtime selected", {
@@ -422,6 +447,7 @@ const live: Layer.Layer<
       return {
         type: "ai-sdk" as const,
         category: prepared.category,
+        quota,
         route:
           input.model.providerID === "opencode-route"
             ? {
@@ -500,17 +526,55 @@ const live: Layer.Layer<
 
             const result = yield* run({ ...input, abort: ctrl.signal })
 
-            if (result.type === "native") return result.stream
+            // Both runtime branches cross this seam. The AI SDK branch must not
+            // bypass quota handling simply because this provider is not native.
+            const events = (value: typeof result) => {
+              if (value.type === "native") return value.stream
+              const state = LLMAISDK.adapterState(value.route, value.category)
+              return Stream.fromAsyncIterable(value.result.fullStream, (e) => Quota.fromAISDKError(e) ?? (e instanceof Error ? e : new Error(String(e)))).pipe(
+                Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
+                Stream.flatMap((items) => Stream.fromIterable(items)),
+              )
+            }
 
-            // Adapter seam: both runtimes expose the same LLMEvent stream. Native
-            // already returns one; AI SDK streams are converted here.
-            const state = LLMAISDK.adapterState(result.route, result.category)
-            return Stream.fromAsyncIterable(result.result.fullStream, (e) =>
-              e instanceof Error ? e : new Error(String(e)),
-            ).pipe(
-              Stream.mapEffect((event) => LLMAISDK.toLLMEvents(state, event)),
-              Stream.flatMap((events) => Stream.fromIterable(events)),
-            )
+            if (result.quota.binding === "unknown" || !result.quota.policy) return events(result)
+            const quota = result.quota.policy
+            return Quota.guard({
+              binding: result.quota.binding,
+              policy: quota,
+              primary: () => events(result),
+              fallback: () =>
+                Stream.unwrap(
+                  provider
+                    .getModel(
+                      ProviderV2.ID.make(quota.rule.target.route.split("/")[0]!),
+                      ModelV2.ID.make(quota.rule.target.route.split("/")[1]!),
+                    )
+                    .pipe(
+                      Effect.flatMap((model) =>
+                        run({
+                          ...input,
+                          model,
+                          // The fresh card has an exact target effort. Its
+                          // normalization and budget gate use that effort,
+                          // while the original user request remains intact.
+                          user: {
+                            ...input.user,
+                            model: {
+                              ...input.user.model,
+                              providerID: model.providerID,
+                              modelID: model.id,
+                              variant: quota.rule.target.effort,
+                            },
+                          },
+                          quotaFallback: true,
+                          abort: ctrl.signal,
+                        }),
+                      ),
+                      Effect.map(events),
+                    ),
+                ),
+            })
           }),
         ),
       )
