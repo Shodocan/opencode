@@ -2041,6 +2041,7 @@ export type Config = {
     max_bytes?: number
   }
   compaction?: {
+    fallback_model?: string
     auto?: boolean
     prune?: boolean
     tail_turns?: number

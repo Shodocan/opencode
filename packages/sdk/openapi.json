@@ -21507,6 +21507,9 @@
           "compaction": {
             "type": "object",
             "properties": {
+              "fallback_model": {
+                "type": "string"
+              },
               "auto": {
                 "type": "boolean"
               },

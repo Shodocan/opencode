@@ -87,6 +87,15 @@ describe("Config", () => {
     }),
   )
 
+  it.effect("preserves optional compaction fallback when migrating configuration", () =>
+    Effect.sync(() => {
+      const migrated = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate({
+        compaction: { fallback_model: "configured/large-context" },
+      }))
+      expect(migrated.compaction?.fallback_model).toBe("configured/large-context")
+    }),
+  )
+
   it.effect("migrates v1 provider setup options into AISDK settings", () =>
     Effect.sync(() => {
       const migrated = ConfigMigrateV1.migrate({

@@ -6,7 +6,8 @@ import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { asc, eq } from "drizzle-orm"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Fiber, Layer, Schema } from "effect"
+import { SessionRetry } from "@/session/retry"
 import { describe, expect } from "bun:test"
 import path from "path"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -788,4 +789,181 @@ describe("auto-compaction threshold", () => {
   )
 })
 
+describe("compaction fallback through prompt and local provider", () => {
+  for (const localBudget of [false, true]) {
+    it.instance(localBudget ? "local compaction budget overflow" : "provider compaction context overflow", () =>
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig((url) => {
+          const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
+          const models = config.provider!.qwen.models!
+          models["small-summary"] = {
+            ...models["qwen3-coder-plus"],
+            id: "small-summary",
+            limit: { context: localBudget ? 32_000 : 262_144, output: 4096 },
+          }
+          models["large-summary"] = {
+            ...models["qwen3-coder-plus"],
+            id: "large-summary",
+            limit: { context: 1_000_000, output: 4096 },
+          }
+          config.model = "qwen/qwen3-coder-plus"
+          config.agent = { compaction: { model: "qwen/small-summary" } }
+          return config
+        })
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({
+          title: "compaction fallback",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        yield* buildHistory(prompt, llm, chat.id)
+        const before = yield* sessions.messages({ sessionID: chat.id })
+        yield* llm.error(413, { error: { message: "request entity too large" } })
+        if (!localBudget) yield* llm.error(413, { error: { message: "request entity too large" } })
+        yield* llm.push(reply().text("Preserved history markers QCB-HIST-1 QCB-HIST-2; task remains pending.").stop())
+        yield* llm.push(reply().text("original model resumed").stop())
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "text", text: FINAL_SMALL }],
+        })
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.role).toBe("assistant")
+        if (result.info.role === "assistant") {
+          expect(result.info.error).toBeUndefined()
+          expect(String(result.info.modelID)).toBe("qwen3-coder-plus")
+          expect(result.info.finish).toBe("stop")
+        }
+        const hits = yield* llm.hits
+        expect(hits.map((hit) => hit.body.model)).toEqual([
+          "qwen3-coder-plus",
+          "qwen3-coder-plus",
+          "qwen3-coder-plus",
+          ...(!localBudget ? ["small-summary"] : []),
+          "large-summary",
+          "qwen3-coder-plus",
+        ])
+        const fallback = hits.find((hit) => hit.body.model === "large-summary")!
+        expect(fallback.body.tools ?? []).toEqual([])
+        expect(JSON.stringify(fallback.body.messages)).toContain("QCB-HIST-1")
+        expect(JSON.stringify(fallback.body.messages)).toContain("QCB-HIST-2")
+        const after = yield* sessions.messages({ sessionID: chat.id })
+        for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
+        const summaries = after.filter((item) => item.info.role === "assistant" && item.info.summary)
+        expect(summaries).toHaveLength(1)
+        expect(summaries[0].info.role === "assistant" && String(summaries[0].info.modelID)).toBe("large-summary")
+        const { db } = yield* Database.Service
+        const checkpoints = yield* db
+          .select()
+          .from(EventTable)
+          .where(eq(EventTable.aggregate_id, chat.id))
+          .all()
+          .pipe(Effect.orDie)
+        expect(checkpoints.filter((row) => row.type === "session.next.compaction.finalized.1")).toHaveLength(1)
+      }),
+    )
+  }
+})
 
+for (const status of [401, 429, 503, "cancel", "fallback-cancel"] as const) {
+  it.instance(`compaction fallback does not activate for ${status}`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => {
+        const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
+        config.model = "qwen/qwen3-coder-plus"
+        config.provider!.qwen.models!["large-summary"] = {
+          ...config.provider!.qwen.models!["qwen3-coder-plus"],
+          id: "large-summary",
+          limit: { context: 1_000_000, output: 4096 },
+        }
+        return config
+      })
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "compaction negative" })
+      yield* buildHistory(prompt, llm, chat.id)
+      const before = yield* sessions.messages({ sessionID: chat.id })
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      if (status === "fallback-cancel") yield* llm.error(413, { error: { message: "request entity too large" } })
+      if (status === "cancel" || status === "fallback-cancel")
+        yield* llm.push(
+          reply()
+            .text("unfinished summary")
+            .wait(new Promise(() => {})),
+        )
+      else
+        yield* llm.error(status, { error: { message: status === 429 ? "insufficient_quota" : "provider unavailable" } })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: FINAL_SMALL }],
+      })
+      if (status === "cancel" || status === "fallback-cancel") {
+        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+        yield* llm.wait(status === "fallback-cancel" ? 5 : 4)
+        yield* Fiber.interrupt(fiber)
+      } else {
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.role === "assistant" && result.info.error).toBeTruthy()
+      }
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(status === "fallback-cancel" ? 5 : 4)
+      expect(hits.slice(0, 4).every((hit) => hit.body.model === "qwen3-coder-plus")).toBe(true)
+      if (status === "fallback-cancel") expect(hits[4].body.model).toBe("large-summary")
+      const after = yield* sessions.messages({ sessionID: chat.id })
+      for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
+      const { db } = yield* Database.Service
+      const checkpoints = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, chat.id))
+        .all()
+        .pipe(Effect.orDie)
+      expect(checkpoints.filter((row) => row.type === "session.next.compaction.finalized.1")).toHaveLength(0)
+    }).pipe(Effect.provideService(SessionRetry.RetryLimit, 0)),
+  )
+}
+
+it.instance("compaction fallback stops when rebuilt system context still cannot fit", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => {
+      const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
+      config.model = "qwen/qwen3-coder-plus"
+      const models = config.provider!.qwen.models!
+      models["small-summary"] = {
+        ...models["qwen3-coder-plus"],
+        id: "small-summary",
+        limit: { context: 32_000, output: 4096 },
+      }
+      models["large-summary"] = {
+        ...models["qwen3-coder-plus"],
+        id: "large-summary",
+        limit: { context: 1_000_000, output: 4096 },
+      }
+      config.agent = { compaction: { model: "qwen/small-summary" } }
+      return config
+    })
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "bounded no progress" })
+    yield* buildHistory(prompt, llm, chat.id)
+    yield* llm.push(reply().text("Complete compact summary of prior history.").stop())
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      system: "s".repeat(1_100_000),
+      parts: [{ type: "text", text: FINAL_SMALL }],
+    })
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    expect(result.info.role === "assistant" && JSON.stringify(result.info.error)).toContain(
+      "will not repeat without progress",
+    )
+    const hits = yield* llm.hits
+    expect(hits.map((hit) => hit.body.model)).toEqual(["qwen3-coder-plus", "qwen3-coder-plus", "large-summary"])
+    const after = yield* sessions.messages({ sessionID: chat.id })
+    expect(after.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(1)
+  }),
+)

@@ -10,6 +10,7 @@ import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "@/util/token"
+import { SessionRetry } from "@/session/retry"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
 import { Session as SessionNs } from "@/session/session"
@@ -2335,4 +2336,137 @@ describe("SessionNs.getUsage", () => {
     expect(result.tokens.cache.read).toBe(200)
     expect(result.tokens.cache.write).toBe(300)
   })
+})
+
+describe("session.compaction.fallback", () => {
+  for (const scenario of [
+    "overflow",
+    "auth",
+    "quota",
+    "transport",
+    "fallback-overflow",
+    "same-model",
+    "unset",
+    "primary-success",
+    "empty",
+    "length",
+    "no-progress",
+    "missing-model",
+  ] as const) {
+    itCompaction.instance(scenario, () => {
+      const calls: string[] = []
+      const resolutions: string[] = []
+      const primary = createModel({ context: 100_000, output: 4096 })
+      const fallback = { ...primary, id: ModelV2.ID.make("large"), limit: { context: 1_000_000, output: 4096 } }
+      const provider = ProviderTest.fake({
+        model: primary,
+        getModel: (providerID, modelID) => {
+          resolutions.push(modelID)
+          return scenario === "missing-model" && modelID === fallback.id
+            ? Effect.fail(new Provider.ModelNotFoundError({ providerID, modelID }))
+            : Effect.succeed(modelID === fallback.id ? fallback : primary)
+        },
+      })
+      const overflow = new APICallError({
+        message: "request entity too large",
+        url: "http://localhost",
+        requestBodyValues: {},
+        statusCode: 413,
+        isRetryable: false,
+      })
+      const stream = Layer.succeed(
+        LLM.Service,
+        LLM.Service.of({
+          stream: (input) => {
+            calls.push(input.model.id)
+            expect(Object.keys(input.tools)).toEqual([])
+            if (input.model.id === "large") {
+              expect(input.model.limit.context).toBe(1_000_000)
+              return scenario === "fallback-overflow"
+                ? Stream.fail(overflow)
+                : reply(
+                    scenario === "empty"
+                      ? ""
+                      : scenario === "no-progress"
+                        ? "x".repeat(400_000)
+                        : "Preserved task and decisions",
+                  )(input).pipe(
+                    Stream.map((event) =>
+                      scenario === "length" && (event.type === "finish" || event.type === "step-finish")
+                        ? { ...event, reason: "length" as const }
+                        : event,
+                    ),
+                  )
+            }
+            if (scenario === "primary-success") return reply("Complete primary summary")(input)
+            return Stream.fail(
+              scenario === "auth" || scenario === "quota" || scenario === "transport"
+                ? new APICallError({
+                    message: scenario,
+                    url: "http://localhost",
+                    requestBodyValues: {},
+                    statusCode: scenario === "auth" ? 401 : scenario === "quota" ? 429 : 503,
+                    isRetryable: false,
+                  })
+                : overflow,
+            )
+          },
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const original = yield* createUserMessage(session.id, "Keep my task and decisions" + "x".repeat(80_000))
+        const recent = yield* createUserMessage(session.id, "Recent user instruction must survive")
+        yield* createSummaryCompaction(session.id)
+        const messages = yield* ssn.messages({ sessionID: session.id })
+        const parent = messages.at(-1)!
+        const errors: unknown[] = []
+        const finalized: unknown[] = []
+        const events = yield* EventV2Bridge.Service
+        const unsub = yield* events.listen((event) => {
+          if (event.type === SessionNs.Event.Error.type) errors.push(event)
+          if (event.type === "session.next.compaction.finalized") finalized.push(event)
+          return Effect.void
+        })
+        yield* Effect.addFinalizer(() => unsub)
+        const result = yield* SessionCompaction.use.process({
+          sessionID: session.id,
+          parentID: parent.info.id,
+          messages,
+          auto: false,
+        })
+        const after = yield* ssn.messages({ sessionID: session.id })
+        expect(after.find((item) => item.info.id === recent.id)).toEqual(
+          messages.find((item) => item.info.id === recent.id),
+        )
+        if (result !== "continue") expect(after.find((item) => item.info.id === parent.info.id)).toEqual(parent)
+        if (scenario === "primary-success") expect(resolutions).not.toContain("large")
+        expect(after.find((item) => item.info.id === original.id)).toEqual(
+          messages.find((item) => item.info.id === original.id),
+        )
+        expect(result).toBe(scenario === "overflow" || scenario === "primary-success" ? "continue" : "stop")
+        expect([...new Set(calls)]).toEqual(
+          ["overflow", "fallback-overflow", "empty", "length", "no-progress"].includes(scenario)
+            ? ["test-model", "large"]
+            : ["test-model"],
+        )
+        expect(finalized.length).toBe(scenario === "overflow" || scenario === "primary-success" ? 1 : 0)
+        if (scenario === "overflow") {
+          expect(errors).toEqual([])
+          expect(after.filter((item) => item.info.role === "assistant" && item.info.summary)).toHaveLength(1)
+        }
+      }).pipe(
+        Effect.provideService(SessionRetry.RetryLimit, 0),
+        withCompaction({
+          provider,
+          llm: stream,
+          config: cfg({
+            fallback_model:
+              scenario === "unset" ? undefined : scenario === "same-model" ? "test/test-model" : "test/large",
+          }),
+        }),
+      )
+    })
+  }
 })

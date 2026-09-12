@@ -154,6 +154,9 @@ export const Info = Schema.Struct({
   }),
   compaction: Schema.optional(
     Schema.Struct({
+      fallback_model: Schema.optional(Schema.String).annotate({
+        description: "Optional provider/model used once if compaction exceeds its context window. Does not change the session model.",
+      }),
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
