@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
@@ -48,6 +49,7 @@ export interface Handle {
 }
 
 type Input = {
+  deferCompactionOverflow?: boolean
   assistantMessage: SessionV1.Assistant
   sessionID: SessionID
   model: Provider.Model
@@ -463,6 +465,7 @@ const layer = Layer.effect(
               category: value.category.category,
               matrix_sha256: value.category.matrixSHA256,
             }
+            const quotaFallback = value.quotaFallback
             if (Array.isArray(dropped) && dropped.length > 0) {
               yield* Effect.logWarning("thinking blocks dropped by provider", {
                 sessionID: ctx.sessionID,
@@ -526,6 +529,9 @@ const layer = Layer.effect(
                         : {}),
                       ...(inferenceCategory && Schema.is(SessionV1.InferenceCategory)(inferenceCategory)
                         ? { category: inferenceCategory }
+                        : {}),
+                      ...(quotaFallback && Schema.is(QuotaFallback)(quotaFallback)
+                        ? { quota_fallback: quotaFallback }
                         : {}),
                       ...(reportedUsage && Object.keys(reportedUsage).length > 0
                         ? { usage: { source: "llm_normalized", ...reportedUsage } }
@@ -698,7 +704,8 @@ const layer = Layer.effect(
             return
           }
           ctx.needsCompaction = true
-          yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
+          if (!input.deferCompactionOverflow || !ctx.assistantMessage.summary)
+            yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
         ctx.assistantMessage.error = error
@@ -722,7 +729,20 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            // A workflow quota switch creates a fresh child, so an earlier
+            // provider turn cannot be replayed safely. Read durable unfiltered
+            // history; compaction and message plugins must not erase this fence.
+            const history = streamInput.parentSessionID
+              ? yield* session.messages({ sessionID: input.sessionID })
+              : undefined
+            const stream = llm.stream({
+              ...streamInput,
+              quotaPriorActivity: history?.some((message) => message.info.role === "assistant" && (
+                message.info.id !== input.assistantMessage.id || message.parts.some((part) =>
+                  part.type !== "step-start" && part.type !== "step-finish" && part.type !== "snapshot",
+                )
+              )),
+            })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),

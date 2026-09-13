@@ -1554,6 +1554,50 @@ describe("session.message-v2.fromError", () => {
   })
 })
 
+describe("session.message-v2.complete compaction boundaries", () => {
+  for (const olderValid of [false, true]) {
+    for (const invalid of ["length", "empty", "whitespace", "error"] as const) {
+      test(`${invalid} summary with retained tail preserves history; older valid checkpoint=${olderValid}`, () => {
+        const user = (id: string, tail?: string): SessionV1.WithParts => ({
+          info: userInfo(id),
+          parts: [tail
+            ? { ...basePart(id, `part-${id}`), type: "compaction", auto: true, tail_start_id: MessageID.make(tail) }
+            : { ...basePart(id, `part-${id}`), type: "text", text: `original ${id}` }],
+        })
+        const summary = (id: string, parent: string, text: string): SessionV1.WithParts => ({
+          info: { ...assistantInfo(id, parent), summary: true, finish: "stop" },
+          parts: [{ ...basePart(id, `part-${id}`), type: "text", text }],
+        })
+        const old = summary("msg_004", "msg_003", "Complete older summary")
+        const bad = summary("msg_008", "msg_007", invalid === "empty" ? "" : invalid === "whitespace" ? " \n\t " : "Partial newer summary")
+        if (bad.info.role !== "assistant") throw new Error("fixture must be assistant")
+        if (invalid === "length") bad.info.finish = "length"
+        if (invalid === "error") bad.info.error = { name: "UnknownError", data: { message: "fixture failure" } }
+        const original = [
+          user("msg_001"),
+          user("msg_002"),
+          ...(olderValid ? [user("msg_003", "msg_002"), old] : []),
+          user("msg_005"),
+          user("msg_006"),
+          user("msg_007", "msg_006"),
+          bad,
+          user("msg_009"),
+        ]
+        const before = structuredClone(original)
+        const filtered = MessageV2.filterCompacted(original.toReversed())
+        expect(original).toEqual(before)
+        expect(filtered.map((msg) => String(msg.info.id))).toEqual(
+          olderValid
+            ? ["msg_003", "msg_004", "msg_002", "msg_005", "msg_006", "msg_007", "msg_008", "msg_009"]
+            : original.map((msg) => msg.info.id),
+        )
+        expect(MessageV2.isCompletedSummary(bad)).toBe(false)
+        expect(MessageV2.isCompletedSummary(old)).toBe(true)
+      })
+    }
+  }
+})
+
 describe("session.message-v2.latest", () => {
   const TAIL_USER = MessageID.make("msg_001")
   const OVERFLOW_ASSISTANT = MessageID.make("msg_002")
@@ -1595,7 +1639,7 @@ describe("session.message-v2.latest", () => {
       finish: "stop",
       tokens: { input: 150_000, output: 1_500, reasoning: 0, cache: { read: 0, write: 0 }, total: 151_500 },
     } as SessionV1.Assistant,
-    parts: [],
+    parts: [{ ...basePart(SUMMARY_ASSISTANT, "summary-text"), type: "text", text: "Complete prior summary" }],
   }
 
   const continueUser: SessionV1.WithParts = {

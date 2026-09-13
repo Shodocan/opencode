@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import type { HardQuotaEvidence } from "@opencode-ai/schema/quota"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "path"
 import { BackgroundJob } from "@/background/job"
@@ -241,7 +242,9 @@ export type TaskTerminal = {
   completedAt: number
   localQuiescence: true
   remoteOutcome: "completed" | "unknown"
-  executionFailure?: { kind: "provider" | "tool"; error: unknown }
+  executionFailure?:
+    | { kind: "provider"; error: unknown; hardQuota?: HardQuotaEvidence; quotaReplaySuppressed?: true }
+    | { kind: "tool"; error: unknown }
 }
 
 const HostMetadataPrefix = "opencode."

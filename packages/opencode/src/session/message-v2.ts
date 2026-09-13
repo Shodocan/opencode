@@ -32,6 +32,7 @@ import { MessageTable, PartTable, SessionTable } from "@opencode-ai/core/session
 import { ProviderError } from "@/provider/error"
 import { iife } from "@/util/iife"
 import { errorMessage } from "@/util/error"
+import { FallbackFailedError, HardQuotaError, QuotaReplaySuppressedError } from "./llm/quota"
 import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
@@ -519,6 +520,16 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
+export function isCompletedSummary(msg: WithParts): msg is WithParts & { info: Assistant } {
+  return (
+    msg.info.role === "assistant" &&
+    msg.info.summary === true &&
+    msg.info.finish === "stop" &&
+    !msg.info.error &&
+    msg.parts.some((part) => part.type === "text" && Boolean(part.text.trim()))
+  )
+}
+
 export function filterCompacted(msgs: Iterable<WithParts>) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
@@ -539,14 +550,15 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     }
     if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
       break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
+    if (isCompletedSummary(msg))
       completed.add(msg.info.parentID)
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
+      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined) &&
+      completed.has(msg.info.id),
   )
   const compaction = result[compactionIndex]
   const part = compaction?.parts.find(
@@ -556,8 +568,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     ? result.findIndex(
         (msg, index) =>
           index > compactionIndex &&
-          msg.info.role === "assistant" &&
-          msg.info.summary &&
+          isCompletedSummary(msg) &&
           msg.info.parentID === compaction.info.id,
       )
     : -1
@@ -618,6 +629,29 @@ export function fromError(
       ).toObject()
     case OutputLengthError.isInstance(e):
       return e
+    // These native-only errors are created after trusted provider classification
+    // at the common stream seam. Never accept a caller-shaped `{ name, data }`
+    // object here: Task terminal evidence is a host-owned capability.
+    case e instanceof HardQuotaError:
+      return new APIError(
+        {
+          message: e.message,
+          isRetryable: false,
+          hardQuota: e.evidence,
+          ...(e.evidence.source === "provider_rejection" ? { statusCode: e.evidence.status_code } : {}),
+        },
+        { cause: e },
+      ).toObject()
+    case e instanceof QuotaReplaySuppressedError:
+      return new APIError(
+        { message: e.message, isRetryable: false, quotaReplaySuppressed: true },
+        { cause: e },
+      ).toObject()
+    case e instanceof FallbackFailedError:
+      return new APIError(
+        { message: e.message, isRetryable: false, quotaFallbackFailed: true },
+        { cause: e },
+      ).toObject()
     case LoadAPIKeyError.isInstance(e):
       return new AuthError(
         {

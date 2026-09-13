@@ -1,6 +1,7 @@
 export * as SessionV1 from "./session"
 
 import { Schema } from "effect"
+import { HardQuotaEvidence, QuotaFallback } from "@opencode-ai/schema/quota"
 import { NonNegativeInt } from "../schema"
 import { NamedError } from "../util/error"
 
@@ -62,6 +63,9 @@ export const APIError = NamedError.create("APIError", {
   responseHeaders: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   responseBody: Schema.optional(Schema.String),
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  hardQuota: Schema.optional(HardQuotaEvidence),
+  quotaFallbackFailed: Schema.optional(Schema.Boolean),
+  quotaReplaySuppressed: Schema.optional(Schema.Literal(true)),
 })
 export type APIError = Schema.Schema.Type<typeof APIError.Schema>
 export const ContextOverflowError = NamedError.create("ContextOverflowError", {

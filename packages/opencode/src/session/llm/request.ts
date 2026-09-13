@@ -35,6 +35,7 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly compactionOutputTokens?: number
 }
 
 export type Prepared = {
@@ -62,7 +63,7 @@ function inferenceCategory(value: unknown): InferenceCategory | undefined {
   if (!Object.keys(item).every((key) => ["source", "category", "matrix_sha256"].includes(key))) return
   if (item.source !== "host_policy_resolution" && item.source !== "workflow_frozen_matrix") return
   if (typeof item.category !== "string") return
-  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"].includes(item.category)) return
+  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"].includes(item.category)) return
   if (typeof item.matrix_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(item.matrix_sha256)) return
   return { source: item.source, category: item.category as InferenceCategory["category"], matrixSHA256: item.matrix_sha256 }
 }
@@ -269,10 +270,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
 
   // Output allowance: normal requests keep the full runtime output allowance;
-  // compaction is bounded by min(4_096, route output limit, runtime cap).
+  // Primary compaction remains 4_096. Only its independently selected fallback
+  // supplies a larger allowance, charged identically in admission and on the wire.
   const outputAllowance =
     input.agent.name === "compaction"
-      ? Math.min(4_096, input.model.limit.output, input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER)
+      ? Math.min(
+          input.compactionOutputTokens ?? 4_096,
+          input.model.limit.output,
+          input.flags?.outputTokenMax ?? ProviderTransform.OUTPUT_TOKEN_MAX,
+        )
       : ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax)
 
   const budgetProjection = yield* Effect.tryPromise({

@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect"
 import { type streamText } from "ai"
 import { errorMessage } from "@/util/error"
 import { ProviderError } from "@/provider/error"
+import { Quota } from "./quota"
 import { createHash } from "node:crypto"
 
 type Result = Awaited<ReturnType<typeof streamText>>
@@ -317,7 +318,11 @@ export function toLLMEvents(
       })
 
     case "error":
-      return Effect.fail(event.error)
+      // AI SDK provider failures arrive as an in-band fullStream event, not
+      // necessarily as the AsyncIterable rejection handled by llm.ts. Normalize
+      // the one trusted structured quota shape before it crosses the common
+      // quota guard; all other event errors keep their original behavior.
+      return Effect.fail(Quota.fromAISDKError(event.error) ?? event.error)
 
     case "abort":
     case "source":

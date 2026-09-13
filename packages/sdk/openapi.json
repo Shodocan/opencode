@@ -21507,6 +21507,9 @@
           "compaction": {
             "type": "object",
             "properties": {
+              "fallback_model": {
+                "type": "string"
+              },
               "auto": {
                 "type": "boolean"
               },
@@ -21524,6 +21527,10 @@
               "reserved": {
                 "type": "integer",
                 "minimum": 0
+              },
+              "fallback_max_output_tokens": {
+                "type": "integer",
+                "exclusiveMinimum": 0
               }
             },
             "additionalProperties": false

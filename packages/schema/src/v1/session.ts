@@ -1,6 +1,7 @@
 export * as SessionV1 from "./session"
 
 import { Effect, Schema, Types } from "effect"
+import { HardQuotaEvidence, QuotaFallback } from "../quota"
 import { define, inventory } from "../event"
 import { FileDiff } from "../file-diff"
 import { Project } from "../project"
@@ -52,6 +53,9 @@ export const APIError = namedError("APIError", {
   responseHeaders: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   responseBody: Schema.optional(Schema.String),
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  hardQuota: Schema.optional(HardQuotaEvidence),
+  quotaFallbackFailed: Schema.optional(Schema.Boolean),
+  quotaReplaySuppressed: Schema.optional(Schema.Literal(true)),
 })
 export type APIError = Schema.Schema.Type<typeof APIError.Schema>
 export const ContextOverflowError = namedError("ContextOverflowError", {
@@ -260,7 +264,7 @@ export const InferenceTransportRoute = Schema.Struct({
 
 export const InferenceCategory = Schema.Struct({
   source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
-  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"]),
   matrix_sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
 })
 
@@ -277,6 +281,7 @@ const InferenceReceipt = Schema.Struct({
   }),
   transport_route: Schema.optional(InferenceTransportRoute),
   category: Schema.optional(InferenceCategory),
+  quota_fallback: Schema.optional(QuotaFallback),
   usage: Schema.optional(InferenceUsageReceipt),
   cost: Schema.Struct({
     amount: Schema.Finite,

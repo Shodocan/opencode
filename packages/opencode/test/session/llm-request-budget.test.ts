@@ -87,6 +87,7 @@ type PrepareOverrides = {
   messages?: ModelMessage[]
   tools?: Record<string, any>
   plugin?: any
+  compactionOutputTokens?: number
 }
 
 function prepareInput(overrides: PrepareOverrides = {}) {
@@ -103,6 +104,7 @@ function prepareInput(overrides: PrepareOverrides = {}) {
     plugin: overrides.plugin ?? pluginPass,
     flags: { outputTokenMax: MODEL_OUTPUT, client: "test" } as never,
     isWorkflow: false,
+    compactionOutputTokens: overrides.compactionOutputTokens,
   }
 }
 
@@ -124,9 +126,9 @@ function assertNoFunctions(value: unknown, path = "$") {
 }
 
 describe("session.llm-request-budget (T02)", () => {
-  test("accepts category only from chat.params and strips the reserved option", async () => {
+  test.each(["coordinate", "consolidation"])("accepts %s category only from chat.params and strips the reserved option", async (categoryName) => {
     const spoof = { source: "workflow_frozen_matrix", category: "planning", matrix_sha256: "f".repeat(64) }
-    const trusted = { source: "host_policy_resolution", category: "coordinate", matrix_sha256: "a".repeat(64) }
+    const trusted = { source: "host_policy_resolution", category: categoryName, matrix_sha256: "a".repeat(64) }
     const plugin = {
       trigger: (name: string, _input: unknown, output: any) =>
         Effect.succeed(name === "chat.params" ? { ...output, options: { ...output.options, __opencodeModelCategory: trusted } } : output),
@@ -135,7 +137,7 @@ describe("session.llm-request-budget (T02)", () => {
     } as never
     const prepared = await run(prepareInput({ model: { options: { __opencodeModelCategory: spoof } },
       agent: { options: { __opencodeModelCategory: spoof } }, plugin }))
-    expect(prepared.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(prepared.category).toEqual({ source: "host_policy_resolution", category: categoryName, matrixSHA256: "a".repeat(64) })
     expect(prepared.params.options).not.toHaveProperty("__opencodeModelCategory")
     expect(prepared.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
 
@@ -149,7 +151,7 @@ describe("session.llm-request-budget (T02)", () => {
       init: () => Effect.void,
     } as never
     const aliased = await run(prepareInput({ plugin: aliasingPlugin }))
-    expect(aliased.category).toEqual({ source: "host_policy_resolution", category: "coordinate", matrixSHA256: "a".repeat(64) })
+    expect(aliased.category).toEqual({ source: "host_policy_resolution", category: categoryName, matrixSHA256: "a".repeat(64) })
     expect(aliased.params.options).not.toHaveProperty("__opencodeModelCategory")
     expect(aliased.messageTransformOptions).not.toHaveProperty("__opencodeModelCategory")
 
@@ -322,6 +324,15 @@ describe("session.llm-request-budget (T02)", () => {
     expect(JSON.stringify(projection)).toBe(before)
     expect(JSON.stringify(projection)).not.toContain("LATE-INJECTED-SYSTEM")
     expect(JSON.stringify(projection)).not.toContain("MUTATED-AFTER-PREPARE")
+  })
+
+  test("fallback allowance is projected after model and runtime clamps while primary remains 4096", async () => {
+    const input = prepareInput({ agent: { name: "compaction" } })
+    expect((await run(input)).budgetProjection.outputAllowance).toBe(4_096)
+    expect((await run({ ...input, compactionOutputTokens: 32_000 })).budgetProjection.outputAllowance).toBe(32_000)
+    expect((await run({ ...input, compactionOutputTokens: 16_384 })).budgetProjection.outputAllowance).toBe(16_384)
+    expect((await run({ ...input, compactionOutputTokens: 32_000, flags: { outputTokenMax: 8_192 } as never })).budgetProjection.outputAllowance).toBe(8_192)
+    expect((await run({ ...input, compactionOutputTokens: 32_000, model: testModel({ limit: { context: 1_000_000, output: 12_000 } }) })).budgetProjection.outputAllowance).toBe(12_000)
   })
 
   test("plugin late system growth raises the projection size", async () => {

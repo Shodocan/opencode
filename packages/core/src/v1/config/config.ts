@@ -154,6 +154,12 @@ export const Info = Schema.Struct({
   }),
   compaction: Schema.optional(
     Schema.Struct({
+      fallback_model: Schema.optional(Schema.String).annotate({
+        description: "Optional provider/model used once if compaction exceeds its context window, reaches its output limit, or completes without summary text. Does not change the session model.",
+      }),
+      fallback_max_output_tokens: Schema.optional(PositiveInt).annotate({
+        description: "Maximum output tokens for the configured compaction fallback, including reasoning (default: 32000, capped by model and runtime limits). Primary compaction retains its 4096-token cap.",
+      }),
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),

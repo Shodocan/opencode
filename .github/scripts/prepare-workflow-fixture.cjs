@@ -3,7 +3,7 @@ const fs = require("node:fs")
 const path = require("node:path")
 const { execFileSync } = require("node:child_process")
 
-const commit = "e94ddd14c0591991828589642d60f59721394f6e"
+const commit = "ba5937b7668745523630bd17da3a22035069c22d"
 const source = path.resolve(".ci/workflows")
 if (!process.env.RUNNER_TEMP || !process.env.GITHUB_ENV) throw new Error("CI paths are required")
 const actual = execFileSync("git", ["-C", source, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
