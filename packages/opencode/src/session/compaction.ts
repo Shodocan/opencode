@@ -416,9 +416,10 @@ const layer = Layer.effect(
       const checkpointID = EventV2.ID.create()
       let tailChanged = false
       const execute = Effect.gen(function* () {
-        const attempt = Effect.fn("SessionCompaction.attempt")(function* (model: Provider.Model) {
-          const outputTokens =
-            model === primaryModel ? undefined : (cfg.compaction?.fallback_max_output_tokens ?? 32_000)
+        const attempt = Effect.fn("SessionCompaction.attempt")(function* (
+          model: Provider.Model,
+          outputTokens?: number,
+        ) {
           const msg: SessionV1.Assistant = {
             id: MessageID.ascending(),
             role: "assistant",
@@ -500,10 +501,20 @@ const layer = Layer.effect(
               (first.processor.message.finish === "stop" && (!completed || !summaryText(completed))))
           if (first.result !== "compact" && !incomplete) return first
           const route = Provider.parseModel(fallback)
-          if (route.providerID === primaryModel.providerID && route.modelID === primaryModel.id) return first
-          const candidate = yield* provider
-            .getModel(route.providerID, route.modelID)
-            .pipe(Effect.catch(() => Effect.succeed(undefined)))
+          const sameModel = route.providerID === primaryModel.providerID && route.modelID === primaryModel.id
+          const outputTokens = cfg.compaction?.fallback_max_output_tokens ?? 32_000
+          if (sameModel) {
+            const ceiling = Math.min(
+              primaryModel.limit.output,
+              flags.outputTokenMax ?? ProviderTransform.OUTPUT_TOKEN_MAX,
+            )
+            if (!incomplete || Math.min(outputTokens, ceiling) <= Math.min(4_096, ceiling)) return first
+          }
+          const candidate = sameModel
+            ? primaryModel
+            : yield* provider
+                .getModel(route.providerID, route.modelID)
+                .pipe(Effect.catch(() => Effect.succeed(undefined)))
           if (!candidate) {
             const error = new SessionV1.APIError({
               message: `Compaction fallback model ${fallback} is unavailable. Check compaction.fallback_model and provider configuration. Original history is preserved.`,
@@ -515,7 +526,7 @@ const layer = Layer.effect(
             return { ...first, result: "stop" as const }
           }
           yield* session.removeMessage({ sessionID: input.sessionID, messageID: first.msg.id })
-          return yield* attempt(candidate)
+          return yield* attempt(candidate, outputTokens)
         })
         const { model, msg, processor, result } = chosen
 

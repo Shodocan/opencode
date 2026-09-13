@@ -275,6 +275,7 @@ type CompactionProcessOptions = {
   plugin?: Layer.Layer<Plugin.Service>
   provider?: ReturnType<typeof wide>
   config?: Layer.Layer<Config.Service>
+  outputTokenMax?: number
 }
 
 type CompactionFinalizedDefinition = {
@@ -322,7 +323,7 @@ function withCompaction(options?: CompactionProcessOptions) {
 function compactionProcessLayer(options?: CompactionProcessOptions) {
   const replacements: LayerNode.Replacements = [
     [Provider.node, (options?.provider ?? wide()).layer],
-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, outputTokenMax: options?.outputTokenMax })],
     [SessionSummary.node, summary],
   ]
   if (!options?.llm) {
@@ -2541,6 +2542,116 @@ describe("session.compaction.fallback", () => {
                 : scenario === "same-model" || scenario === "length-same-model"
                   ? "test/test-model"
                   : "test/large",
+          }),
+        }),
+      )
+    })
+  }
+})
+
+describe("session.compaction.same-model output recovery", () => {
+  for (const scenario of [
+    "length",
+    "empty",
+    "repeated-length",
+    "route-cap",
+    "runtime-cap",
+    "equal-cap",
+    "lower-cap",
+    "input-overflow",
+  ] as const) {
+    itCompaction.instance(scenario, () => {
+      const model = {
+        ...createModel({ context: 1_000_000, output: scenario === "route-cap" ? 4_096 : 128_000 }),
+        id: ModelV2.ID.make("deepseek-v4-flash"),
+      }
+      const requests: LLM.StreamInput[] = []
+      const llm = Layer.succeed(
+        LLM.Service,
+        LLM.Service.of({
+          stream: (input) => {
+            requests.push(input)
+            expect(input.model.id).toBe(model.id)
+            expect(input.user.model.variant).toBe("max")
+            expect(input.tools).toEqual({})
+            expect(input.compactionOutputTokens).toBe(requests.length === 1 ? undefined : 32_000)
+            if (scenario === "input-overflow")
+              return Stream.fail(
+                new APICallError({
+                  message: "request entity too large",
+                  url: "http://fixture.invalid",
+                  requestBodyValues: {},
+                  statusCode: 413,
+                  isRetryable: false,
+                }),
+              )
+            const length = requests.length === 1 ? scenario !== "empty" : scenario === "repeated-length"
+            return reply(
+              requests.length === 1
+                ? scenario === "empty"
+                  ? " \n\t "
+                  : "Partial summary"
+                : "Complete task, constraints and next action",
+            )(input).pipe(
+              Stream.map((event) =>
+                length && (event.type === "finish" || event.type === "step-finish")
+                  ? { ...event, reason: "length" as const }
+                  : event,
+              ),
+            )
+          },
+        }),
+      )
+      return Effect.gen(function* () {
+        const sessions = yield* SessionNs.Service
+        const chat = yield* sessions.create({})
+        const original = yield* createUserMessage(chat.id, "Preserve the complete original task and user constraints")
+        const selected = { providerID: model.providerID, modelID: model.id, variant: "max" }
+        yield* sessions.updateMessage({ ...original, model: selected })
+        yield* SessionCompaction.use.create({ sessionID: chat.id, agent: "build", model: selected, auto: false })
+        const marker = (yield* sessions.messages({ sessionID: chat.id })).at(-1)!
+        if (marker.info.role !== "user") throw new Error("Expected user compaction marker")
+        yield* sessions.updateMessage({ ...marker.info, model: selected })
+        const before = yield* sessions.messages({ sessionID: chat.id })
+        const events = yield* EventV2Bridge.Service
+        const finalized: unknown[] = []
+        const errors: unknown[] = []
+        const unlisten = yield* events.listen((event) => {
+          if (event.type === "session.next.compaction.finalized") finalized.push(event)
+          if (event.type === SessionNs.Event.Error.type) errors.push(event)
+          return Effect.void
+        })
+        yield* Effect.addFinalizer(() => unlisten)
+        const result = yield* SessionCompaction.use.process({
+          sessionID: chat.id,
+          parentID: marker.info.id,
+          messages: before,
+          auto: false,
+        })
+        const success = scenario === "length" || scenario === "empty"
+        const retry = success || scenario === "repeated-length"
+        expect(result).toBe(success ? "continue" : "stop")
+        expect(requests).toHaveLength(retry ? 2 : 1)
+        if (retry) expect(requests[1].messages).toEqual(requests[0].messages)
+        const after = yield* sessions.messages({ sessionID: chat.id })
+        for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
+        expect(finalized).toHaveLength(success ? 1 : 0)
+        expect(errors).toHaveLength(success ? 0 : 1)
+        if (success) {
+          const summary = after.findLast(MessageV2.isCompletedSummary)
+          expect(summary?.info.modelID).toBe(model.id)
+          expect(summary?.info.variant).toBe("max")
+        }
+      }).pipe(
+        Effect.provideService(SessionRetry.RetryLimit, 0),
+        withCompaction({
+          provider: ProviderTest.fake({ model }),
+          llm,
+          outputTokenMax: scenario === "runtime-cap" ? 4_096 : undefined,
+          config: cfg({
+            fallback_model: `test/${model.id}`,
+            tail_turns: 0,
+            fallback_max_output_tokens: scenario === "equal-cap" ? 4_096 : scenario === "lower-cap" ? 2_048 : undefined,
           }),
         }),
       )

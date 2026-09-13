@@ -13,14 +13,19 @@ normal generation keeps its existing allowance. The previously configured
 `compaction.fallback_model` may run once after typed/local context overflow,
 explicit LENGTH, or a successful STOP with empty/whitespace summary text.
 The fallback receives the same source prompt, without carrying the failed
-summary or the primary model's variant into its request.
+summary into its request. A different fallback model does not inherit the
+primary model's variant; a retry using the same model preserves it.
 
 `compaction.fallback_max_output_tokens` is an optional positive integer,
 defaulting to 32,000. It applies only to that fallback and is clamped by model
 and runtime output limits. The larger allowance is included in the actual
 pre-dispatch context budget and sent consistently by both native and AI SDK
-runtimes. A same-route fallback is skipped. This adds no retry for generic
-errors, authentication, transport, quota, abort, filtering or unknown finish.
+runtimes. A fallback using the same provider and model may retry only after
+LENGTH or empty STOP, and only when its effective output allowance is strictly
+larger than the primary allowance after both model and runtime limits apply.
+Same-model input overflow or equal/lower output allowance remains terminal.
+This adds no retry for generic errors, authentication, transport, quota, abort,
+filtering or unknown finish.
 
 Every new checkpoint requires STOP, nonempty summary text, and no error,
 including when no fallback is configured. The configured fallback path also
@@ -38,8 +43,9 @@ repairs older partial summaries already persisted with a forged STOP finish;
 those still require separately reviewed session recovery.
 
 Validation covers one bounded fallback, unchanged source and original rows,
-terminal fallback exhaustion, same-model/unset/error exclusions, older valid
-checkpoints before invalid retained-tail boundaries, both-runtime output caps
+terminal fallback exhaustion, same-model output recovery and excluded cases,
+unset/error exclusions, older valid checkpoints before invalid retained-tail
+boundaries, both-runtime output caps
 and admission reserve, configuration validation/migration, and existing
 finalization rollback and cancellation behavior. No live provider inference
 or production session mutation is part of source qualification.
