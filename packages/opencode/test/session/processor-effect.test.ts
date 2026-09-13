@@ -209,6 +209,49 @@ const providerErrorLLM = Layer.succeed(
 const providerErrorEnv = LayerNode.compile(root, [...replacements, [LLM.node, providerErrorLLM]])
 const itProviderError = testEffect(providerErrorEnv)
 
+const transportReceiptLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () =>
+      Stream.make(
+        LLMEvent.stepStart({ index: 0 }),
+        LLMEvent.stepFinish({
+          index: 0,
+          reason: "stop",
+          responseModel: "qwen3.8-thinking",
+          usage: { inputTokens: 10, outputTokens: 4 },
+          transportRoute: {
+            source: "managed_gateway_attestation",
+            provider: "ollama",
+            model: "deepseek-v4.1-flash",
+            effort: "high",
+            observationID: "a".repeat(32),
+          },
+          category: {
+            source: "workflow_frozen_matrix",
+            category: "coordinate",
+            matrixSHA256: "b".repeat(64),
+          },
+        }),
+        LLMEvent.finish({ reason: "stop" }),
+      ),
+  }),
+)
+const itTransportReceipt = testEffect(LayerNode.compile(root, [...replacements, [LLM.node, transportReceiptLLM]]))
+const malformedCategoryLLM = Layer.succeed(
+  LLM.Service,
+  LLM.Service.of({
+    stream: () => Stream.make(
+      LLMEvent.stepStart({ index: 0 }),
+      { type: "step-finish", index: 0, reason: "stop", category: {
+        source: "workflow_frozen_matrix", category: "coordinate", matrixSHA256: "bad",
+      } } as never,
+      LLMEvent.finish({ reason: "stop" }),
+    ),
+  }),
+)
+const itMalformedCategory = testEffect(LayerNode.compile(root, [...replacements, [LLM.node, malformedCategoryLLM]]))
+
 const fragmentFailureLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
@@ -244,11 +287,12 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         const database = yield* Database.Service
         const { processors, session, provider } = yield* boot()
 
-        yield* llm.text("hello")
+        yield* llm.text("hello", { usage: { input: 11, output: 7 } })
 
         const chat = yield* session.create({})
         const parent = yield* user(chat.id, "hi")
         const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        msg.variant = "xhigh"
         const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
         const handle = yield* processors.create({
           assistantMessage: msg,
@@ -280,8 +324,138 @@ it.live("session.processor effect tests capture llm input cleanly", () =>
         expect(value).toBe("continue")
         expect(calls).toBe(1)
         expect(parts.some((part) => part.type === "text" && part.text === "hello")).toBe(true)
+        const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+        expect(finish?.inference).toEqual({
+          requested: { provider_id: "test", model_id: "test-model", effort: "xhigh" },
+          response: {
+            model_id: "test-model",
+            source: "transport_response",
+            upstream_actual_identity: "unknown",
+          },
+          usage: {
+            source: "llm_normalized",
+            input_tokens: 11,
+            output_tokens: 7,
+            total_tokens: 18,
+            reasoning_tokens: 0,
+            cache_read_input_tokens: 0,
+          },
+          cost: { amount: 0, semantics: "configured_rate_estimate", actual_bill: "unknown" },
+        })
       }),
     { config: (url) => providerCfg(url) },
+  ),
+)
+
+for (const malformed of ["effort", "model"] as const) {
+  it.live(`session.processor seals completed steps with unrepresentable receipt ${malformed}`, () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          yield* llm.text("completed", { usage: { input: 11, output: 7 } })
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "hi")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          msg.variant = malformed === "effort" ? "unsafe\neffort" : "xhigh"
+          const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+          const handle = yield* processors.create({
+            assistantMessage: msg,
+            sessionID: chat.id,
+            model: malformed === "model" ? { ...mdl, id: ModelV2.ID.make("x".repeat(201)) } : mdl,
+          })
+          const result = yield* handle.process({
+            user: parent,
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages: [{ role: "user", content: "hi" }],
+            tools: {},
+          })
+          const parts = yield* MessageV2.parts(msg.id)
+          const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+          expect(result).toBe("continue")
+          expect(finish).toBeDefined()
+          expect(finish?.tokens.output).toBe(7)
+          if (malformed === "model") expect(finish?.inference).toBeUndefined()
+          if (malformed === "effort") {
+            expect(finish?.inference?.requested).toEqual({ provider_id: "test", model_id: "test-model" })
+            expect(finish?.inference?.usage?.output_tokens).toBe(7)
+          }
+        }),
+      { config: (url) => providerCfg(url) },
+    ),
+  )
+}
+
+for (const providerID of ["opencode-route", "test"]) {
+  itTransportReceipt.live(
+    `session.processor stores managed route receipts only for configured transport ${providerID}`,
+    () =>
+      provideTmpdirInstance(
+        (dir) =>
+          Effect.gen(function* () {
+            const { processors, session, provider } = yield* boot()
+            const chat = yield* session.create({})
+            const parent = yield* user(chat.id, "accounting")
+            const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+            const mdl = {
+              ...(yield* provider.getModel(ref.providerID, ref.modelID)),
+              providerID: ProviderV2.ID.make(providerID),
+            }
+            const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+            const result = yield* handle.process({
+              user: parent,
+              sessionID: chat.id,
+              model: mdl,
+              agent: agent(),
+              system: [],
+              messages: [{ role: "user", content: "accounting" }],
+              tools: {},
+            })
+            const parts = yield* MessageV2.parts(msg.id)
+            const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+            expect(result).toBe("continue")
+            expect(finish?.inference?.response.model_id).toBe("qwen3.8-thinking")
+            expect(finish?.inference?.usage?.input_tokens).toBe(10)
+            expect(finish?.inference?.category).toEqual({
+              source: "workflow_frozen_matrix",
+              category: "coordinate",
+              matrix_sha256: "b".repeat(64),
+            })
+            if (providerID === "test") expect(finish?.inference?.transport_route).toBeUndefined()
+            if (providerID === "opencode-route")
+              expect(finish?.inference?.transport_route).toEqual({
+                source: "managed_gateway_attestation",
+                provider: "ollama",
+                model: "deepseek-v4.1-flash",
+                effort: "high",
+                observation_id: "a".repeat(32),
+              })
+          }),
+        { config: cfg },
+      ),
+  )
+}
+
+itMalformedCategory.live("session.processor omits malformed category without blocking step sealing", () =>
+  provideTmpdirInstance(
+    (dir) => Effect.gen(function* () {
+      const { processors, session, provider } = yield* boot()
+      const chat = yield* session.create({})
+      const parent = yield* user(chat.id, "accounting")
+      const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+      const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
+      const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+      expect(yield* handle.process({ user: parent, sessionID: chat.id, model: mdl, agent: agent(), system: [],
+        messages: [{ role: "user", content: "accounting" }], tools: {} })).toBe("continue")
+      const parts = yield* MessageV2.parts(msg.id)
+      const finish = parts.find((part): part is SessionV1.StepFinishPart => part.type === "step-finish")
+      expect(finish).toBeDefined()
+      expect(finish?.inference?.category).toBeUndefined()
+    }),
+    { config: cfg },
   ),
 )
 

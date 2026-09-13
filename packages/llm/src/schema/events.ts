@@ -1,4 +1,5 @@
 import { Schema } from "effect"
+import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { ContentBlockID, FinishReason, ProtocolID, ProviderMetadata, RouteID, ToolCallID } from "./ids"
 import { ModelSchema } from "./options"
 import { Message, ToolCallPart, ToolOutput, ToolResultPart, ToolResultValue, type ContentPart } from "./messages"
@@ -180,10 +181,32 @@ export const ToolError = Schema.Struct({
 }).annotate({ identifier: "LLM.Event.ToolError" })
 export type ToolError = Schema.Schema.Type<typeof ToolError>
 
+export const TransportRoute = Schema.Struct({
+  source: Schema.Literal("managed_gateway_attestation"),
+  provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
+  model: Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,200}$/)),
+  effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
+  observationID: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
+}).annotate({ identifier: "LLM.Event.TransportRoute" })
+export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
+
+export const InferenceCategory = Schema.Struct({
+  source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"]),
+  matrixSHA256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+}).annotate({ identifier: "LLM.Event.InferenceCategory" })
+export type InferenceCategory = Schema.Schema.Type<typeof InferenceCategory>
+
 export const StepFinish = Schema.Struct({
   type: Schema.tag("step-finish"),
   index: Schema.Number,
   reason: FinishReason,
+  /** Model identifier reported by the transport response; not physical-route proof. */
+  responseModel: Schema.optional(Schema.String),
+  /** Managed gateway selection receipt; it does not prove provider-side model weights or effort. */
+  transportRoute: Schema.optional(TransportRoute),
+  category: Schema.optional(InferenceCategory),
+  quotaFallback: Schema.optional(QuotaFallback),
   usage: Schema.optional(Usage),
   providerMetadata: Schema.optional(ProviderMetadata),
 }).annotate({ identifier: "LLM.Event.StepFinish" })

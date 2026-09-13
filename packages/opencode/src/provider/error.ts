@@ -180,7 +180,27 @@ export function parseAPICallError(input: { providerID: ProviderV2.ID; error: API
     }
   }
 
-  const metadata = input.error.url ? { url: input.error.url } : undefined
+  // The SDK wraps fetch failures in APICallError. Preserve only the direct,
+  // structured transport code across the serialized session/Task boundary.
+  const cause = input.error.cause
+  const code = cause && typeof cause === "object" && "code" in cause ? cause.code : undefined
+  const transport =
+    typeof code === "string" &&
+    [
+      "ConnectionRefused",
+      "FailedToOpenSocket",
+      "ECONNREFUSED",
+      "ConnectionClosed",
+      "ECONNRESET",
+      "EPIPE",
+      "ETIMEDOUT",
+    ].includes(code)
+      ? code
+      : undefined
+  const metadata =
+    input.error.url || transport
+      ? { ...(input.error.url ? { url: input.error.url } : {}), ...(transport ? { code: transport } : {}) }
+      : undefined
   return {
     type: "api_error",
     message: m,

@@ -1,13 +1,16 @@
-import { FinishReason, LLMEvent, ProviderMetadata, ToolResultValue } from "@opencode-ai/llm"
+import { FinishReason, LLMEvent, ProviderMetadata, ToolResultValue, type InferenceCategory } from "@opencode-ai/llm"
 import { Effect, Schema } from "effect"
 import { type streamText } from "ai"
 import { errorMessage } from "@/util/error"
 import { ProviderError } from "@/provider/error"
+import { Quota } from "./quota"
+import { createHash } from "node:crypto"
 
 type Result = Awaited<ReturnType<typeof streamText>>
 type AISDKEvent = Result["fullStream"] extends AsyncIterable<infer T> ? T : never
 
-export function adapterState() {
+type RouteBinding = { providerID: string; nonce: string; sessionID: string }
+export function adapterState(route?: RouteBinding, category?: InferenceCategory) {
   return {
     step: 0,
     text: 0,
@@ -16,7 +19,48 @@ export function adapterState() {
     currentReasoningID: undefined as string | undefined,
     toolNames: {} as Record<string, string>,
     copilotTotalNanoAiu: undefined as number | undefined,
+    route,
+    category,
   }
+}
+
+function transportRoute(state: ReturnType<typeof adapterState>, headers: Record<string, string> | undefined) {
+  if (state.route?.providerID !== "opencode-route" || !headers) return
+  const matches = Object.entries(headers).filter(([name]) => name.toLowerCase() === "x-opencode-route-attestation")
+  if (matches.length !== 1 || typeof matches[0]?.[1] !== "string") return
+  const value = matches[0][1]
+  if (value.length > 1024 || value.split(".").length !== 2) return
+  const [encoded, proof] = value.split(".")
+  if (!encoded || !/^[0-9a-f]{64}$/.test(proof ?? "") || encoded.includes("=")) return
+  try {
+    const raw = Buffer.from(encoded, "base64url")
+    if (raw.toString("base64url") !== encoded) return
+    const parsed = JSON.parse(raw.toString("utf8")) as Record<string, unknown>
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
+    if (Buffer.from(JSON.stringify(parsed, Object.keys(parsed).sort())).toString("base64url") !== encoded) return
+    const required = ["model", "nonce", "observation_id", "session_sha256", "target", "v"]
+    const keys = Object.keys(parsed).sort()
+    if (keys.join() !== required.join() && keys.join() !== [...required, "effort"].sort().join()) return
+    if (parsed.v !== 1 || parsed.nonce !== state.route.nonce) return
+    if (parsed.session_sha256 !== createHash("sha256").update(state.route.sessionID).digest("hex")) return
+    if (typeof parsed.target !== "string" || !["is1", "yolo", "ollama", "opencode_go"].includes(parsed.target)) return
+    if (typeof parsed.model !== "string" || !validIdentifier(parsed.model, 200)) return
+    if (parsed.effort !== undefined && (typeof parsed.effort !== "string" || !validIdentifier(parsed.effort, 32))) return
+    if (typeof parsed.observation_id !== "string" || !/^[0-9a-f]{32}$/.test(parsed.observation_id)) return
+    return {
+      source: "managed_gateway_attestation" as const,
+      provider: parsed.target as "is1" | "yolo" | "ollama" | "opencode_go",
+      model: parsed.model,
+      ...(parsed.effort === undefined ? {} : { effort: parsed.effort }),
+      observationID: parsed.observation_id,
+    }
+  } catch {
+    return
+  }
+}
+
+function validIdentifier(value: string, limit: number) {
+  return value.length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
 function finishReason(value: string | undefined): FinishReason {
@@ -60,8 +104,14 @@ function usage(value: unknown) {
     reasoningTokens: item.outputTokenDetails?.reasoningTokens ?? item.reasoningTokens,
     cacheReadInputTokens: item.inputTokenDetails?.cacheReadTokens ?? item.cachedInputTokens,
     cacheWriteInputTokens: item.inputTokenDetails?.cacheWriteTokens,
-  }).filter((entry) => entry[1] !== undefined)
+  }).filter((entry) => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0)
   return entries.length === 0 ? undefined : Object.fromEntries(entries)
+}
+
+function responseModel(value: unknown) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 200 || /[\u0000-\u001f\u007f]/.test(value))
+    return
+  return value
 }
 
 function currentTextID(state: ReturnType<typeof adapterState>, id: string | undefined) {
@@ -105,6 +155,9 @@ export function toLLMEvents(
           LLMEvent.stepFinish({
             index: state.step++,
             reason: finishReason(event.finishReason),
+            responseModel: responseModel(event.response.modelId),
+            transportRoute: transportRoute(state, event.response.headers),
+            category: state.category,
             usage: usage(event.usage),
             providerMetadata: metadata,
           }),
@@ -122,7 +175,7 @@ export function toLLMEvents(
         ]
         // Reset so the adapter can be reused for a follow-up stream without leaking
         // counters or block IDs. adapterState() is the single source of truth for shape.
-        Object.assign(state, adapterState())
+        Object.assign(state, adapterState(state.route, state.category))
         return events
       })
 
@@ -265,7 +318,11 @@ export function toLLMEvents(
       })
 
     case "error":
-      return Effect.fail(event.error)
+      // AI SDK provider failures arrive as an in-band fullStream event, not
+      // necessarily as the AsyncIterable rejection handled by llm.ts. Normalize
+      // the one trusted structured quota shape before it crosses the common
+      // quota guard; all other event errors keep their original behavior.
+      return Effect.fail(Quota.fromAISDKError(event.error) ?? event.error)
 
     case "abort":
     case "source":

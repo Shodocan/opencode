@@ -1,6 +1,7 @@
 export * as SessionV1 from "./session"
 
 import { Effect, Schema, Types } from "effect"
+import { HardQuotaEvidence, QuotaFallback } from "../quota"
 import { define, inventory } from "../event"
 import { FileDiff } from "../file-diff"
 import { Project } from "../project"
@@ -52,6 +53,9 @@ export const APIError = namedError("APIError", {
   responseHeaders: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   responseBody: Schema.optional(Schema.String),
   metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  hardQuota: Schema.optional(HardQuotaEvidence),
+  quotaFallbackFailed: Schema.optional(Schema.Boolean),
+  quotaReplaySuppressed: Schema.optional(Schema.Literal(true)),
 })
 export type APIError = Schema.Schema.Type<typeof APIError.Schema>
 export const ContextOverflowError = namedError("ContextOverflowError", {
@@ -237,12 +241,62 @@ export const StepStartPart = Schema.Struct({
 }).annotate({ identifier: "StepStartPart" })
 export type StepStartPart = Types.DeepMutable<Schema.Schema.Type<typeof StepStartPart>>
 
+const UsageCount = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0))
+export const InferenceIdentifier = Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,200}$/))
+
+const InferenceUsageReceipt = Schema.Struct({
+  source: Schema.Literal("llm_normalized"),
+  input_tokens: Schema.optional(UsageCount),
+  output_tokens: Schema.optional(UsageCount),
+  total_tokens: Schema.optional(UsageCount),
+  reasoning_tokens: Schema.optional(UsageCount),
+  cache_read_input_tokens: Schema.optional(UsageCount),
+  cache_write_input_tokens: Schema.optional(UsageCount),
+})
+
+export const InferenceTransportRoute = Schema.Struct({
+  source: Schema.Literal("managed_gateway_attestation"),
+  provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
+  model: InferenceIdentifier,
+  effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
+  observation_id: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
+})
+
+export const InferenceCategory = Schema.Struct({
+  source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
+  category: Schema.Literals(["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"]),
+  matrix_sha256: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)),
+})
+
+const InferenceReceipt = Schema.Struct({
+  requested: Schema.Struct({
+    provider_id: InferenceIdentifier,
+    model_id: InferenceIdentifier,
+    effort: Schema.optional(InferenceIdentifier),
+  }),
+  response: Schema.Struct({
+    model_id: Schema.optional(InferenceIdentifier),
+    source: Schema.Literal("transport_response"),
+    upstream_actual_identity: Schema.Literal("unknown"),
+  }),
+  transport_route: Schema.optional(InferenceTransportRoute),
+  category: Schema.optional(InferenceCategory),
+  quota_fallback: Schema.optional(QuotaFallback),
+  usage: Schema.optional(InferenceUsageReceipt),
+  cost: Schema.Struct({
+    amount: Schema.Finite,
+    semantics: Schema.Literal("configured_rate_estimate"),
+    actual_bill: Schema.Literal("unknown"),
+  }),
+})
+
 export const StepFinishPart = Schema.Struct({
   ...partBase,
   type: Schema.Literal("step-finish"),
   reason: Schema.String,
   snapshot: Schema.optional(Schema.String),
   cost: Schema.Finite,
+  inference: Schema.optional(InferenceReceipt),
   tokens: Schema.Struct({
     total: Schema.optional(Schema.Finite),
     input: Schema.Finite,

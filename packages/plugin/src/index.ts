@@ -10,6 +10,7 @@ import type {
   Part,
   Config as SDKConfig,
 } from "@opencode-ai/sdk"
+import type { HardQuotaEvidence } from "@opencode-ai/schema/quota"
 import type { Provider as ProviderV2, Model as ModelV2, Auth } from "@opencode-ai/sdk/v2"
 
 import type { BunShell } from "./shell.js"
@@ -60,7 +61,14 @@ export type PluginInput = {
   directory: string
   worktree: string
   /** Trusted native workflow lifecycle capabilities; absent in older runtimes. */
-  workflowRuntime?: { version: 1; taskStart: true; taskTerminal: true; toolError: true }
+  workflowRuntime?: {
+    version: 1 | 2
+    taskStart: true
+    taskTerminal: true
+    toolError: true
+    /** v2: native structured hard-quota terminal and pre-output fallback seam. */
+    quotaFallback?: true
+  }
   experimental_workspace: {
     register(type: string, adapter: WorkspaceAdapter): void
   }
@@ -78,6 +86,8 @@ export type Plugin = (input: PluginInput, options?: PluginOptions) => Promise<Ho
 
 export type PluginModule = {
   id?: string
+  /** Fail native initialization when this plugin's server or config hook fails. */
+  configRequired?: boolean
   server: Plugin
   tui?: never
 }
@@ -222,6 +232,19 @@ export type ProviderHook = {
 /** @deprecated Use AuthOAuthResult instead. */
 export type AuthOuathResult = AuthOAuthResult
 
+export type QuotaPolicy = {
+  schema_version: "2.1"
+  matrix_sha256: string
+  category: string
+  rule: {
+    source: { route: string; effort: string }
+    target: { route: string; effort: string }
+    when: ("account_quota_exhausted" | "account_usage_limit")[]
+    max_fallbacks_per_turn: 1
+  }
+}
+export type QuotaBinding = { binding: "unknown" | "workflow" | "standalone"; policy?: QuotaPolicy }
+
 export interface Hooks {
   dispose?: () => Promise<void>
   event?: (input: { event: Event }) => Promise<void>
@@ -256,6 +279,11 @@ export interface Hooks {
       maxOutputTokens: number | undefined
       options: Record<string, any>
     },
+  ) => Promise<void>
+  /** Awaited host-only quota authority; unknown binding never authorizes substitution. */
+  "experimental.chat.quota"?: (
+    input: { sessionID: string; agent: string; model: { providerID: string; id: string; variant?: string } },
+    output: QuotaBinding,
   ) => Promise<void>
   "chat.headers"?: (
     input: { sessionID: string; agent: string; model: Model; provider: ProviderContext; message: UserMessage },
@@ -311,12 +339,21 @@ export interface Hooks {
       status: "completed" | "failed" | "cancelled"
       localQuiescence: true
       remoteOutcome: "completed" | "unknown"
-      executionFailure?: { kind: "provider" | "tool"; error: unknown }
+      executionFailure?:
+        | { kind: "provider"; error: unknown; hardQuota?: HardQuotaEvidence; quotaReplaySuppressed?: true }
+        | { kind: "tool"; error: unknown }
       output?: string
     },
   ) => Promise<void>
   "experimental.chat.messages.transform"?: (
-    input: {},
+    input: {
+      /**
+       * Native cancellation signal. Abort pending work and settle the hook after
+       * cleanup; native interruption waits for this Promise to settle. A hook
+       * that ignores cancellation can delay interruption indefinitely.
+       */
+      signal?: AbortSignal
+    },
     output: {
       messages: {
         info: Message

@@ -244,7 +244,9 @@ const statusReason = (input: {
     return new AuthenticationReason({ message: input.message, kind: "insufficient-permissions", http: input.http })
   }
   if (input.status === 429) {
-    if (/insufficient[-_\s]?quota|quota[-_\s]?exceeded/i.test(body)) {
+    // Preserve explicit account exhaustion for the native quota classifier.
+    // Ordinary 429s remain RateLimit and cannot authorize route substitution.
+    if (/insufficient[-_\s]?quota|quota[-_\s]?exceeded|usage[-_\s]?limit[-_\s]?reached/i.test(body)) {
       return new QuotaExceededReason({ message: input.message, http: input.http })
     }
     return new RateLimitReason({

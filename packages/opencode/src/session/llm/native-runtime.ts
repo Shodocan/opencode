@@ -16,7 +16,8 @@ import {
   ToolRuntime,
   toDefinitions,
   type JsonSchema,
-  type LLMEvent,
+  LLMEvent,
+  type InferenceCategory,
 } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
@@ -47,6 +48,7 @@ type StreamInput = {
   readonly cfg?: ConfigV1.Info
   /** Budget phase marker ("normal" | "compaction") for gate evidence. */
   readonly phase?: string
+  readonly category?: InferenceCategory
 }
 
 // Direct adapter calls without a route config (unit transport tests) evaluate
@@ -173,9 +175,12 @@ export function stream(input: StreamInput): StreamResult {
     ),
   )
 
+  const categorized = stream.pipe(
+    Stream.map((event) => event.type === "step-finish" ? LLMEvent.stepFinish({ ...event, category: input.category }) : event),
+  )
   return {
     ...current,
-    stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+    stream: fetch ? categorized.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : categorized,
   }
 }
 

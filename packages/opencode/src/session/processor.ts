@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
+import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
@@ -48,6 +49,7 @@ export interface Handle {
 }
 
 type Input = {
+  deferCompactionOverflow?: boolean
   assistantMessage: SessionV1.Assistant
   sessionID: SessionID
   model: Provider.Model
@@ -451,6 +453,19 @@ const layer = Layer.effect(
             const dropped = isRecord(value.providerMetadata?.anthropic)
               ? value.providerMetadata.anthropic.inputTransformations
               : undefined
+            const transportRoute = value.transportRoute && {
+              source: value.transportRoute.source,
+              provider: value.transportRoute.provider,
+              model: value.transportRoute.model,
+              ...(value.transportRoute.effort === undefined ? {} : { effort: value.transportRoute.effort }),
+              observation_id: value.transportRoute.observationID,
+            }
+            const inferenceCategory = value.category && {
+              source: value.category.source,
+              category: value.category.category,
+              matrix_sha256: value.category.matrixSHA256,
+            }
+            const quotaFallback = value.quotaFallback
             if (Array.isArray(dropped) && dropped.length > 0) {
               yield* Effect.logWarning("thinking blocks dropped by provider", {
                 sessionID: ctx.sessionID,
@@ -467,6 +482,18 @@ const layer = Layer.effect(
             ctx.assistantMessage.finish = value.reason
             ctx.assistantMessage.cost += usage.cost
             ctx.assistantMessage.tokens = usage.tokens
+            const reportedUsage = value.usage
+              ? Object.fromEntries(
+                  Object.entries({
+                    input_tokens: value.usage.inputTokens,
+                    output_tokens: value.usage.outputTokens,
+                    total_tokens: value.usage.totalTokens,
+                    reasoning_tokens: value.usage.reasoningTokens,
+                    cache_read_input_tokens: value.usage.cacheReadInputTokens,
+                    cache_write_input_tokens: value.usage.cacheWriteInputTokens,
+                  }).filter((entry) => typeof entry[1] === "number" && Number.isFinite(entry[1]) && entry[1] >= 0),
+                )
+              : undefined
             yield* session.updatePart({
               id: PartID.ascending(),
               reason: value.reason,
@@ -476,6 +503,46 @@ const layer = Layer.effect(
               type: "step-finish",
               tokens: usage.tokens,
               cost: usage.cost,
+              // Optional accounting must never prevent a completed step from
+              // sealing when a custom route cannot be represented safely.
+              inference:
+                Schema.is(SessionV1.InferenceIdentifier)(ctx.model.providerID) &&
+                Schema.is(SessionV1.InferenceIdentifier)(ctx.model.id)
+                  ? {
+                      requested: {
+                        provider_id: ctx.model.providerID,
+                        model_id: ctx.model.id,
+                        ...(Schema.is(SessionV1.InferenceIdentifier)(ctx.assistantMessage.variant)
+                          ? { effort: ctx.assistantMessage.variant }
+                          : {}),
+                      },
+                      response: {
+                        ...(Schema.is(SessionV1.InferenceIdentifier)(value.responseModel)
+                          ? { model_id: value.responseModel }
+                          : {}),
+                        source: "transport_response",
+                        upstream_actual_identity: "unknown",
+                      },
+                      ...(ctx.model.providerID === "opencode-route" &&
+                      Schema.is(SessionV1.InferenceTransportRoute)(transportRoute)
+                        ? { transport_route: transportRoute }
+                        : {}),
+                      ...(inferenceCategory && Schema.is(SessionV1.InferenceCategory)(inferenceCategory)
+                        ? { category: inferenceCategory }
+                        : {}),
+                      ...(quotaFallback && Schema.is(QuotaFallback)(quotaFallback)
+                        ? { quota_fallback: quotaFallback }
+                        : {}),
+                      ...(reportedUsage && Object.keys(reportedUsage).length > 0
+                        ? { usage: { source: "llm_normalized", ...reportedUsage } }
+                        : {}),
+                      cost: {
+                        amount: usage.cost,
+                        semantics: "configured_rate_estimate",
+                        actual_bill: "unknown",
+                      },
+                    }
+                  : undefined,
             })
             yield* session.updateMessage(ctx.assistantMessage)
             if (ctx.snapshot) {
@@ -637,7 +704,8 @@ const layer = Layer.effect(
             return
           }
           ctx.needsCompaction = true
-          yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
+          if (!input.deferCompactionOverflow || !ctx.assistantMessage.summary)
+            yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
         ctx.assistantMessage.error = error
@@ -661,7 +729,20 @@ const layer = Layer.effect(
             ctx.currentText = undefined
             ctx.reasoningMap = {}
             yield* status.set(ctx.sessionID, { type: "busy" })
-            const stream = llm.stream(streamInput)
+            // A workflow quota switch creates a fresh child, so an earlier
+            // provider turn cannot be replayed safely. Read durable unfiltered
+            // history; compaction and message plugins must not erase this fence.
+            const history = streamInput.parentSessionID
+              ? yield* session.messages({ sessionID: input.sessionID })
+              : undefined
+            const stream = llm.stream({
+              ...streamInput,
+              quotaPriorActivity: history?.some((message) => message.info.role === "assistant" && (
+                message.info.id !== input.assistantMessage.id || message.parts.some((part) =>
+                  part.type !== "step-start" && part.type !== "step-finish" && part.type !== "snapshot",
+                )
+              )),
+            })
 
             yield* stream.pipe(
               Stream.tap((event) => handleEvent(event)),

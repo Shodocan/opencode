@@ -15,6 +15,7 @@ import { jsonSchema, tool as aiTool, type ModelMessage, type Tool } from "ai"
 import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import z from "zod"
+import type { InferenceCategory } from "@opencode-ai/llm"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
 
@@ -34,6 +35,7 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
+  readonly compactionOutputTokens?: number
 }
 
 export type Prepared = {
@@ -50,6 +52,20 @@ export type Prepared = {
   readonly messageTransformOptions: Record<string, any>
   readonly headers: Record<string, string>
   readonly budgetProjection: BudgetProjection
+  readonly category?: InferenceCategory
+}
+
+const CATEGORY_OPTION = "__opencodeModelCategory"
+
+function inferenceCategory(value: unknown): InferenceCategory | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return
+  const item = value as Record<string, unknown>
+  if (!Object.keys(item).every((key) => ["source", "category", "matrix_sha256"].includes(key))) return
+  if (item.source !== "host_policy_resolution" && item.source !== "workflow_frozen_matrix") return
+  if (typeof item.category !== "string") return
+  if (!["coordinate", "inspect", "intermediate", "reasoning", "review", "planning", "task_review", "consolidation"].includes(item.category)) return
+  if (typeof item.matrix_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(item.matrix_sha256)) return
+  return { source: item.source, category: item.category as InferenceCategory["category"], matrixSHA256: item.matrix_sha256 }
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +173,8 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
         providerOptions: input.provider.options,
       })
   const options = mergeOptions(mergeOptions(mergeOptions(base, input.model.options), input.agent.options), variant)
+  // This value is trusted only when a hook adds it after merged caller/config options are purged.
+  delete options[CATEGORY_OPTION]
   if (
     input.model.api.npm === "@ai-sdk/azure" &&
     (input.provider.options.useCompletionUrls || input.model.options.useCompletionUrls || options.useCompletionUrls)
@@ -198,6 +216,9 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
       options,
     },
   )
+  const category = inferenceCategory(params.options[CATEGORY_OPTION])
+  delete params.options[CATEGORY_OPTION]
+  delete options[CATEGORY_OPTION]
 
   const { headers } = yield* input.plugin.trigger(
     "chat.headers",
@@ -249,10 +270,15 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
 
   // Output allowance: normal requests keep the full runtime output allowance;
-  // compaction is bounded by min(4_096, route output limit, runtime cap).
+  // Primary compaction remains 4_096. Only its independently selected fallback
+  // supplies a larger allowance, charged identically in admission and on the wire.
   const outputAllowance =
     input.agent.name === "compaction"
-      ? Math.min(4_096, input.model.limit.output, input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER)
+      ? Math.min(
+          input.compactionOutputTokens ?? 4_096,
+          input.model.limit.output,
+          input.flags?.outputTokenMax ?? ProviderTransform.OUTPUT_TOKEN_MAX,
+        )
       : ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax)
 
   const budgetProjection = yield* Effect.tryPromise({
@@ -272,6 +298,33 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
           ),
   })
 
+  const preparedHeaders = {
+    ...(input.model.providerID.startsWith("opencode")
+      ? {
+          ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
+          "x-opencode-session": input.sessionID,
+          "x-opencode-request": input.user.id,
+          "x-opencode-client": input.flags?.client,
+          "User-Agent": USER_AGENT,
+        }
+      : {
+          "x-session-affinity": input.sessionID,
+          "X-Session-Id": input.sessionID,
+          "User-Agent": USER_AGENT,
+        }),
+    ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
+    ...input.model.headers,
+    ...headers,
+  }
+  const protectedHeaders =
+    input.model.providerID === "opencode-route"
+      ? Object.fromEntries(
+          Object.entries(preparedHeaders).filter(
+            ([name]) => !["x-opencode-session", "x-opencode-inference-nonce"].includes(name.toLowerCase()),
+          ),
+        )
+      : preparedHeaders
+
   return {
     system,
     messages,
@@ -279,24 +332,16 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     params,
     messageTransformOptions: options,
     headers: {
-      ...(input.model.providerID.startsWith("opencode")
+      ...protectedHeaders,
+      ...(input.model.providerID === "opencode-route"
         ? {
-            ...(opencodeProjectID ? { "x-opencode-project": opencodeProjectID } : {}),
             "x-opencode-session": input.sessionID,
-            "x-opencode-request": input.user.id,
-            "x-opencode-client": input.flags?.client,
-            "User-Agent": USER_AGENT,
+            "x-opencode-inference-nonce": crypto.randomUUID().replaceAll("-", ""),
           }
-        : {
-            "x-session-affinity": input.sessionID,
-            "X-Session-Id": input.sessionID,
-            "User-Agent": USER_AGENT,
-          }),
-      ...(input.parentSessionID ? { "x-parent-session-id": input.parentSessionID } : {}),
-      ...input.model.headers,
-      ...headers,
+        : {}),
     },
     budgetProjection,
+    category,
   }
 })
 

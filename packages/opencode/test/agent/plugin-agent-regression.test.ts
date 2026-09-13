@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Npm } from "@opencode-ai/core/npm"
-import { Effect } from "effect"
+import { Effect, Exit } from "effect"
 import path from "path"
 import { pathToFileURL } from "url"
 import { Agent } from "../../src/agent/agent"
@@ -24,6 +24,10 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // services hang during scope teardown on Windows and aren't needed
 // to verify plugin → config hook → Agent.list.
 const pluginUrl = pathToFileURL(path.join(import.meta.dir, "..", "fixture", "agent-plugin.ts")).href
+const requiredPluginUrl = pathToFileURL(path.join(import.meta.dir, "..", "fixture", "required-config-plugin.ts")).href
+const requiredFailureUrl = pathToFileURL(path.join(import.meta.dir, "..", "fixture", "required-config-failure-plugin.ts")).href
+const optionalFailureUrl = pathToFileURL(path.join(import.meta.dir, "..", "fixture", "optional-config-failure-plugin.ts")).href
+const requiredStartupFailureUrl = pathToFileURL(path.join(import.meta.dir, "..", "fixture", "required-startup-failure-plugin.ts")).href
 
 const provider = ProviderTest.fake()
 const it = testEffect(
@@ -35,6 +39,51 @@ const it = testEffect(
     [Skill.node, SkillTest.empty],
     [RuntimeFlags.node, RuntimeFlags.layer({ disableDefaultPlugins: true })],
   ]),
+)
+
+it.instance(
+  "required config hooks run before Agent captures config defaults",
+  () =>
+    Effect.gen(function* () {
+      yield* Plugin.Service.use((plugin) => plugin.init())
+      const agents = yield* Agent.use.list()
+      expect(agents.find((agent) => agent.name === "required_config_agent")?.description).toBe(
+        "Registered by a required config hook",
+      )
+    }),
+  { config: { plugin: [requiredPluginUrl] } },
+)
+
+it.instance(
+  "required config hook failure stops plugin initialization",
+  () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(Plugin.Service.use((plugin) => plugin.init()))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("invalid managed matrix")
+    }),
+  { config: { plugin: [requiredFailureUrl] } },
+)
+
+it.instance(
+  "optional config hook failure remains compatible",
+  () =>
+    Effect.gen(function* () {
+      yield* Plugin.Service.use((plugin) => plugin.init())
+      expect((yield* Agent.use.list()).length).toBeGreaterThan(0)
+    }),
+  { config: { plugin: [optionalFailureUrl] } },
+)
+
+it.instance(
+  "required plugin startup failure stops plugin initialization",
+  () =>
+    Effect.gen(function* () {
+      const exit = yield* Effect.exit(Plugin.Service.use((plugin) => plugin.init()))
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) expect(String(exit.cause)).toContain("required plugin startup failed")
+    }),
+  { config: { plugin: [requiredStartupFailureUrl] } },
 )
 
 it.instance(

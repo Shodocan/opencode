@@ -38,6 +38,8 @@ type State = {
   hooks: Hooks[]
 }
 
+class RequiredPluginError extends Error {}
+
 // Hook names that follow the (input, output) => Promise<void> trigger pattern
 type TriggerName = {
   [K in keyof Hooks]-?: NonNullable<Hooks[K]> extends (input: any, output: any) => Promise<void> ? K : never
@@ -111,11 +113,18 @@ function getLegacyPlugins(mod: Record<string, unknown>) {
   return result
 }
 
-async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[]) {
+async function applyPlugin(load: PluginLoader.Loaded, input: PluginInput, hooks: Hooks[], requiredHooks: Map<Hooks, string>) {
   const plugin = readV1Plugin(load.mod, load.spec, "server", "detect")
   if (plugin) {
     await resolvePluginId(load.source, load.spec, load.target, readPluginId(plugin.id, load.spec), load.pkg)
-    hooks.push(await (plugin as PluginModule).server(input, load.options))
+    try {
+      const hook = await (plugin as PluginModule).server(input, load.options)
+      hooks.push(hook)
+      if ((plugin as PluginModule).configRequired) requiredHooks.set(hook, load.spec)
+    } catch (error) {
+      if ((plugin as PluginModule).configRequired) throw new RequiredPluginError(`Required plugin ${load.spec} failed to initialize: ${errorMessage(error)}`)
+      throw error
+    }
     return
   }
 
@@ -134,6 +143,7 @@ const layer = Layer.effect(
     const state = yield* InstanceState.make<State>(
       Effect.fn("Plugin.state")(function* (ctx) {
         const hooks: Hooks[] = []
+        const requiredHooks = new Map<Hooks, string>()
         const bridge = yield* EffectBridge.make()
 
         function publishPluginError(message: string) {
@@ -152,7 +162,7 @@ const layer = Layer.effect(
         const cfg = yield* config.get()
         const input: PluginInput = {
           client,
-          workflowRuntime: { version: 1, taskStart: true, taskTerminal: true, toolError: true },
+          workflowRuntime: { version: 2, taskStart: true, taskTerminal: true, toolError: true, quotaFallback: true },
           project: ctx.project,
           worktree: ctx.worktree,
           directory: ctx.directory,
@@ -223,14 +233,12 @@ const layer = Layer.effect(
           // Keep plugin execution sequential so hook registration and execution
           // order remains deterministic across plugin runs.
           yield* Effect.tryPromise({
-            try: () => applyPlugin(load, input, hooks),
-            catch: (err) => {
-              const message = errorMessage(err)
-              return message
-            },
+            try: () => applyPlugin(load, input, hooks, requiredHooks),
+            catch: (error) => error,
           }).pipe(
-            Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error })),
-            Effect.catch(() => {
+            Effect.tapError((error) => Effect.logError("failed to load plugin", { path: load.spec, error: errorMessage(error) })),
+            Effect.catch((error) => {
+              if (error instanceof RequiredPluginError) return Effect.die(error)
               // TODO: make proper events for this
               // events.publish(Session.Event.Error, {
               //   error: new NamedError.Unknown({
@@ -249,7 +257,9 @@ const layer = Layer.effect(
             catch: errorMessage,
           }).pipe(
             Effect.tapError((error) => Effect.logError("plugin config hook failed", { error })),
-            Effect.ignore,
+            Effect.catch((error) => requiredHooks.has(hook)
+              ? Effect.die(new RequiredPluginError(`Required plugin ${requiredHooks.get(hook)} config hook failed: ${error}`))
+              : Effect.void),
           )
         }
 
@@ -328,6 +338,19 @@ const layer = Layer.effect(
         for (const hook of s.hooks) {
           const fn = hook[name] as any
           if (!fn) continue
+          if (name === "experimental.chat.messages.transform") {
+            yield* Effect.callback<void>((resume, signal) => {
+              const pending: Promise<void> = Promise.resolve().then(() => fn({ ...input, signal }, output))
+              pending.then(
+                () => resume(Effect.void),
+                (error) => resume(Effect.die(error)),
+              )
+              // Effect aborts its signal before running this finalizer. Join the
+              // hook's cleanup so interruption cannot leave a transform running.
+              return Effect.promise(() => pending).pipe(Effect.exit, Effect.asVoid)
+            })
+            continue
+          }
           yield* Effect.promise(async () => fn(input, output))
         }
       }).pipe(Effect.onExit((exit) => {

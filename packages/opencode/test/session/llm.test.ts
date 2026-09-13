@@ -21,6 +21,7 @@ import { SessionID, MessageID } from "../../src/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Permission } from "@/permission"
 import { LLMAISDK } from "@/session/llm/ai-sdk"
+import { createHash } from "node:crypto"
 import { Session as SessionNs } from "@/session/session"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -185,6 +186,65 @@ describe("session.llm.ai-sdk adapter", () => {
   // oxlint-disable-next-line typescript-eslint/no-unsafe-type-assertion -- tests defensive adapter branches outside AI SDK's current typed surface
   const uncheckedAdapterEvent = (input: unknown) => input as AISDKAdapterEvent
 
+  const attestation = (input?: { nonce?: string; session?: string; target?: string; model?: string }) => {
+    const nonce = input?.nonce ?? "1".repeat(32)
+    const session = input?.session ?? "ses-route-test"
+    const receipt = {
+      model: input?.model ?? "deepseek-flash",
+      nonce,
+      observation_id: "2".repeat(32),
+      session_sha256: createHash("sha256").update(session).digest("hex"),
+      target: input?.target ?? "opencode_go",
+      v: 1,
+    }
+    return `${Buffer.from(JSON.stringify(receipt, Object.keys(receipt).sort())).toString("base64url")}.${"3".repeat(64)}`
+  }
+
+  test("accepts only a canonical request-bound managed gateway route receipt", async () => {
+    const sessionID = "ses-route-test"
+    const nonce = "1".repeat(32)
+    const event = uncheckedAdapterEvent({
+      type: "finish-step",
+      response: {
+        id: "response-route",
+        timestamp: new Date(0),
+        modelId: "logical-alias",
+        headers: { "x-opencode-route-attestation": attestation() },
+      },
+      finishReason: "stop",
+      rawFinishReason: "stop",
+      usage: {},
+    })
+    const accepted = await Effect.runPromise(LLMAISDK.toLLMEvents(
+      LLMAISDK.adapterState({ providerID: "opencode-route", nonce, sessionID }), event))
+    expect(accepted[0]).toMatchObject({
+      responseModel: "logical-alias",
+      transportRoute: {
+        source: "managed_gateway_attestation",
+        provider: "opencode_go",
+        model: "deepseek-flash",
+        observationID: "2".repeat(32),
+      },
+    })
+
+    const rejected = await Promise.all([
+      LLMAISDK.adapterState({ providerID: "other", nonce, sessionID }),
+      LLMAISDK.adapterState({ providerID: "opencode-route", nonce: "4".repeat(32), sessionID }),
+      LLMAISDK.adapterState({ providerID: "opencode-route", nonce, sessionID: "different" }),
+    ].map((state) => Effect.runPromise(LLMAISDK.toLLMEvents(state, event))))
+    expect(rejected.every((events) => events[0] && events[0].type === "step-finish"
+      && events[0].transportRoute === undefined)).toBe(true)
+  })
+
+  test("carries a request-scoped category through AI SDK step finish", async () => {
+    const category = { source: "workflow_frozen_matrix" as const, category: "review" as const,
+      matrixSHA256: "a".repeat(64) }
+    const events = await Effect.runPromise(LLMAISDK.toLLMEvents(LLMAISDK.adapterState(undefined, category),
+      uncheckedAdapterEvent({ type: "finish-step", response: { id: "r", timestamp: new Date(0), modelId: "m" },
+        finishReason: "stop", rawFinishReason: "stop", usage: {} })))
+    expect(events[0]).toMatchObject({ type: "step-finish", category })
+  })
+
   test("maps AI SDK stream chunks without losing session-visible fields", async () => {
     const metadata = { openai: { itemID: "item-1" } }
     const events = await adapt([
@@ -281,6 +341,7 @@ describe("session.llm.ai-sdk adapter", () => {
         type: "step-finish",
         index: 0,
         reason: "unknown",
+        responseModel: "gpt-test",
         usage: {
           inputTokens: 10,
           outputTokens: 5,
@@ -384,6 +445,54 @@ describe("session.llm.ai-sdk adapter", () => {
     const stepFinish = events[0]
     if (stepFinish.type !== "step-finish") throw new Error("expected step-finish")
     expect(stepFinish.usage).toBeUndefined()
+    expect(stepFinish.responseModel).toBe("gpt-test")
+  })
+
+  test("omits invalid provider usage counters while preserving reported zeros", async () => {
+    const events = await adapt([
+      {
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: "gpt-test" },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: Number.NaN,
+          outputTokens: 7,
+          totalTokens: Number.POSITIVE_INFINITY,
+          inputTokenDetails: { noCacheTokens: undefined, cacheReadTokens: 0, cacheWriteTokens: -1 },
+          outputTokenDetails: { textTokens: 7, reasoningTokens: -1 },
+        },
+      },
+    ])
+    expect(events).toHaveLength(1)
+    const step = events[0]
+    if (step.type !== "step-finish") throw new Error("expected step-finish")
+    expect(step.usage).toMatchObject({ outputTokens: 7, cacheReadInputTokens: 0 })
+    expect(Object.keys(step.usage ?? {}).sort()).toEqual(["cacheReadInputTokens", "outputTokens"])
+    expect(step.responseModel).toBe("gpt-test")
+  })
+
+  test("drops unsafe provider response model identifiers", async () => {
+    const events = await adapt([
+      {
+        type: "finish-step",
+        response: { id: "response-1", timestamp: new Date(0), modelId: `model\n${"x".repeat(210)}` },
+        finishReason: "stop",
+        rawFinishReason: "stop",
+        providerMetadata: undefined,
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+          outputTokenDetails: { textTokens: 0, reasoningTokens: 0 },
+        },
+      },
+    ])
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: "step-finish" })
+    expect("responseModel" in events[0] ? events[0].responseModel : undefined).toBeUndefined()
   })
 
   test("reuses adapter state cleanly across streams once finish has fired", async () => {
@@ -754,7 +863,7 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
 
 describe("session.llm.stream", () => {
   const vivgridFixture = { providerID: "vivgrid", modelID: "gemini-3.1-pro-preview" }
-  const opencodeFixture = { providerID: "opencode-test", modelID: vivgridFixture.modelID }
+  const opencodeFixture = { providerID: "opencode-route", modelID: vivgridFixture.modelID }
 
   it.instance(
     "sends the parent session header for opencode providers",
@@ -803,7 +912,13 @@ describe("session.llm.stream", () => {
           tools: {},
         })
 
-        expect((yield* Effect.promise(() => request)).headers.get("x-parent-session-id")).toBe(parentSessionID)
+        const sent = yield* Effect.promise(() => request)
+        expect(sent.headers.get("x-parent-session-id")).toBe(parentSessionID)
+        expect(sent.headers.get("x-opencode-session")).toBe(sessionID)
+        expect(sent.headers.get("x-opencode-inference-nonce")).toMatch(/^[0-9a-f]{32}$/)
+        expect(sent.headers.get("x-opencode-inference-nonce")).not.toBe("f".repeat(32))
+        expect([...sent.headers.keys()].filter((name) => name.toLowerCase() === "x-opencode-session")).toHaveLength(1)
+        expect([...sent.headers.keys()].filter((name) => name.toLowerCase() === "x-opencode-inference-nonce")).toHaveLength(1)
       }),
     {
       config: () => {
@@ -814,7 +929,15 @@ describe("session.llm.stream", () => {
             [opencodeFixture.providerID]: {
               name: "OpenCode Test",
               npm: "@ai-sdk/openai-compatible",
-              models: { [fixture.model.id]: configModel(fixture.model) as ConfigModel },
+              models: {
+                [fixture.model.id]: {
+                  ...configModel(fixture.model),
+                  headers: {
+                    "X-OpenCode-Session": "spoofed-session",
+                    "X-OpenCode-Inference-Nonce": "f".repeat(32),
+                  },
+                } as ConfigModel,
+              },
               options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` },
             },
           },
