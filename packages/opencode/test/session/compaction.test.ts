@@ -164,7 +164,7 @@ function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID
         parentID,
         summary: true,
         time: { created: Date.now() },
-        finish: "end_turn",
+        finish: "stop",
       })
       yield* ssn.updatePart({
         id: PartID.ascending(),
@@ -203,6 +203,7 @@ function createCompactionMarker(sessionID: SessionID) {
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
+  sessions: SessionNs.Interface,
 ) {
   const msg = input.assistantMessage
   return {
@@ -211,17 +212,34 @@ function fake(
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-    process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
+    process: Effect.fn("TestSessionProcessor.process")(function* () {
+      if (result === "continue") {
+        msg.finish = "stop"
+        yield* sessions.updateMessage(msg)
+        yield* sessions.updatePart({
+          id: PartID.ascending(), sessionID: msg.sessionID, messageID: msg.id,
+          type: "text", text: "Complete fixture summary",
+        })
+      }
+      return result
+    }),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
 function processorLayer(result: "continue" | "compact") {
-  return Layer.succeed(
-    SessionProcessorModule.SessionProcessor.Service,
-    SessionProcessorModule.SessionProcessor.Service.of({
-      create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result))),
-    }),
-  )
+  return LayerNode.make({
+    service: SessionProcessorModule.SessionProcessor.Service,
+    layer: Layer.effect(
+      SessionProcessorModule.SessionProcessor.Service,
+      Effect.gen(function* () {
+        const sessions = yield* SessionNs.Service
+        return SessionProcessorModule.SessionProcessor.Service.of({
+          create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result, sessions))),
+        })
+      }),
+    ),
+    deps: [SessionNs.node],
+  })
 }
 
 function cfg(compaction?: ConfigV1.Info["compaction"]) {
@@ -2350,6 +2368,16 @@ describe("session.compaction.fallback", () => {
     "primary-success",
     "primary-length",
     "primary-empty",
+    "primary-whitespace",
+    "primary-filtered",
+    "primary-unknown",
+    "length-then-length",
+    "length-same-model",
+    "legacy-length",
+    "legacy-empty",
+    "unset-length",
+    "unset-empty",
+    "configured-output",
     "empty",
     "length",
     "no-progress",
@@ -2357,6 +2385,7 @@ describe("session.compaction.fallback", () => {
   ] as const) {
     itCompaction.instance(scenario, () => {
       const calls: string[] = []
+      const requests: string[] = []
       const resolutions: string[] = []
       const primary = createModel({ context: 100_000, output: 4096 })
       const fallback = { ...primary, id: ModelV2.ID.make("large"), limit: { context: 1_000_000, output: 4096 } }
@@ -2381,8 +2410,11 @@ describe("session.compaction.fallback", () => {
         LLM.Service.of({
           stream: (input) => {
             calls.push(input.model.id)
+            requests.push(JSON.stringify(input.messages))
             expect(Object.keys(input.tools)).toEqual([])
             if (input.model.id === "large") {
+              expect(input.compactionOutputTokens).toBe(scenario === "configured-output" ? 16_384 : 32_000)
+              expect(input.user.model.variant).toBeUndefined()
               expect(input.model.limit.context).toBe(1_000_000)
               return scenario === "fallback-overflow"
                 ? Stream.fail(overflow)
@@ -2394,17 +2426,19 @@ describe("session.compaction.fallback", () => {
                         : "Preserved task and decisions",
                   )(input).pipe(
                     Stream.map((event) =>
-                      scenario === "length" && (event.type === "finish" || event.type === "step-finish")
+                      ["length", "length-then-length"].includes(scenario) && (event.type === "finish" || event.type === "step-finish")
                         ? { ...event, reason: "length" as const }
                         : event,
                     ),
                   )
             }
-            if (["primary-success", "primary-length", "primary-empty"].includes(scenario))
-              return reply(scenario === "primary-empty" ? "" : "Complete primary summary")(input).pipe(
+            expect(input.compactionOutputTokens).toBeUndefined()
+            expect(input.user.model.variant).toBe("xhigh")
+            if (["primary-success", "primary-length", "primary-empty", "primary-whitespace", "primary-filtered", "primary-unknown", "length-then-length", "length-same-model", "legacy-length", "legacy-empty", "unset-length", "unset-empty", "configured-output"].includes(scenario))
+              return reply(["primary-empty", "unset-empty"].includes(scenario) ? "" : scenario === "primary-whitespace" ? " \n\t " : "Complete primary summary")(input).pipe(
                 Stream.map((event) =>
-                  scenario === "primary-length" && (event.type === "finish" || event.type === "step-finish")
-                    ? { ...event, reason: "length" as const }
+                  scenario !== "primary-success" && (event.type === "finish" || event.type === "step-finish")
+                    ? { ...event, reason: scenario === "primary-filtered" ? "content-filter" as const : scenario === "primary-unknown" ? "unknown" as const : ["primary-empty", "primary-whitespace", "unset-empty"].includes(scenario) ? "stop" as const : "length" as const }
                     : event,
                 ),
               )
@@ -2424,10 +2458,26 @@ describe("session.compaction.fallback", () => {
       )
       return Effect.gen(function* () {
         const ssn = yield* SessionNs.Service
+        const test = yield* TestInstance
         const session = yield* ssn.create({})
+        if (scenario.startsWith("legacy-")) {
+          yield* createUserMessage(session.id, "Prior task")
+          yield* createSummaryCompaction(session.id)
+          const prior = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
+          yield* createSummaryAssistantMessage(session.id, prior.info.id, test.directory, "VALID-OLDER-ANCHOR")
+        }
         const original = yield* createUserMessage(session.id, "Keep my task and decisions" + "x".repeat(80_000))
+        if (scenario.startsWith("legacy-")) {
+          yield* createSummaryCompaction(session.id)
+          const prior = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
+          const invalid = yield* createSummaryAssistantMessage(session.id, prior.info.id, test.directory, scenario === "legacy-empty" ? "" : "INVALID-PARTIAL-ANCHOR")
+          if (scenario === "legacy-length") yield* ssn.updateMessage({ ...invalid, finish: "length" })
+        }
         const recent = yield* createUserMessage(session.id, "Recent user instruction must survive")
         yield* createSummaryCompaction(session.id)
+        const selected = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
+        if (selected.info.role !== "user") throw new Error("Compaction marker must be a user")
+        yield* ssn.updateMessage({ ...selected.info, model: { ...selected.info.model, variant: "xhigh" } })
         const messages = yield* ssn.messages({ sessionID: session.id })
         const parent = messages.at(-1)!
         const errors: unknown[] = []
@@ -2442,7 +2492,7 @@ describe("session.compaction.fallback", () => {
         const result = yield* SessionCompaction.use.process({
           sessionID: session.id,
           parentID: parent.info.id,
-          messages,
+          messages: scenario.startsWith("legacy-") ? MessageV2.filterCompacted(messages.toReversed()) : messages,
           auto: false,
         })
         const after = yield* ssn.messages({ sessionID: session.id })
@@ -2454,16 +2504,29 @@ describe("session.compaction.fallback", () => {
         expect(after.find((item) => item.info.id === original.id)).toEqual(
           messages.find((item) => item.info.id === original.id),
         )
-        expect(result).toBe(scenario === "overflow" || scenario === "primary-success" ? "continue" : "stop")
-        expect([...new Set(calls)]).toEqual(
-          ["overflow", "fallback-overflow", "empty", "length", "no-progress"].includes(scenario)
+        const successful = ["overflow", "primary-success", "primary-length", "primary-empty", "primary-whitespace", "legacy-length", "legacy-empty", "configured-output"].includes(scenario)
+        expect(result).toBe(successful ? "continue" : "stop")
+        expect(calls).toEqual(
+          ["overflow", "fallback-overflow", "empty", "length", "no-progress", "primary-length", "primary-empty", "primary-whitespace", "length-then-length", "legacy-length", "legacy-empty", "configured-output"].includes(scenario)
             ? ["test-model", "large"]
             : ["test-model"],
         )
-        expect(finalized.length).toBe(scenario === "overflow" || scenario === "primary-success" ? 1 : 0)
-        if (scenario === "overflow") {
+        if (requests.length === 2) expect(requests[1]).toBe(requests[0])
+        if (scenario.startsWith("legacy-")) {
+          expect(requests[1]).toContain("Keep my task and decisions")
+          expect(requests[1]).toContain("<prior-summary>\\nVALID-OLDER-ANCHOR\\n</prior-summary>")
+          for (const message of messages.slice(0, -1)) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
+        }
+        expect(finalized.length).toBe(successful ? 1 : 0)
+        if (successful) {
           expect(errors).toEqual([])
-          expect(after.filter((item) => item.info.role === "assistant" && item.info.summary)).toHaveLength(1)
+          expect(after.filter((item) => item.info.role === "assistant" && item.info.summary && item.info.parentID === parent.info.id)).toHaveLength(1)
+        }
+        if (["length", "length-then-length", "length-same-model", "unset-length"].includes(scenario)) {
+          const failed = after.findLast((item) => item.info.role === "assistant" && item.info.summary)
+          expect(JSON.stringify(failed?.info)).toContain("finish=length")
+          expect(JSON.stringify(failed?.info)).toContain("reasoning=")
+          expect(failed?.parts).toEqual([])
         }
       }).pipe(
         Effect.provideService(SessionRetry.RetryLimit, 0),
@@ -2471,10 +2534,11 @@ describe("session.compaction.fallback", () => {
           provider,
           llm: stream,
           config: cfg({
+            fallback_max_output_tokens: scenario === "configured-output" ? 16_384 : undefined,
             fallback_model:
-              scenario === "unset"
+              scenario.startsWith("unset")
                 ? undefined
-                : scenario === "same-model" || scenario === "primary-length"
+                : scenario === "same-model" || scenario === "length-same-model"
                   ? "test/test-model"
                   : "test/large",
           }),

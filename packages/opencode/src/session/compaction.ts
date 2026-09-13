@@ -8,6 +8,7 @@ import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Session } from "./session"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
+import { ProviderTransform } from "@/provider/transform"
 import { MessageV2 } from "./message-v2"
 import { Token } from "@/util/token"
 import { isMedia } from "@/util/media"
@@ -113,8 +114,7 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
   }
 
   return messages.flatMap((msg, assistantIndex): CompletedCompaction[] => {
-    if (msg.info.role !== "assistant") return []
-    if (!msg.info.summary || !msg.info.finish || msg.info.error) return []
+    if (!MessageV2.isCompletedSummary(msg)) return []
     const userIndex = users.get(msg.info.parentID)
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
@@ -417,6 +417,8 @@ const layer = Layer.effect(
       let tailChanged = false
       const execute = Effect.gen(function* () {
         const attempt = Effect.fn("SessionCompaction.attempt")(function* (model: Provider.Model) {
+          const outputTokens =
+            model === primaryModel ? undefined : (cfg.compaction?.fallback_max_output_tokens ?? 32_000)
           const msg: SessionV1.Assistant = {
             id: MessageID.ascending(),
             role: "assistant",
@@ -476,14 +478,27 @@ const layer = Layer.effect(
               },
             ],
             model,
+            compactionOutputTokens: outputTokens,
           })
 
-          return { model, msg, processor, result }
+          return { model, msg, processor, result, outputTokens }
         })
         const first = yield* attempt(primaryModel)
         const fallback = cfg.compaction?.fallback_model
         const chosen = yield* Effect.gen(function* () {
-          if (first.result !== "compact" || !fallback) return first
+          if (!fallback) return first
+          const completed =
+            first.result === "continue" && !first.processor.message.error
+              ? (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
+                  (item) => item.info.id === first.msg.id,
+                )
+              : undefined
+          const incomplete =
+            first.result === "continue" &&
+            !first.processor.message.error &&
+            (first.processor.message.finish === "length" ||
+              (first.processor.message.finish === "stop" && (!completed || !summaryText(completed))))
+          if (first.result !== "compact" && !incomplete) return first
           const route = Provider.parseModel(fallback)
           if (route.providerID === primaryModel.providerID && route.modelID === primaryModel.id) return first
           const candidate = yield* provider
@@ -525,41 +540,47 @@ const layer = Layer.effect(
           yield* session.updateMessage(processor.message)
         }
 
-        if (result === "continue" && fallback) {
+        if (result === "continue") {
           const completed = (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
             (item) => item.info.id === msg.id,
           )
-          if (!completed || !summaryText(completed)?.trim() || processor.message.finish !== "stop") {
+          if (
+            !completed ||
+            !summaryText(completed)?.trim() ||
+            processor.message.finish !== "stop" ||
+            processor.message.error
+          ) {
             const error = new SessionV1.ContextOverflowError({
-              message:
-                "Compaction did not produce a complete summary. Original history is preserved; configure a compaction model with sufficient output capacity.",
+              message: `Compaction did not produce a complete summary (${model.providerID}/${model.id}; finish=${processor.message.finish ?? "missing"}; output=${processor.message.tokens.output}; reasoning=${processor.message.tokens.reasoning}). Original history is preserved; configure compaction.fallback_model and compaction.fallback_max_output_tokens with sufficient capacity.`,
             }).toObject()
             yield* session.removeMessage({ sessionID: input.sessionID, messageID: msg.id })
             yield* session.updateMessage({ ...processor.message, error, finish: "error" })
             yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
             return "stop"
           }
-          const resumeModel = yield* provider
-            .getModel(userMessage.model.providerID, userMessage.model.modelID)
-            .pipe(Effect.orDie)
-          const retained = tailIndex < 0 ? [] : history.slice(tailIndex)
-          const continuation = [...(completed ? [completed] : []), ...retained, ...(replay ? [replay] : [])]
-          const projection = yield* MessageV2.toModelMessagesEffect(continuation, resumeModel)
-          const admission = ContextBudget.evaluate({
-            model: resumeModel,
-            cfg,
-            phase: "normal",
-            estimate: ContextBudget.estimate({ messages: projection }),
-          })
-          if (!admission.admitted) {
-            const error = new SessionV1.ContextOverflowError({
-              message:
-                "Compaction summary and retained history still exceed the original model context window. Reduce compaction.preserve_recent_tokens or select a larger session model. Original history is preserved.",
-            }).toObject()
-            yield* session.removeMessage({ sessionID: input.sessionID, messageID: msg.id })
-            yield* session.updateMessage({ ...processor.message, error, finish: "error" })
-            yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
-            return "stop"
+          if (fallback) {
+            const resumeModel = yield* provider
+              .getModel(userMessage.model.providerID, userMessage.model.modelID)
+              .pipe(Effect.orDie)
+            const retained = tailIndex < 0 ? [] : history.slice(tailIndex)
+            const continuation = [...(completed ? [completed] : []), ...retained, ...(replay ? [replay] : [])]
+            const projection = yield* MessageV2.toModelMessagesEffect(continuation, resumeModel)
+            const admission = ContextBudget.evaluate({
+              model: resumeModel,
+              cfg,
+              phase: "normal",
+              estimate: ContextBudget.estimate({ messages: projection }),
+            })
+            if (!admission.admitted) {
+              const error = new SessionV1.ContextOverflowError({
+                message:
+                  "Compaction summary and retained history still exceed the original model context window. Reduce compaction.preserve_recent_tokens or select a larger session model. Original history is preserved.",
+              }).toObject()
+              yield* session.removeMessage({ sessionID: input.sessionID, messageID: msg.id })
+              yield* session.updateMessage({ ...processor.message, error, finish: "error" })
+              yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
+              return "stop"
+            }
           }
         }
 
@@ -690,7 +711,10 @@ const layer = Layer.effect(
             cfg,
             estimate: 0,
             phase: "compaction",
-            outputTokens: PLANNER_SUMMARY_OUTPUT_TOKENS,
+            outputTokens: Math.min(
+              chosen.outputTokens ?? PLANNER_SUMMARY_OUTPUT_TOKENS,
+              ProviderTransform.maxOutputTokens(model, flags.outputTokenMax),
+            ),
           }).budget
           const afterEstimate = ContextBudget.estimate({
             messages: [

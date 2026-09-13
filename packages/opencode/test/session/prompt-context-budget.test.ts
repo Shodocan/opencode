@@ -420,12 +420,10 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       expect(yield* llm.hits).toHaveLength(2)
       // The final request fits at preflight and is rejected by the provider
       // (reactive overflow): the one-shot cycle must run exactly once.
-      // The compaction reply intentionally has no finish_reason: the summary
-      // turn must not terminate the loop before the rebuild dispatch. The
-      // rebuild reply stops cleanly (.stop()), ending the session exactly
-      // after the one-shot cycle.
+      // Both summaries and the rebuilt response finish cleanly. The synthetic
+      // continuation after a complete checkpoint drives the rebuild once.
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("ok").stop())
       yield* llm.push(reply().text("rebuild ok").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })
@@ -482,7 +480,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       expect(yield* llm.hits).toHaveLength(2)
       // First overflow: one compaction, one rebuild, admitted.
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("ok").stop())
       yield* llm.push(reply().text("rebuild ok").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       yield* prompt.loop({ sessionID: chat.id })
@@ -493,7 +491,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       // the public overflow error. Now the overflow must start compaction
       // right away — one more compaction, one more rebuild, no error.
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok2"))
+      yield* llm.push(reply().text("ok2").stop())
       yield* llm.push(reply().text("rebuild ok2").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })
@@ -622,7 +620,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
       yield* buildHistory(prompt, llm, chat.id)
-      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("ok").stop())
       // ~950k chars (~237.5k tokens): the preflight is oversized and the
       // latest turn alone exceeds the compaction request budget, so the
       // bounded planner fails closed (latest-turn-too-large) before any
@@ -712,7 +710,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       })
       yield* buildHistory(prompt, llm, chat.id)
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("ok").stop())
       // .stop(): the rebuilt turn must end the loop cleanly (upstream #43892
       // keeps the loop running on an "unknown" recorded finish).
       yield* llm.push(reply().text("rebuild ok").stop())

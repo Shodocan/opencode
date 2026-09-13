@@ -53,6 +53,7 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     mcp: mcp(info),
     compaction: info.compaction && {
       fallback_model: info.compaction.fallback_model,
+      fallback_max_output_tokens: info.compaction.fallback_max_output_tokens,
       auto: info.compaction.auto,
       prune: info.compaction.prune,
       keep: {

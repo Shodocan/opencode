@@ -90,9 +90,14 @@ describe("Config", () => {
   it.effect("preserves optional compaction fallback when migrating configuration", () =>
     Effect.sync(() => {
       const migrated = Schema.decodeUnknownSync(Config.Info)(ConfigMigrateV1.migrate({
-        compaction: { fallback_model: "configured/large-context" },
+        compaction: { fallback_model: "configured/large-context", fallback_max_output_tokens: 16_384 },
       }))
       expect(migrated.compaction?.fallback_model).toBe("configured/large-context")
+      expect(migrated.compaction?.fallback_max_output_tokens).toBe(16_384)
+      for (const value of [0, -1, 1.5, "32000"]) {
+        expect(() => Schema.decodeUnknownSync(ConfigV1.Info)({ compaction: { fallback_max_output_tokens: value } })).toThrow()
+        expect(() => Schema.decodeUnknownSync(Config.Info)({ compaction: { fallback_max_output_tokens: value } })).toThrow()
+      }
     }),
   )
 

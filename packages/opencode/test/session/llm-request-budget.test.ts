@@ -87,6 +87,7 @@ type PrepareOverrides = {
   messages?: ModelMessage[]
   tools?: Record<string, any>
   plugin?: any
+  compactionOutputTokens?: number
 }
 
 function prepareInput(overrides: PrepareOverrides = {}) {
@@ -103,6 +104,7 @@ function prepareInput(overrides: PrepareOverrides = {}) {
     plugin: overrides.plugin ?? pluginPass,
     flags: { outputTokenMax: MODEL_OUTPUT, client: "test" } as never,
     isWorkflow: false,
+    compactionOutputTokens: overrides.compactionOutputTokens,
   }
 }
 
@@ -322,6 +324,15 @@ describe("session.llm-request-budget (T02)", () => {
     expect(JSON.stringify(projection)).toBe(before)
     expect(JSON.stringify(projection)).not.toContain("LATE-INJECTED-SYSTEM")
     expect(JSON.stringify(projection)).not.toContain("MUTATED-AFTER-PREPARE")
+  })
+
+  test("fallback allowance is projected after model and runtime clamps while primary remains 4096", async () => {
+    const input = prepareInput({ agent: { name: "compaction" } })
+    expect((await run(input)).budgetProjection.outputAllowance).toBe(4_096)
+    expect((await run({ ...input, compactionOutputTokens: 32_000 })).budgetProjection.outputAllowance).toBe(32_000)
+    expect((await run({ ...input, compactionOutputTokens: 16_384 })).budgetProjection.outputAllowance).toBe(16_384)
+    expect((await run({ ...input, compactionOutputTokens: 32_000, flags: { outputTokenMax: 8_192 } as never })).budgetProjection.outputAllowance).toBe(8_192)
+    expect((await run({ ...input, compactionOutputTokens: 32_000, model: testModel({ limit: { context: 1_000_000, output: 12_000 } }) })).budgetProjection.outputAllowance).toBe(12_000)
   })
 
   test("plugin late system growth raises the projection size", async () => {
