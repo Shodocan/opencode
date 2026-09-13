@@ -49,6 +49,7 @@ export interface Handle {
 }
 
 type Input = {
+  deferCompactionOverflow?: boolean
   assistantMessage: SessionV1.Assistant
   sessionID: SessionID
   model: Provider.Model
@@ -703,7 +704,8 @@ const layer = Layer.effect(
             return
           }
           ctx.needsCompaction = true
-          yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
+          if (!input.deferCompactionOverflow || !ctx.assistantMessage.summary)
+            yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
         ctx.assistantMessage.error = error

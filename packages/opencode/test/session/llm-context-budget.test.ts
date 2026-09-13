@@ -374,6 +374,7 @@ function llmHarness(opts: {
   native: boolean
   compaction?: ConfigV1.Info["compaction"]
   language?: unknown
+  outputTokenMax?: number
 }) {
   const language = opts.language ?? terminalModel(opts.model.api.id)
   return LayerNode.compile(LLM.node, [
@@ -386,7 +387,7 @@ function llmHarness(opts: {
       RuntimeFlags.node,
       RuntimeFlags.layer({
         experimentalNativeLlm: opts.native,
-        outputTokenMax: golden.inputs.outputTokenMax,
+        outputTokenMax: opts.outputTokenMax ?? golden.inputs.outputTokenMax,
         client: "test",
       }),
     ],
@@ -659,6 +660,48 @@ describe("T04 production final admission gates", () => {
 // --- 5. Compaction outgoing allowance ---------------------------------------
 
 describe("T04 production compaction allowance", () => {
+  for (const native of [true, false]) {
+    for (const scenario of ["default", "configured", "route-cap", "runtime-cap", "normal-unchanged"] as const) {
+      test(`fallback allowance ${scenario} reaches ${native ? "native" : "AI SDK"} request`, async () => {
+        const model = nativeRouteModel(cases.nativeRoutes[1]!)
+        if (scenario === "route-cap") model.limit.output = 12_000
+        const client = clientHarness()
+        let captured: Record<string, unknown> | undefined
+        const language = terminalModel(model.api.id, (options) => { captured = options })
+        const requested = scenario === "configured" ? 16_384 : scenario === "normal-unchanged" ? 1_024 : 32_000
+        const env = llmHarness({ model, client, native, language, outputTokenMax: scenario === "runtime-cap" ? 8_192 : undefined })
+        const exit = await runService(env, {
+          ...serviceInput({ model, sessionID: `session-fallback-${native}-${scenario}`, agentName: scenario === "normal-unchanged" ? "build" : "compaction", system: ["Summarize"], messages: [{ role: "user", content: "Original source" }], tools: {} }),
+          compactionOutputTokens: requested,
+        })
+        expect(Exit.isSuccess(exit)).toBe(true)
+        const expected = scenario === "route-cap" ? 12_000 : scenario === "runtime-cap" ? 8_192 : scenario === "configured" ? 16_384 : 32_000
+        if (native) {
+          expect(client.calls()).toBe(1)
+          const body = (await Effect.runPromise(LLMClient.prepare(client.lastRequest()!))).body as Record<string, unknown>
+          expect(body.max_tokens ?? body.max_output_tokens).toBe(expected)
+        } else {
+          expect(client.calls()).toBe(0)
+          expect(captured?.maxOutputTokens).toBe(expected)
+        }
+      })
+    }
+    test(`larger fallback output reserve rejects a request admitted at primary allowance (${native ? "native" : "AI SDK"})`, async () => {
+      const model = nativeRouteModel(cases.nativeRoutes[1]!)
+      model.limit.context = 65_536
+      const client = clientHarness()
+      let calls = 0
+      const env = llmHarness({ model, client, native, language: terminalModel(model.api.id, () => { calls++ }) })
+      const input = serviceInput({ model, sessionID: `session-fallback-reserve-${native}`, agentName: "compaction", system: [], messages: [{ role: "user", content: "x".repeat(100_000) }], tools: {} })
+      const primary = await runService(env, input)
+      expect(Exit.isSuccess(primary)).toBe(true)
+      const fallback = await runService(env, { ...input, compactionOutputTokens: 32_000 })
+      expect(Exit.isFailure(fallback)).toBe(true)
+      expect(Overflow.ContextBudgetExceededError.isInstance(failureOf(fallback))).toBe(true)
+      expect(native ? client.calls() : calls).toBe(1)
+    })
+  }
+
   test("large-route native compaction sends max_tokens 4,096", async () => {
     const model = nativeRouteModel(cases.nativeRoutes[1]!)
     const client = clientHarness()

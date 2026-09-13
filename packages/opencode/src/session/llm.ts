@@ -70,6 +70,8 @@ export type StreamInput = {
   quotaFallback?: boolean
   /** Authoritative session history, never projected/model-visible messages. */
   quotaPriorActivity?: boolean
+  /** Internal allowance for the independently budgeted compaction fallback. */
+  compactionOutputTokens?: number
 }
 
 export type StreamRequest = StreamInput & {
@@ -156,8 +158,8 @@ const live: Layer.Layer<
           )
 
       // T04 outgoing output: a defined outgoing cap is clamped down to the
-      // route/runtime allowance (compaction: min(4_096, route output, runtime
-      // cap) via the T02 budget projection allowance; normal requests keep
+      // route/runtime allowance (primary compaction: 4_096; its configured
+      // fallback: a separately bounded allowance) via the T02 projection; normal requests keep
       // the full allowance because params and allowance share the same
       // formula). A plugin that strips the cap (e.g. the OpenAI/codex
       // chat.params hook) keeps it stripped — the clamp only lowers a defined

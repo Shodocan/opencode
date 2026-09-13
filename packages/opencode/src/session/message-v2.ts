@@ -520,6 +520,16 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
+export function isCompletedSummary(msg: WithParts): msg is WithParts & { info: Assistant } {
+  return (
+    msg.info.role === "assistant" &&
+    msg.info.summary === true &&
+    msg.info.finish === "stop" &&
+    !msg.info.error &&
+    msg.parts.some((part) => part.type === "text" && Boolean(part.text.trim()))
+  )
+}
+
 export function filterCompacted(msgs: Iterable<WithParts>) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
@@ -540,14 +550,15 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     }
     if (msg.info.role === "user" && completed.has(msg.info.id) && msg.parts.some((part) => part.type === "compaction"))
       break
-    if (msg.info.role === "assistant" && msg.info.summary && msg.info.finish && !msg.info.error)
+    if (isCompletedSummary(msg))
       completed.add(msg.info.parentID)
   }
   result.reverse()
   const compactionIndex = result.findLastIndex(
     (msg) =>
       msg.info.role === "user" &&
-      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined),
+      msg.parts.some((item): item is CompactionPart => item.type === "compaction" && item.tail_start_id !== undefined) &&
+      completed.has(msg.info.id),
   )
   const compaction = result[compactionIndex]
   const part = compaction?.parts.find(
@@ -557,8 +568,7 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
     ? result.findIndex(
         (msg, index) =>
           index > compactionIndex &&
-          msg.info.role === "assistant" &&
-          msg.info.summary &&
+          isCompletedSummary(msg) &&
           msg.info.parentID === compaction.info.id,
       )
     : -1
