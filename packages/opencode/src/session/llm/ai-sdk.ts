@@ -1,3 +1,4 @@
+import { GatewayRoute } from "@opencode-ai/schema/gateway-route"
 import { FinishReason, LLMEvent, ProviderMetadata, ToolResultValue, type InferenceCategory } from "@opencode-ai/llm"
 import { Effect, Schema } from "effect"
 import { type streamText } from "ai"
@@ -29,6 +30,7 @@ function transportRoute(state: ReturnType<typeof adapterState>, headers: Record<
   const matches = Object.entries(headers).filter(([name]) => name.toLowerCase() === "x-opencode-route-attestation")
   if (matches.length !== 1 || typeof matches[0]?.[1] !== "string") return
   const value = matches[0][1]
+  // Bound the complete signed envelope, including JSON escaping, for both versions.
   if (value.length > 1024 || value.split(".").length !== 2) return
   const [encoded, proof] = value.split(".")
   if (!encoded || !/^[0-9a-f]{64}$/.test(proof ?? "") || encoded.includes("=")) return
@@ -38,6 +40,26 @@ function transportRoute(state: ReturnType<typeof adapterState>, headers: Record<
     const parsed = JSON.parse(raw.toString("utf8")) as Record<string, unknown>
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return
     if (Buffer.from(JSON.stringify(parsed, Object.keys(parsed).sort())).toString("base64url") !== encoded) return
+    // The proxy authenticates the signature; native still checks canonical
+    // wire shape and the exact current request nonce/session before recording it.
+    if (parsed.v === 2) {
+      if (Object.keys(parsed).sort().join() !== Object.keys(GatewayRoute.Receipt.fields).sort().join() ||
+          !Schema.is(GatewayRoute.Receipt)(parsed)) return
+      if (parsed.nonce !== state.route.nonce ||
+          parsed.session_sha256 !== createHash("sha256").update(state.route.sessionID).digest("hex")) return
+      return {
+        source: "managed_gateway_attestation" as const,
+        provider: parsed.target,
+        model: parsed.model,
+        effort: parsed.effort,
+        observationID: parsed.observation_id,
+        receiptVersion: parsed.v,
+        requestedModel: parsed.requested_model,
+        requestedEffort: parsed.requested_effort,
+        generation: parsed.generation,
+        selectionReason: parsed.selection_reason,
+      }
+    }
     const required = ["model", "nonce", "observation_id", "session_sha256", "target", "v"]
     const keys = Object.keys(parsed).sort()
     if (keys.join() !== required.join() && keys.join() !== [...required, "effort"].sort().join()) return

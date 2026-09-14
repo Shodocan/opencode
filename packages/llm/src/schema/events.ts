@@ -1,3 +1,4 @@
+import { GatewayRoute } from "@opencode-ai/schema/gateway-route"
 import { Schema } from "effect"
 import { QuotaFallback } from "@opencode-ai/schema/quota"
 import { ContentBlockID, FinishReason, ProtocolID, ProviderMetadata, RouteID, ToolCallID } from "./ids"
@@ -181,13 +182,34 @@ export const ToolError = Schema.Struct({
 }).annotate({ identifier: "LLM.Event.ToolError" })
 export type ToolError = Schema.Schema.Type<typeof ToolError>
 
-export const TransportRoute = Schema.Struct({
+const LegacyTransportRoute = Schema.Struct({
   source: Schema.Literal("managed_gateway_attestation"),
   provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
   model: Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,200}$/)),
   effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
   observationID: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
-}).annotate({ identifier: "LLM.Event.TransportRoute" })
+  // Reserved keys prevent incomplete/new receipts from decoding as legacy.
+  receiptVersion: Schema.optionalKey(Schema.Never),
+  requestedModel: Schema.optionalKey(Schema.Never),
+  requestedEffort: Schema.optionalKey(Schema.Never),
+  generation: Schema.optionalKey(Schema.Never),
+  selectionReason: Schema.optionalKey(Schema.Never),
+})
+export const TransportRoute = Schema.Union([
+  LegacyTransportRoute,
+  Schema.Struct({
+    source: LegacyTransportRoute.fields.source,
+    provider: GatewayRoute.Target,
+    model: GatewayRoute.Model,
+    effort: GatewayRoute.Effort,
+    observationID: LegacyTransportRoute.fields.observationID,
+    receiptVersion: Schema.Literal(2),
+    requestedModel: GatewayRoute.RequestedModel,
+    requestedEffort: GatewayRoute.Effort,
+    generation: GatewayRoute.Generation,
+    selectionReason: GatewayRoute.SelectionReason,
+  }),
+]).annotate({ identifier: "LLM.Event.TransportRoute" })
 export type TransportRoute = Schema.Schema.Type<typeof TransportRoute>
 
 export const InferenceCategory = Schema.Struct({
