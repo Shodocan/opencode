@@ -459,6 +459,13 @@ const layer = Layer.effect(
               model: value.transportRoute.model,
               ...(value.transportRoute.effort === undefined ? {} : { effort: value.transportRoute.effort }),
               observation_id: value.transportRoute.observationID,
+              ...(value.transportRoute.receiptVersion === 2 ? {
+                receipt_version: value.transportRoute.receiptVersion,
+                requested_model: value.transportRoute.requestedModel,
+                requested_effort: value.transportRoute.requestedEffort,
+                generation: value.transportRoute.generation,
+                selection_reason: value.transportRoute.selectionReason,
+              } : {}),
             }
             const inferenceCategory = value.category && {
               source: value.category.source,

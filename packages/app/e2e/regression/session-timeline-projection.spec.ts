@@ -129,6 +129,8 @@ test.describe("session timeline projection", () => {
   })
 
   test("renders comment strips and historical diff summary overflow", async ({ page }) => {
+    // Historical legacy UI coverage must precede its September 14, 2026 retirement.
+    await page.clock.setFixedTime(new Date("2026-09-01T12:00:00Z"))
     const user = userMessage(
       [
         userText("The user made the following comment regarding lines 4 through 8 of src/a.ts: Keep this stable", {

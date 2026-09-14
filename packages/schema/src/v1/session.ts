@@ -1,6 +1,7 @@
 export * as SessionV1 from "./session"
 
 import { Effect, Schema, Types } from "effect"
+import { GatewayRoute } from "../gateway-route"
 import { HardQuotaEvidence, QuotaFallback } from "../quota"
 import { define, inventory } from "../event"
 import { FileDiff } from "../file-diff"
@@ -254,13 +255,34 @@ const InferenceUsageReceipt = Schema.Struct({
   cache_write_input_tokens: Schema.optional(UsageCount),
 })
 
-export const InferenceTransportRoute = Schema.Struct({
+const LegacyInferenceTransportRoute = Schema.Struct({
   source: Schema.Literal("managed_gateway_attestation"),
   provider: Schema.Literals(["is1", "yolo", "ollama", "opencode_go"]),
   model: InferenceIdentifier,
   effort: Schema.optional(Schema.String.check(Schema.isPattern(/^[^\u0000-\u001f\u007f]{1,32}$/))),
   observation_id: Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/)),
+  // A partial v2 object must not lose its provenance through the v1 branch.
+  receipt_version: optional(Schema.Never),
+  requested_model: optional(Schema.Never),
+  requested_effort: optional(Schema.Never),
+  generation: optional(Schema.Never),
+  selection_reason: optional(Schema.Never),
 })
+export const InferenceTransportRoute = Schema.Union([
+  LegacyInferenceTransportRoute,
+  Schema.Struct({
+    source: LegacyInferenceTransportRoute.fields.source,
+    provider: GatewayRoute.Target,
+    model: GatewayRoute.Model,
+    effort: GatewayRoute.Effort,
+    observation_id: LegacyInferenceTransportRoute.fields.observation_id,
+    receipt_version: Schema.Literal(2),
+    requested_model: GatewayRoute.RequestedModel,
+    requested_effort: GatewayRoute.Effort,
+    generation: GatewayRoute.Generation,
+    selection_reason: GatewayRoute.SelectionReason,
+  }),
+])
 
 export const InferenceCategory = Schema.Struct({
   source: Schema.Literals(["host_policy_resolution", "workflow_frozen_matrix"]),
