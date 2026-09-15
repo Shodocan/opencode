@@ -15,6 +15,9 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
 import { NotFoundError } from "@/storage/storage"
+import { Provider } from "@/provider/provider"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -42,6 +45,13 @@ const BACKGROUND_UPDATED = [
 ].join("\n")
 
 const BaseParameterFields = {
+  model: Schema.optional(
+    Schema.Struct({
+      id: Schema.String,
+      providerID: Schema.String,
+      variant: Schema.optional(Schema.String),
+    }),
+  ).annotate({ description: "Exact provider/model/variant override. Omitted variant does not inherit defaults." }),
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
   prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
@@ -89,12 +99,27 @@ export const TaskTool = Tool.define(
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const provider = yield* Provider.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
       ctx: Tool.Context,
     ) {
       const cfg = yield* config.get()
+      const explicit = params.model
+      if (explicit) {
+        if (
+          !explicit.id.trim() ||
+          !explicit.providerID.trim() ||
+          (explicit.variant !== undefined && !explicit.variant.trim())
+        ) {
+          return yield* Effect.fail(new Error("Invalid explicit task model tuple"))
+        }
+        const supported = yield* provider.getModel(ProviderV2.ID.make(explicit.providerID), ModelV2.ID.make(explicit.id))
+        if (explicit.variant !== undefined && !Object.hasOwn(supported.variants ?? {}, explicit.variant)) {
+          return yield* Effect.fail(new Error("Unsupported explicit task model variant"))
+        }
+      }
       // The runtime call ID identifies this invocation; never synthesize one.
       const taskCallID = ctx.callID?.trim()
       if (!taskCallID) return yield* Effect.fail(new Error("TaskTool requires a nonblank host callID"))
@@ -198,10 +223,12 @@ if (session && session.parentID !== ctx.sessionID) {
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
-      }
+      const model = explicit
+        ? { modelID: ModelV2.ID.make(explicit.id), providerID: ProviderV2.ID.make(explicit.providerID) }
+        : next.model ?? {
+            modelID: msg.info.modelID,
+            providerID: msg.info.providerID,
+          }
       const metadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
@@ -226,7 +253,8 @@ if (session && session.parentID !== ctx.sessionID) {
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: explicit ? explicit.variant : next.model ? undefined : variant,
+          taskModelExact: explicit !== undefined,
           agent: next.name,
           taskOrigin,
           parts,
