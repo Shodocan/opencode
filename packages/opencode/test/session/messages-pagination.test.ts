@@ -678,8 +678,12 @@ describe("MessageV2.filterCompacted", () => {
         yield* addUser(sessionID, "retry")
 
         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        // Error assistant doesn't add to completed, so compaction boundary never triggers
-        expect(result).toHaveLength(3)
+        // Error assistant doesn't add to completed, so compaction boundary
+        // never triggers; the failed summary row is also excluded from model
+        // scope so a failed attempt cannot enlarge the next request
+        // (harness-opencode#31). The durable row itself is kept.
+        expect(result).toHaveLength(2)
+        expect(result.some((msg) => msg.info.role === "assistant")).toBe(false)
       }),
     ),
   )
@@ -695,7 +699,10 @@ describe("MessageV2.filterCompacted", () => {
         yield* addUser(sessionID, "next")
 
         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        expect(result).toHaveLength(3)
+        // An in-flight/crash-remnant summary is not a completed summary: no
+        // boundary trigger, and excluded from model scope (harness-opencode#31).
+        expect(result).toHaveLength(2)
+        expect(result.some((msg) => msg.info.role === "assistant")).toBe(false)
       }),
     ),
   )

@@ -1460,7 +1460,12 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
-            awaitingCompactionProgress = Boolean((yield* config.get()).compaction?.fallback_model)
+            // A compaction just ran. If the rebuilt request still comes back
+            // "compact", that is no progress — terminal, regardless of whether
+            // a fallback model is configured (harness-opencode#31). Arming this
+            // only for fallback configs let no-fallback sessions re-enter
+            // compaction forever.
+            awaitingCompactionProgress = true
             // T06: record the admitted one-shot compaction route exactly once
             // (the planned request identity is the durable ledger hash; the
             // executor's own dispatch is admitted without a hook).

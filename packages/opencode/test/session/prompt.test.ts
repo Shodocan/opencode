@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { SessionRetry } from "@/session/retry"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -52,7 +53,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
 import { TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
-import { reply, TestLLMServer } from "../lib/llm-server"
+import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -822,6 +823,57 @@ noLLMServer.instance(
       })
     }),
   { config: precedenceCfg },
+)
+
+// Compaction brake (harness-opencode#31): the awaitingCompactionProgress cycle
+// guard used to be armed only when compaction.fallback_model was configured.
+// Without a fallback, a successful compaction whose rebuilt request STILL
+// overflowed re-entered compaction forever. The guard must be unconditional:
+// one compaction per overflow episode, then a terminal diagnosable error.
+it.instance("loop terminates instead of re-entering compaction when the rebuilt request still overflows", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const seeded = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "Analyze this. " + "c".repeat(2_000) }],
+    })
+    // Turn one completes but reports usage above the compaction threshold,
+    // starting auto-compaction; the summary request completes and is small.
+    yield* llm.push(reply().text("working").usage({ input: 95_000, output: 100 }).stop())
+    yield* llm.push(reply().text("Compacted summary of the conversation.").stop())
+    // The rebuilt request still comes back above the threshold. Without the
+    // brake the loop re-enters compaction; the queued server errors make the
+    // un-braked cycle end in a provider failure instead of the guard verdict.
+    yield* llm.push(reply().text("still working").usage({ input: 95_000, output: 100 }).stop())
+    for (let i = 0; i < 8; i++)
+      yield* llm.push(httpError(500, { error: "compaction re-entered without a progress brake" }))
+
+    const result = yield* awaitWithTimeout(
+      prompt.loop({ sessionID: chat.id }).pipe(Effect.provideService(SessionRetry.RetryLimit, 0)),
+      "run loop never terminated - compaction re-entered without a progress brake",
+      "30 seconds",
+    )
+
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant")
+      expect(JSON.stringify(result.info.error)).toContain("compaction will not repeat without progress")
+    const all = yield* sessions.messages({ sessionID: chat.id })
+    // Exactly one compaction cycle: one marker, one completed summary, three
+    // provider hits (overflowing turn, summary, rebuilt overflowing turn).
+    expect(all.flatMap((m) => m.parts.filter((p) => p.type === "compaction"))).toHaveLength(1)
+    expect(all.filter((m) => m.info.role === "assistant" && m.info.summary)).toHaveLength(1)
+    expect(yield* llm.hits).toHaveLength(3)
+    // (#18) The seeded user turn survives the braked loop intact.
+    const seededUser = all.find((m) => m.info.id === seeded.info.id)
+    expect(
+      seededUser?.parts.some((p) => p.type === "text" && p.text.startsWith("Analyze this.")),
+    ).toBe(true)
+  }),
 )
 
 it.instance("loop surfaces content-filter finishes as session errors", () =>
