@@ -413,6 +413,14 @@ export const TaskTool = Tool.define(
           .prompt({
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
+            ...(currentParent.model
+              ? {
+                  model: {
+                    providerID: ProviderV2.ID.make(currentParent.model.providerID),
+                    modelID: ModelV2.ID.make(currentParent.model.id),
+                  },
+                }
+              : {}),
             variant,
             parts: [
               {

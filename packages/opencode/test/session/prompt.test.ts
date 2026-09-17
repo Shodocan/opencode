@@ -303,6 +303,47 @@ function providerCfg(url: string) {
   }
 }
 
+// Two distinguishable extra models plus an agent-level default for "build",
+// used by the model-precedence tests below: a prompt that cannot carry an
+// explicit model (like the plugin parent-wakeup HTTP card) must keep the
+// session's own persisted selection instead of being rerouted by the agent
+// default, and a resolved fallback must never be written back to the session
+// record as if the user had chosen it.
+const precedenceCfg = {
+  ...cfg,
+  provider: {
+    ...cfg.provider,
+    test: {
+      ...cfg.provider.test,
+      models: {
+        ...cfg.provider.test.models,
+        "session-model": {
+          ...cfg.provider.test.models["test-model"],
+          id: "session-model",
+          name: "Session Model",
+        },
+        "agent-model": {
+          ...cfg.provider.test.models["test-model"],
+          id: "agent-model",
+          name: "Agent Model",
+        },
+      },
+    },
+  },
+  agent: {
+    build: { model: "test/agent-model" },
+  },
+}
+
+const sessionRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("session-model"),
+}
+const agentRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("agent-model"),
+}
+
 const writeText = Effect.fn("test.writeText")(function* (file: string, text: string) {
   const fs = yield* FSUtil.Service
   yield* fs.writeWithDirs(file, text)
@@ -695,6 +736,92 @@ it.instance("legacy prompt emits message events without session.next events", ()
     expect(seen).toContain(MessageV2.Event.PartUpdated.type)
     expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
   }),
+)
+
+// Model precedence for prompts that carry no explicit model (e.g. the plugin
+// parent-wakeup HTTP card, whose body structurally cannot include `model`).
+
+noLLMServer.instance(
+  "prompt without an explicit model keeps the session's persisted model over the agent default",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "parent wakeup card" }],
+      })
+
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(sessionRef)
+      expect(yield* sessions.get(chat.id)).toMatchObject({
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+    }),
+  { config: precedenceCfg },
+)
+
+noLLMServer.instance(
+  "prompt without an explicit model does not persist the resolved agent default onto the session",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "parent wakeup card" }],
+      })
+
+      // The agent default still applies to the message for a genuinely fresh
+      // session with no recorded selection...
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(agentRef)
+      // ...but a selection the user never made must not be written back.
+      const info = yield* sessions.get(chat.id)
+      expect(info.model).toBeUndefined()
+      expect(info.agent).toBeUndefined()
+    }),
+  { config: precedenceCfg },
+)
+
+noLLMServer.instance(
+  "explicit input.model still resolves and persists onto the session record",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "user picked a model" }],
+      })
+
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(ref)
+      expect(yield* sessions.get(chat.id)).toMatchObject({
+        agent: "build",
+        model: { providerID: ref.providerID, id: ref.modelID },
+      })
+    }),
+  { config: precedenceCfg },
 )
 
 it.instance("loop surfaces content-filter finishes as session errors", () =>
@@ -2389,16 +2516,8 @@ noLLMServer.instance(
       const sessions = yield* Session.Service
       const session = yield* sessions.create({})
 
-      const other = yield* prompt.prompt({
-        sessionID: session.id,
-        agent: "build",
-        model: { providerID: ProviderV2.ID.make("opencode"), modelID: ModelV2.ID.make("kimi-k2.5-free") },
-        noReply: true,
-        parts: [{ type: "text", text: "hello" }],
-      })
-      if (other.info.role !== "user") throw new Error("expected user message")
-      expect(other.info.model.variant).toBeUndefined()
-
+      // Fresh session with nothing recorded: the agent default model applies
+      // and carries the agent variant.
       const match = yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
@@ -2412,6 +2531,32 @@ noLLMServer.instance(
         variant: "xhigh",
       })
       expect(match.info.model.variant).toBe("xhigh")
+
+      const other = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("opencode"), modelID: ModelV2.ID.make("kimi-k2.5-free") },
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+      if (other.info.role !== "user") throw new Error("expected user message")
+      expect(other.info.model.variant).toBeUndefined()
+
+      // The explicit selection is now the session's recorded model: a later
+      // prompt without a model keeps it instead of reverting to the agent
+      // default (harness-opencode#36).
+      const pinned = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "wakeup without a model" }],
+      })
+      if (pinned.info.role !== "user") throw new Error("expected user message")
+      expect(pinned.info.model).toEqual({
+        providerID: ProviderV2.ID.make("opencode"),
+        modelID: ModelV2.ID.make("kimi-k2.5-free"),
+        variant: undefined,
+      })
 
       const override = yield* prompt.prompt({
         sessionID: session.id,

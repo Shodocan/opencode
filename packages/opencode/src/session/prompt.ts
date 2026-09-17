@@ -721,7 +721,13 @@ const layer = Layer.effect(
               yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
               throw error
             }
-            const model = input.model ?? agent.model ?? (yield* currentModel(input.sessionID))
+            // Same precedence as createUserMessage: the session's recorded
+            // selection wins over the agent default (harness-opencode#36).
+            const model =
+              input.model ??
+              (yield* recordedModel(input.sessionID)) ??
+              agent.model ??
+              (yield* provider.defaultModel().pipe(Effect.orDie))
             const userMsg: SessionV1.User = {
               id: input.messageID ?? MessageID.ascending(),
               sessionID: input.sessionID,
@@ -866,7 +872,11 @@ const layer = Layer.effect(
       return yield* Effect.die(err)
     })
 
-    const currentModel = Effect.fnUntraced(function* (sessionID: SessionID) {
+    // The session's own recorded model selection: the persisted session row
+    // first, then the newest user message carrying a model. Returns undefined
+    // when the session has no recorded selection — callers must not confuse
+    // "no selection" with the provider default (harness-opencode#36).
+    const recordedModel = Effect.fnUntraced(function* (sessionID: SessionID) {
       const current = yield* db
         .select({ model: SessionTable.model })
         .from(SessionTable)
@@ -884,6 +894,12 @@ const layer = Layer.effect(
         .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
         .pipe(Effect.orDie)
       if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
+      return undefined
+    })
+
+    const currentModel = Effect.fnUntraced(function* (sessionID: SessionID) {
+      const recorded = yield* recordedModel(sessionID)
+      if (recorded) return recorded
       return yield* provider.defaultModel().pipe(Effect.orDie)
     })
 
@@ -898,7 +914,15 @@ const layer = Layer.effect(
         throw error
       }
 
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      // A prompt that cannot carry an explicit model (e.g. the plugin
+      // parent-wakeup HTTP card) must keep the session's own recorded
+      // selection; the agent default only applies when nothing is recorded
+      // (harness-opencode#36).
+      const model =
+        input.model ??
+        (yield* recordedModel(input.sessionID)) ??
+        ag.model ??
+        (yield* provider.defaultModel().pipe(Effect.orDie))
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.taskModelExact && !input.variant && ag.variant && same
@@ -926,23 +950,29 @@ const layer = Layer.effect(
         format: input.format,
       }
 
-      const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-      if (
-        current.agent !== info.agent ||
-        current.model?.providerID !== info.model.providerID ||
-        current.model?.id !== info.model.modelID ||
-        (current.model?.variant === "default" ? undefined : current.model?.variant) !== info.model.variant
-      ) {
-        yield* sessions.setAgentModel({
-          sessionID: input.sessionID,
-          agent: info.agent,
-          model: {
-            id: info.model.modelID,
-            providerID: info.model.providerID,
-            variant: info.model.variant ?? "default",
-          },
-          time: info.time.created,
-        })
+      // Only an explicit input.model is a user selection worth persisting.
+      // Writing back a model resolved from the agent default (or read from the
+      // session itself) would silently overwrite the session's recorded
+      // selection on the first model-less wakeup prompt (harness-opencode#36).
+      if (input.model) {
+        const current = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+        if (
+          current.agent !== info.agent ||
+          current.model?.providerID !== info.model.providerID ||
+          current.model?.id !== info.model.modelID ||
+          (current.model?.variant === "default" ? undefined : current.model?.variant) !== info.model.variant
+        ) {
+          yield* sessions.setAgentModel({
+            sessionID: input.sessionID,
+            agent: info.agent,
+            model: {
+              id: info.model.modelID,
+              providerID: info.model.providerID,
+              variant: info.model.variant ?? "default",
+            },
+            time: info.time.created,
+          })
+        }
       }
 
       yield* Effect.addFinalizer(() => instruction.clear(info.id))
