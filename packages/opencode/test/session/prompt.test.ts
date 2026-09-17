@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { SessionRetry } from "@/session/retry"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -52,7 +53,7 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
 import { TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
-import { reply, TestLLMServer } from "../lib/llm-server"
+import { httpError, reply, TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -301,6 +302,47 @@ function providerCfg(url: string) {
       },
     },
   }
+}
+
+// Two distinguishable extra models plus an agent-level default for "build",
+// used by the model-precedence tests below: a prompt that cannot carry an
+// explicit model (like the plugin parent-wakeup HTTP card) must keep the
+// session's own persisted selection instead of being rerouted by the agent
+// default, and a resolved fallback must never be written back to the session
+// record as if the user had chosen it.
+const precedenceCfg = {
+  ...cfg,
+  provider: {
+    ...cfg.provider,
+    test: {
+      ...cfg.provider.test,
+      models: {
+        ...cfg.provider.test.models,
+        "session-model": {
+          ...cfg.provider.test.models["test-model"],
+          id: "session-model",
+          name: "Session Model",
+        },
+        "agent-model": {
+          ...cfg.provider.test.models["test-model"],
+          id: "agent-model",
+          name: "Agent Model",
+        },
+      },
+    },
+  },
+  agent: {
+    build: { model: "test/agent-model" },
+  },
+}
+
+const sessionRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("session-model"),
+}
+const agentRef = {
+  providerID: ProviderV2.ID.make("test"),
+  modelID: ModelV2.ID.make("agent-model"),
 }
 
 const writeText = Effect.fn("test.writeText")(function* (file: string, text: string) {
@@ -694,6 +736,143 @@ it.instance("legacy prompt emits message events without session.next events", ()
     expect(seen).toContain(MessageV2.Event.Updated.type)
     expect(seen).toContain(MessageV2.Event.PartUpdated.type)
     expect(seen.filter((type) => type.startsWith("session.next."))).toEqual([])
+  }),
+)
+
+// Model precedence for prompts that carry no explicit model (e.g. the plugin
+// parent-wakeup HTTP card, whose body structurally cannot include `model`).
+
+noLLMServer.instance(
+  "prompt without an explicit model keeps the session's persisted model over the agent default",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "parent wakeup card" }],
+      })
+
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(sessionRef)
+      expect(yield* sessions.get(chat.id)).toMatchObject({
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+    }),
+  { config: precedenceCfg },
+)
+
+noLLMServer.instance(
+  "prompt without an explicit model does not persist the resolved agent default onto the session",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Pinned" })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "parent wakeup card" }],
+      })
+
+      // The agent default still applies to the message for a genuinely fresh
+      // session with no recorded selection...
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(agentRef)
+      // ...but a selection the user never made must not be written back.
+      const info = yield* sessions.get(chat.id)
+      expect(info.model).toBeUndefined()
+      expect(info.agent).toBeUndefined()
+    }),
+  { config: precedenceCfg },
+)
+
+noLLMServer.instance(
+  "explicit input.model still resolves and persists onto the session record",
+  () =>
+    Effect.gen(function* () {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        model: { providerID: sessionRef.providerID, id: sessionRef.modelID },
+      })
+
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "user picked a model" }],
+      })
+
+      expect(result.info.role).toBe("user")
+      if (result.info.role === "user") expect(result.info.model).toEqual(ref)
+      expect(yield* sessions.get(chat.id)).toMatchObject({
+        agent: "build",
+        model: { providerID: ref.providerID, id: ref.modelID },
+      })
+    }),
+  { config: precedenceCfg },
+)
+
+// Compaction brake (harness-opencode#31): the awaitingCompactionProgress cycle
+// guard used to be armed only when compaction.fallback_model was configured.
+// Without a fallback, a successful compaction whose rebuilt request STILL
+// overflowed re-entered compaction forever. The guard must be unconditional:
+// one compaction per overflow episode, then a terminal diagnosable error.
+it.instance("loop terminates instead of re-entering compaction when the rebuilt request still overflows", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const seeded = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "Analyze this. " + "c".repeat(2_000) }],
+    })
+    // Turn one completes but reports usage above the compaction threshold,
+    // starting auto-compaction; the summary request completes and is small.
+    yield* llm.push(reply().text("working").usage({ input: 95_000, output: 100 }).stop())
+    yield* llm.push(reply().text("Compacted summary of the conversation.").stop())
+    // The rebuilt request still comes back above the threshold. Without the
+    // brake the loop re-enters compaction; the queued server errors make the
+    // un-braked cycle end in a provider failure instead of the guard verdict.
+    yield* llm.push(reply().text("still working").usage({ input: 95_000, output: 100 }).stop())
+    for (let i = 0; i < 8; i++)
+      yield* llm.push(httpError(500, { error: "compaction re-entered without a progress brake" }))
+
+    const result = yield* awaitWithTimeout(
+      prompt.loop({ sessionID: chat.id }).pipe(Effect.provideService(SessionRetry.RetryLimit, 0)),
+      "run loop never terminated - compaction re-entered without a progress brake",
+      "30 seconds",
+    )
+
+    expect(result.info.role).toBe("assistant")
+    if (result.info.role === "assistant")
+      expect(JSON.stringify(result.info.error)).toContain("compaction will not repeat without progress")
+    const all = yield* sessions.messages({ sessionID: chat.id })
+    // Exactly one compaction cycle: one marker, one completed summary, three
+    // provider hits (overflowing turn, summary, rebuilt overflowing turn).
+    expect(all.flatMap((m) => m.parts.filter((p) => p.type === "compaction"))).toHaveLength(1)
+    expect(all.filter((m) => m.info.role === "assistant" && m.info.summary)).toHaveLength(1)
+    expect(yield* llm.hits).toHaveLength(3)
+    // (#18) The seeded user turn survives the braked loop intact.
+    const seededUser = all.find((m) => m.info.id === seeded.info.id)
+    expect(
+      seededUser?.parts.some((p) => p.type === "text" && p.text.startsWith("Analyze this.")),
+    ).toBe(true)
   }),
 )
 
@@ -2389,16 +2568,8 @@ noLLMServer.instance(
       const sessions = yield* Session.Service
       const session = yield* sessions.create({})
 
-      const other = yield* prompt.prompt({
-        sessionID: session.id,
-        agent: "build",
-        model: { providerID: ProviderV2.ID.make("opencode"), modelID: ModelV2.ID.make("kimi-k2.5-free") },
-        noReply: true,
-        parts: [{ type: "text", text: "hello" }],
-      })
-      if (other.info.role !== "user") throw new Error("expected user message")
-      expect(other.info.model.variant).toBeUndefined()
-
+      // Fresh session with nothing recorded: the agent default model applies
+      // and carries the agent variant.
       const match = yield* prompt.prompt({
         sessionID: session.id,
         agent: "build",
@@ -2412,6 +2583,32 @@ noLLMServer.instance(
         variant: "xhigh",
       })
       expect(match.info.model.variant).toBe("xhigh")
+
+      const other = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        model: { providerID: ProviderV2.ID.make("opencode"), modelID: ModelV2.ID.make("kimi-k2.5-free") },
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+      if (other.info.role !== "user") throw new Error("expected user message")
+      expect(other.info.model.variant).toBeUndefined()
+
+      // The explicit selection is now the session's recorded model: a later
+      // prompt without a model keeps it instead of reverting to the agent
+      // default (harness-opencode#36).
+      const pinned = yield* prompt.prompt({
+        sessionID: session.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "wakeup without a model" }],
+      })
+      if (pinned.info.role !== "user") throw new Error("expected user message")
+      expect(pinned.info.model).toEqual({
+        providerID: ProviderV2.ID.make("opencode"),
+        modelID: ModelV2.ID.make("kimi-k2.5-free"),
+        variant: undefined,
+      })
 
       const override = yield* prompt.prompt({
         sessionID: session.id,
