@@ -61,7 +61,7 @@ const BaseParameterFields = {
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
-      "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "Resume only: use the exact native session ID (starting with ses) returned by a previous Task. Omit task_id for a fresh task. Never generate a UUID or substitute a tool-call, workflow, node, or attempt ID. Workflow cards must be forwarded unchanged, including omission of task_id.",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 }
@@ -179,13 +179,33 @@ export const TaskTool = Tool.define(
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
-      const session = params.task_id
-        ? yield* sessions
-            .get(SessionID.make(params.task_id))
-            .pipe(Effect.catchIf(NotFoundError.isInstance, () => Effect.succeed(undefined)))
-        : undefined
+      if (params.task_id !== undefined && !Schema.is(SessionID)(params.task_id)) {
+        return yield* Effect.fail(
+          new Error(
+            `Invalid task_id format ${JSON.stringify(params.task_id)}: expected the native session ID starting with "ses" returned by a previous Task, not a UUID or tool-call/workflow ID. Omit task_id for a fresh task; forward workflow cards unchanged.`,
+          ),
+        )
+      }
+      const session =
+        params.task_id !== undefined
+          ? yield* sessions
+              .get(SessionID.make(params.task_id))
+              .pipe(
+                Effect.catchIf(NotFoundError.isInstance, () =>
+                  Effect.fail(
+                    new Error(
+                      `Task session not found for task_id ${JSON.stringify(params.task_id)}. Use the exact task_id returned by a previous Task in this instance; it may have been deleted or belong to another instance. Omit task_id only if you intend a fresh task; do not alter a workflow card.`,
+                    ),
+                  ),
+                ),
+              )
+          : undefined
       if (session && session.parentID !== ctx.sessionID) {
-        return yield* Effect.fail(new Error("TaskTool task_id must name a direct child of the calling session"))
+        return yield* Effect.fail(
+          new Error(
+            `TaskTool task_id ${JSON.stringify(params.task_id)} must name a direct child of the calling session`,
+          ),
+        )
       }
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],

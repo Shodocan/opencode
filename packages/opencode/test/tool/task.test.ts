@@ -179,20 +179,22 @@ describe("tool.task", () => {
       const tool = yield* TaskTool
       const def = yield* tool.init()
       const execute = (callID?: string) =>
-        def.execute(
-          { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
-          {
-            sessionID: chat.id,
-            messageID: assistant.id,
-            callID,
-            agent: "build",
-            abort: new AbortController().signal,
-            extra: { promptOps: stubOps() },
-            messages: [],
-            metadata: () => Effect.void,
-            ask: () => Effect.void,
-          },
-        ).pipe(Effect.exit)
+        def
+          .execute(
+            { description: "inspect bug", prompt: "inspect", subagent_type: "general" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              callID,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps() },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
 
       for (const callID of [undefined, "   "]) {
         const exit = yield* execute(callID)
@@ -234,7 +236,9 @@ describe("tool.task", () => {
 
       yield* execute("call-B", child.id)
       expect(seen.map((input) => input.taskOrigin?.taskCallID)).toEqual(["call-A", "call-B"])
-      expect((yield* sessions.get(child.id)).metadata?.["opencode.task.origin"]).toEqual(child.metadata?.["opencode.task.origin"])
+      expect((yield* sessions.get(child.id)).metadata?.["opencode.task.origin"]).toEqual(
+        child.metadata?.["opencode.task.origin"],
+      )
     }),
   )
 
@@ -246,20 +250,22 @@ describe("tool.task", () => {
       const foreignChild = yield* sessions.create({ parentID: otherParent.id, title: "foreign child" })
       const tool = yield* TaskTool
       const def = yield* tool.init()
-      const exit = yield* def.execute(
-        { description: "inspect", prompt: "inspect", subagent_type: "general", task_id: foreignChild.id },
-        {
-          sessionID: chat.id,
-          messageID: assistant.id,
-          callID: "call-cross-parent",
-          agent: "build",
-          abort: new AbortController().signal,
-          extra: { promptOps: stubOps() },
-          messages: [],
-          metadata: () => Effect.void,
-          ask: () => Effect.void,
-        },
-      ).pipe(Effect.exit)
+      const exit = yield* def
+        .execute(
+          { description: "inspect", prompt: "inspect", subagent_type: "general", task_id: foreignChild.id },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "call-cross-parent",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps() },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
 
       expect(Exit.isFailure(exit)).toBe(true)
       expect(yield* sessions.children(chat.id)).toHaveLength(0)
@@ -570,7 +576,7 @@ describe("tool.task", () => {
     }),
   )
 
-  it.instance("execute creates a child when task_id does not exist", () =>
+  it.instance("execute rejects an unknown task_id without creating a child", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
@@ -579,32 +585,114 @@ describe("tool.task", () => {
       let seen: SessionPrompt.PromptInput | undefined
       const promptOps = stubOps({ text: "created", onPrompt: (input) => (seen = input) })
 
-      const result = yield* def.execute(
-        {
-          description: "inspect bug",
-          prompt: "look into the cache key path",
-          subagent_type: "general",
-          task_id: "ses_missing",
-        },
-        {
-          sessionID: chat.id,
-          messageID: assistant.id,
-          callID: "task-ask-call",
-          agent: "build",
-          abort: new AbortController().signal,
-          extra: { promptOps },
-          messages: [],
-          metadata: () => Effect.void,
-          ask: () => Effect.void,
-        },
-      )
+      const result = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+            task_id: "ses_missing",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "task-ask-call",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
 
-      const kids = yield* sessions.children(chat.id)
-      expect(kids).toHaveLength(1)
-      expect(kids[0]?.id).toBe(result.metadata.sessionId)
-      expect(result.metadata.sessionId).not.toBe("ses_missing")
-      expect(result.output).toContain(`<task id="${result.metadata.sessionId}" state="completed">`)
-      expect(seen?.sessionID).toBe(result.metadata.sessionId)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isSuccess(result)) throw new Error("expected unknown task_id rejection")
+      expect(Cause.pretty(result.cause)).toContain('Task session not found for task_id "ses_missing"')
+      expect(Cause.pretty(result.cause)).toContain("Use the exact task_id returned by a previous Task")
+      expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      expect(seen).toBeUndefined()
+    }),
+  )
+
+  for (const task_id of ["44904634-2fcc-4ab3-b092-f0aec7bb5123", "", "garbage", " ses_invalid"]) {
+    it.instance(`execute rejects malformed task_id ${JSON.stringify(task_id)}`, () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        let prompted = false
+        const result = yield* def
+          .execute(
+            { description: "inspect", prompt: "inspect", subagent_type: "general", task_id },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              callID: "invalid-resume",
+              agent: "build",
+              abort: new AbortController().signal,
+              messages: [],
+              extra: {
+                promptOps: stubOps({
+                  onPrompt: () => {
+                    prompted = true
+                  },
+                }),
+              },
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isSuccess(result)) throw new Error("expected malformed task_id rejection")
+        expect(Cause.pretty(result.cause)).toContain(`Invalid task_id format ${JSON.stringify(task_id)}`)
+        expect(Cause.pretty(result.cause)).toContain("Omit task_id for a fresh task")
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+        expect(prompted).toBe(false)
+      }),
+    )
+  }
+
+  it.instance("execute resumes the exact returned task_id and rejects it after deletion", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const def = yield* (yield* TaskTool).init()
+      const seen: SessionID[] = []
+      const ctx = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        callID: "fresh-task",
+        agent: "build",
+        abort: new AbortController().signal,
+        messages: [],
+        extra: {
+          promptOps: stubOps({
+            onPrompt: (input) => {
+              seen.push(input.sessionID)
+            },
+          }),
+        },
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+      const params = { description: "inspect", prompt: "inspect", subagent_type: "general" }
+      const first = yield* def.execute(params, ctx)
+      const task_id = first.metadata.sessionId
+      expect(first.output).toContain(`<task id="${task_id}"`)
+      const resumed = yield* def.execute({ ...params, task_id }, { ...ctx, callID: "resume-task" })
+      expect(resumed.metadata.sessionId).toBe(task_id)
+      expect(seen).toEqual([task_id, task_id])
+      expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      yield* sessions.remove(task_id)
+      const stale = yield* def.execute({ ...params, task_id }, { ...ctx, callID: "stale-task" }).pipe(Effect.exit)
+      expect(Exit.isFailure(stale)).toBe(true)
+      if (Exit.isSuccess(stale)) throw new Error("expected stale task_id rejection")
+      expect(Cause.pretty(stale.cause)).toContain(`Task session not found for task_id ${JSON.stringify(task_id)}`)
+      expect(seen).toEqual([task_id, task_id])
+      expect(yield* sessions.children(chat.id)).toHaveLength(0)
     }),
   )
 
@@ -955,10 +1043,10 @@ describe("tool.task", () => {
             return Effect.succeed(reply(input, "done"))
           }
           prompts++
-            if (prompts === 1) {
-              startedPrompt.resolve(input)
-              return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
-            }
+          if (prompts === 1) {
+            startedPrompt.resolve(input)
+            return Effect.promise(() => first.promise).pipe(Effect.as(reply(input, "first done")))
+          }
           updated.resolve(input)
           return Effect.promise(() => second.promise).pipe(Effect.as(reply(input, "second done")))
         },
@@ -1001,9 +1089,7 @@ describe("tool.task", () => {
       first.resolve()
       expect((yield* jobs.get(started.metadata.sessionId))?.status).toBe("running")
       const updatePrompt = yield* Effect.promise(() => updated.promise)
-      expect(updatePrompt.parts).toEqual([
-        { type: "text", text: "also inspect cancellation" },
-      ])
+      expect(updatePrompt.parts).toEqual([{ type: "text", text: "also inspect cancellation" }])
       expect(updatePrompt.taskOrigin?.taskCallID).toBe("call-B")
 
       second.resolve()

@@ -341,7 +341,7 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "type": "string",
     },
     "task_id": {
-      "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "description": "Resume only: use the exact native session ID (starting with ses) returned by a previous Task. Omit task_id for a fresh task. Never generate a UUID or substitute a tool-call, workflow, node, or attempt ID. Workflow cards must be forwarded unchanged, including omission of task_id.",
       "type": "string",
     },
   },

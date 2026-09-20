@@ -10,6 +10,7 @@ When NOT to use the Task tool:
 
 
 Usage notes:
+For a fresh task, omit task_id entirely. To resume, copy the exact native session ID (starting with ses) returned by Task; never invent a UUID or use a tool-call, workflow, node, or attempt ID. Forward workflow cards unchanged, including an omitted task_id. An invalid or missing session ID is an error, not permission to silently start over.
 1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
 2. Once you have delegated work to an agent, do not duplicate that work yourself. Continue with non-overlapping tasks, or wait for the result. For background tasks, you will be notified automatically when the result is ready.
 3. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result. The output includes a task_id you can reuse later to continue the same subagent session.
