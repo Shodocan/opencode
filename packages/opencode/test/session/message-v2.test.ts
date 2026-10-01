@@ -1586,14 +1586,10 @@ describe("session.message-v2.complete compaction boundaries", () => {
         const before = structuredClone(original)
         const filtered = MessageV2.filterCompacted(original.toReversed())
         expect(original).toEqual(before)
-        // History is preserved (no boundary truncation from the invalid
-        // summary) and the invalid summary row itself is excluded from model
-        // scope so a failed attempt cannot enlarge the next request
-        // (harness-opencode#31).
         expect(filtered.map((msg) => String(msg.info.id))).toEqual(
           olderValid
-            ? ["msg_003", "msg_004", "msg_002", "msg_005", "msg_006", "msg_007", "msg_009"]
-            : original.filter((msg) => String(msg.info.id) !== "msg_008").map((msg) => msg.info.id),
+            ? ["msg_003", "msg_004", "msg_002", "msg_005", "msg_006", "msg_007", "msg_008", "msg_009"]
+            : original.map((msg) => msg.info.id),
         )
         expect(MessageV2.isCompletedSummary(bad)).toBe(false)
         expect(MessageV2.isCompletedSummary(old)).toBe(true)

@@ -569,25 +569,18 @@ const layer = Layer.effect(
             yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
             return "stop"
           }
-          // Post-compaction-over-budget verdict (CompactionExecutor semantics):
-          // the projected post-compaction state must be admitted for the
-          // resume model's next normal request. Previously checked only when a
-          // fallback model was configured; a live-path compaction must never
-          // hand back a state that immediately overflows again
-          // (harness-opencode#31).
-          if (fallback || input.auto) {
+          if (fallback) {
             const resumeModel = yield* provider
               .getModel(userMessage.model.providerID, userMessage.model.modelID)
               .pipe(Effect.orDie)
             const retained = tailIndex < 0 ? [] : history.slice(tailIndex)
             const continuation = [...(completed ? [completed] : []), ...retained, ...(replay ? [replay] : [])]
             const projection = yield* MessageV2.toModelMessagesEffect(continuation, resumeModel)
-            const afterEstimate = ContextBudget.estimate({ messages: projection })
             const admission = ContextBudget.evaluate({
               model: resumeModel,
               cfg,
               phase: "normal",
-              estimate: afterEstimate,
+              estimate: ContextBudget.estimate({ messages: projection }),
             })
             if (!admission.admitted) {
               const error = new SessionV1.ContextOverflowError({
@@ -598,31 +591,6 @@ const layer = Layer.effect(
               yield* session.updateMessage({ ...processor.message, error, finish: "error" })
               yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
               return "stop"
-            }
-            // No-reduction verdict (CompactionExecutor semantics) for the
-            // overflow-driven single-shot repair: compare the projection of
-            // the exact pre-compaction state against the post-compaction
-            // continuation on the same measurement basis. If the summary did
-            // not shrink the state, the rebuilt request repeats the same
-            // overflow — terminal instead of re-entering compaction
-            // (harness-opencode#31). Skipped when a prior turn is replayed
-            // verbatim: that media-overflow flow strips attachment mass that
-            // the projections cannot see, so its marginal arithmetic would
-            // misjudge a successful strip; the loop-level progress guard
-            // covers re-entry there.
-            if (input.overflow && !replay) {
-              const beforeEstimate = ContextBudget.estimate({
-                messages: yield* MessageV2.toModelMessagesEffect(input.messages, resumeModel),
-              })
-              if (afterEstimate >= beforeEstimate) {
-                const error = new SessionV1.ContextOverflowError({
-                  message: `Compaction did not reduce the context estimate (no-reduction: before=${beforeEstimate} tokens, after=${afterEstimate} tokens; ${model.providerID}/${model.id}). The rebuilt request would repeat the same overflow. Original history is preserved; reduce retained context or select a larger session model.`,
-                }).toObject()
-                yield* session.removeMessage({ sessionID: input.sessionID, messageID: msg.id })
-                yield* session.updateMessage({ ...processor.message, error, finish: "error" })
-                yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error })
-                return "stop"
-              }
             }
           }
         }

@@ -535,12 +535,6 @@ export function filterCompacted(msgs: Iterable<WithParts>) {
   const completed = new Set<string>()
   let retain: MessageID | undefined
   for (const msg of msgs) {
-    // Failed or incomplete compaction summaries (errored attempts, partial
-    // streamed output, crash remnants, blank text) are runtime artifacts, not
-    // conversation. The durable rows are kept — nothing is deleted — but they
-    // are excluded from model scope so a failed attempt can never enlarge the
-    // next request or the next compaction attempt (harness-opencode#31).
-    if (msg.info.role === "assistant" && msg.info.summary === true && !isCompletedSummary(msg)) continue
     result.push(msg)
     if (retain) {
       if (msg.info.id === retain) break
