@@ -592,10 +592,6 @@ describe("internal typed budget errors", () => {
 
 // ─── Compatibility: usable / isOverflow adapters ─────────────────────────────
 
-// Where the default 80% threshold clamp would move the legacy boundary,
-// these tests pin `threshold: 1` (100% of context) to isolate the
-// reserved-window boundary math; the threshold clamp itself is covered by
-// the auto-compaction threshold tests.
 describe("compatibility — usable adapter retains frozen semantics", () => {
   test("without an input limit: usable = context - route output", () => {
     const model = createModel({ context: 100_000, output: 32_000 })
@@ -609,7 +605,7 @@ describe("compatibility — usable adapter retains frozen semantics", () => {
 
   test("configured compaction.reserved replaces the default reserve", () => {
     const model = createModel({ context: 200_000, input: 200_000, output: 32_000 })
-    expect(Overflow.usable({ cfg: cfg({ threshold: 1, reserved: 30_000 }), model })).toBe(170_000)
+    expect(Overflow.usable({ cfg: cfg({ reserved: 30_000, threshold: 1 }), model })).toBe(170_000)
   })
 
   test("outputTokenMax shrinks the applied reserve", () => {
@@ -633,9 +629,10 @@ describe("compatibility — isOverflow adapter retains frozen semantics", () => 
 
   test("token count includes cache reads to reach the boundary", () => {
     const model = createModel({ context: 200_000, output: 32_000 })
-    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(160_000, 8_000) })).toBe(true)
-    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(167_999, 0, 1) })).toBe(true)
-    expect(Overflow.isOverflow({ cfg: cfg({ threshold: 1 }), model, tokens: tokens(167_998, 0, 1) })).toBe(false)
+    const legacyCfg = cfg({ threshold: 1 })
+    expect(Overflow.isOverflow({ cfg: legacyCfg, model, tokens: tokens(160_000, 8_000) })).toBe(true)
+    expect(Overflow.isOverflow({ cfg: legacyCfg, model, tokens: tokens(167_999, 0, 1) })).toBe(true)
+    expect(Overflow.isOverflow({ cfg: legacyCfg, model, tokens: tokens(167_998, 0, 1) })).toBe(false)
   })
 
   test("unknown context window never overflows", () => {

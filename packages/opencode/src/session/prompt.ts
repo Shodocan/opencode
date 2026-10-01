@@ -338,12 +338,10 @@ const layer = Layer.effect(
       })
 
     // Record the overflow outcome (before any repair) and run the pre-repair
-    // gates. Returns "terminal" when the durable record must be skipped: a
+    // gates. Returns "terminal" when the one-shot cycle must stop: a
     // pre-dispatch entry is missing, the counter is already spent, the hash
     // is a known pending/overflow hash (restart cannot redispatch it), or
-    // durable output appeared since the overflow was recorded. Skipping the
-    // record does NOT stop the run — repair is gated only on the bounded
-    // planner, so an overflow always starts compaction.
+    // durable output appeared since the overflow was recorded.
     const lineageOverflow = Effect.fn("SessionPrompt.lineageOverflow")(function* (
       draft: LineageDraft,
       userMessageID: string,
@@ -372,10 +370,10 @@ const layer = Layer.effect(
       return "recorded" as const
     })
 
-    const lineageTerminate = (msg: SessionV1.Assistant, message = "Input exceeds context window of this model") =>
+    const lineageTerminate = (msg: SessionV1.Assistant) =>
       Effect.gen(function* () {
         msg.error = new SessionV1.ContextOverflowError({
-          message,
+          message: "Input exceeds context window of this model",
         }).toObject()
         msg.finish = "error"
         msg.time.completed = Date.now()
@@ -1386,7 +1384,6 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        let awaitingCompactionProgress = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         const lineageDraft = yield* lineageSeed(sessionID)
 
@@ -1460,12 +1457,6 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
-            // A compaction just ran. If the rebuilt request still comes back
-            // "compact", that is no progress — terminal, regardless of whether
-            // a fallback model is configured (harness-opencode#31). Arming this
-            // only for fallback configs let no-fallback sessions re-enter
-            // compaction forever.
-            awaitingCompactionProgress = true
             // T06: record the admitted one-shot compaction route exactly once
             // (the planned request identity is the durable ledger hash; the
             // executor's own dispatch is admitted without a hook).
@@ -1678,8 +1669,6 @@ const layer = Layer.effect(
               }
             }
 
-            if (result !== "compact" && !handle.message.error) awaitingCompactionProgress = false
-
             // T06: settle the one-shot repair cycle after the repaired
             // dispatch completes cleanly.
             if (lineageDraft.awaitingSettlement && !handle.message.error && result !== "compact") {
@@ -1711,21 +1700,14 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result === "compact") {
-              if (awaitingCompactionProgress) {
-                yield* lineageTerminate(
-                  msg,
-                  "The rebuilt request still exceeds the original model context after compaction. Reduce retained context or select a larger session model; compaction will not repeat without progress.",
-                )
+              // T06: record the overflow before any repair; the bounded
+              // planner gates the one-shot repair on an unchanged durable
+              // output watermark.
+              const recorded = yield* lineageOverflow(lineageDraft, lastUser.id)
+              if (recorded === "terminal") {
+                yield* lineageTerminate(msg)
                 return "break" as const
               }
-              // T06: record the overflow before any repair. The durable
-              // lineage state is evidence-only and never stops the run: an
-              // overflow (provider-reported or budget-gate rejection) starts
-              // compaction right away and the loop re-evaluates on the
-              // rebuilt request. Only a bounded-planner verdict below remains
-              // terminal — compaction that cannot reduce the estimate would
-              // spin forever.
-              yield* lineageOverflow(lineageDraft, lastUser.id)
               const cfg = yield* config.get()
               try {
                 const plan = CompactionPlanner.plan({
@@ -1739,11 +1721,10 @@ const layer = Layer.effect(
                   : { requestHash: lineageDraft.preDispatch?.requestHash ?? "", projection: {} }
               } catch (e) {
                 if (e instanceof CompactionImpossibleError) {
-                  if (!cfg.compaction?.fallback_model) {
-                    yield* lineageTerminate(msg)
-                    return "break" as const
-                  }
-                } else throw e
+                  yield* lineageTerminate(msg)
+                  return "break" as const
+                }
+                throw e
               }
               yield* compaction.create({
                 sessionID,

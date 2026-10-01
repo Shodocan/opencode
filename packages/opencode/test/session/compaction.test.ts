@@ -10,7 +10,6 @@ import { Config } from "@/config/config"
 import { LLM } from "../../src/session/llm"
 import { SessionCompaction } from "../../src/session/compaction"
 import { Token } from "@/util/token"
-import { SessionRetry } from "@/session/retry"
 import { Plugin } from "../../src/plugin"
 import { provideTmpdirInstance, TestInstance } from "../fixture/fixture"
 import { Session as SessionNs } from "@/session/session"
@@ -164,7 +163,7 @@ function createSummaryAssistantMessage(sessionID: SessionID, parentID: MessageID
         parentID,
         summary: true,
         time: { created: Date.now() },
-        finish: "stop",
+        finish: "end_turn",
       })
       yield* ssn.updatePart({
         id: PartID.ascending(),
@@ -203,7 +202,6 @@ function createCompactionMarker(sessionID: SessionID) {
 function fake(
   input: Parameters<SessionProcessorModule.SessionProcessor.Interface["create"]>[0],
   result: "continue" | "compact",
-  sessions: SessionNs.Interface,
 ) {
   const msg = input.assistantMessage
   return {
@@ -212,34 +210,17 @@ function fake(
     },
     updateToolCall: Effect.fn("TestSessionProcessor.updateToolCall")(() => Effect.succeed(undefined)),
     completeToolCall: Effect.fn("TestSessionProcessor.completeToolCall")(() => Effect.void),
-    process: Effect.fn("TestSessionProcessor.process")(function* () {
-      if (result === "continue") {
-        msg.finish = "stop"
-        yield* sessions.updateMessage(msg)
-        yield* sessions.updatePart({
-          id: PartID.ascending(), sessionID: msg.sessionID, messageID: msg.id,
-          type: "text", text: "Complete fixture summary",
-        })
-      }
-      return result
-    }),
+    process: Effect.fn("TestSessionProcessor.process")(() => Effect.succeed(result)),
   } satisfies SessionProcessorModule.SessionProcessor.Handle
 }
 
 function processorLayer(result: "continue" | "compact") {
-  return LayerNode.make({
-    service: SessionProcessorModule.SessionProcessor.Service,
-    layer: Layer.effect(
-      SessionProcessorModule.SessionProcessor.Service,
-      Effect.gen(function* () {
-        const sessions = yield* SessionNs.Service
-        return SessionProcessorModule.SessionProcessor.Service.of({
-          create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result, sessions))),
-        })
-      }),
-    ),
-    deps: [SessionNs.node],
-  })
+  return Layer.succeed(
+    SessionProcessorModule.SessionProcessor.Service,
+    SessionProcessorModule.SessionProcessor.Service.of({
+      create: Effect.fn("TestSessionProcessor.create")((input) => Effect.succeed(fake(input, result))),
+    }),
+  )
 }
 
 function cfg(compaction?: ConfigV1.Info["compaction"]) {
@@ -275,7 +256,6 @@ type CompactionProcessOptions = {
   plugin?: Layer.Layer<Plugin.Service>
   provider?: ReturnType<typeof wide>
   config?: Layer.Layer<Config.Service>
-  outputTokenMax?: number
 }
 
 type CompactionFinalizedDefinition = {
@@ -323,7 +303,7 @@ function withCompaction(options?: CompactionProcessOptions) {
 function compactionProcessLayer(options?: CompactionProcessOptions) {
   const replacements: LayerNode.Replacements = [
     [Provider.node, (options?.provider ?? wide()).layer],
-    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true, outputTokenMax: options?.outputTokenMax })],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
     [SessionSummary.node, summary],
   ]
   if (!options?.llm) {
@@ -640,7 +620,7 @@ describe("session.compaction.isOverflow", () => {
     ),
   )
 
-   it.live(
+  it.live(
     "returns false when compaction.auto is disabled",
     provideTmpdirInstance(
       () =>
@@ -653,116 +633,6 @@ describe("session.compaction.isOverflow", () => {
       {
         config: {
           compaction: { auto: false },
-        },
-      },
-    ),
-  )
-
-  // ─── Auto-compaction threshold ─────────────────────────────────────────
-  // compaction.threshold (fraction of the context window, default 0.8) and
-  // compaction.thresholds (per-model fraction keyed by "providerID/modelID")
-  // lower the usable boundary. They never raise it above the reserved-window
-  // bound.
-
-  it.live(
-    "default threshold triggers at 80% of context",
-    provideTmpdirInstance(() =>
-      Effect.gen(function* () {
-        const compact = yield* SessionCompaction.Service
-        // usable = min(256k - 32k = 224k, 80% of 256k = 204,800)
-        const model = createModel({ context: 256_000, output: 32_000 })
-        expect(
-          yield* compact.isOverflow({ tokens: { input: 150_000, output: 60_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-        ).toBe(true)
-        expect(
-          yield* compact.isOverflow({ tokens: { input: 150_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-        ).toBe(false)
-      }),
-    ),
-  )
-
-  it.live(
-    "threshold fraction lowers the trigger point below the legacy usable boundary",
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
-          // Legacy usable = 1,000k - 384k = 616k; 40% threshold = 400k.
-          const model = createModel({ context: 1_000_000, output: 384_000 })
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 380_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(true)
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 350_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(false)
-        }),
-      {
-        config: {
-          compaction: { threshold: 0.4 },
-        },
-      },
-    ),
-  )
-
-  it.live(
-    "per-model threshold override applies to the matched model only",
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
-          // Legacy usable = 224k; 75% of 256k = 192k for test/test-model.
-          const model = createModel({ context: 256_000, output: 32_000 })
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 152_000, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(true)
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 151_999, output: 40_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(false)
-        }),
-      {
-        config: {
-          compaction: { thresholds: { "test/test-model": 0.75 } },
-        },
-      },
-    ),
-  )
-
-  it.live(
-    "per-model threshold wins over the global fraction",
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
-          // Legacy usable = 616k; global fraction 0.8 would be 800k;
-          // per-model 0.4 = 400k wins.
-          const model = createModel({ context: 1_000_000, output: 384_000 })
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 380_000, output: 30_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(true)
-        }),
-      {
-        config: {
-          compaction: { threshold: 0.8, thresholds: { "test/test-model": 0.4 } },
-        },
-      },
-    ),
-  )
-
-  it.live(
-    "a higher threshold never raises usable above the reserved-window bound",
-    provideTmpdirInstance(
-      () =>
-        Effect.gen(function* () {
-          const compact = yield* SessionCompaction.Service
-          // Threshold 1.0 = 100k, but the reserved-window bound is 100k - 32k = 68k.
-          const model = createModel({ context: 100_000, output: 32_000 })
-          expect(
-            yield* compact.isOverflow({ tokens: { input: 60_000, output: 10_000, reasoning: 0, cache: { read: 0, write: 0 } }, model }),
-          ).toBe(true)
-        }),
-      {
-        config: {
-          compaction: { threshold: 1 },
         },
       },
     ),
@@ -2355,459 +2225,4 @@ describe("SessionNs.getUsage", () => {
     expect(result.tokens.cache.read).toBe(200)
     expect(result.tokens.cache.write).toBe(300)
   })
-})
-
-describe("session.compaction.fallback", () => {
-  for (const scenario of [
-    "overflow",
-    "auth",
-    "quota",
-    "transport",
-    "fallback-overflow",
-    "same-model",
-    "unset",
-    "primary-success",
-    "primary-length",
-    "primary-empty",
-    "primary-whitespace",
-    "primary-filtered",
-    "primary-unknown",
-    "length-then-length",
-    "length-same-model",
-    "legacy-length",
-    "legacy-empty",
-    "unset-length",
-    "unset-empty",
-    "configured-output",
-    "empty",
-    "length",
-    "no-progress",
-    "missing-model",
-  ] as const) {
-    itCompaction.instance(scenario, () => {
-      const calls: string[] = []
-      const requests: string[] = []
-      const resolutions: string[] = []
-      const primary = createModel({ context: 100_000, output: 4096 })
-      const fallback = { ...primary, id: ModelV2.ID.make("large"), limit: { context: 1_000_000, output: 4096 } }
-      const provider = ProviderTest.fake({
-        model: primary,
-        getModel: (providerID, modelID) => {
-          resolutions.push(modelID)
-          return scenario === "missing-model" && modelID === fallback.id
-            ? Effect.fail(new Provider.ModelNotFoundError({ providerID, modelID }))
-            : Effect.succeed(modelID === fallback.id ? fallback : primary)
-        },
-      })
-      const overflow = new APICallError({
-        message: "request entity too large",
-        url: "http://localhost",
-        requestBodyValues: {},
-        statusCode: 413,
-        isRetryable: false,
-      })
-      const stream = Layer.succeed(
-        LLM.Service,
-        LLM.Service.of({
-          stream: (input) => {
-            calls.push(input.model.id)
-            requests.push(JSON.stringify(input.messages))
-            expect(Object.keys(input.tools)).toEqual([])
-            if (input.model.id === "large") {
-              expect(input.compactionOutputTokens).toBe(scenario === "configured-output" ? 16_384 : 32_000)
-              expect(input.user.model.variant).toBeUndefined()
-              expect(input.model.limit.context).toBe(1_000_000)
-              return scenario === "fallback-overflow"
-                ? Stream.fail(overflow)
-                : reply(
-                    scenario === "empty"
-                      ? ""
-                      : scenario === "no-progress"
-                        ? "x".repeat(400_000)
-                        : "Preserved task and decisions",
-                  )(input).pipe(
-                    Stream.map((event) =>
-                      ["length", "length-then-length"].includes(scenario) && (event.type === "finish" || event.type === "step-finish")
-                        ? { ...event, reason: "length" as const }
-                        : event,
-                    ),
-                  )
-            }
-            expect(input.compactionOutputTokens).toBeUndefined()
-            expect(input.user.model.variant).toBe("xhigh")
-            if (["primary-success", "primary-length", "primary-empty", "primary-whitespace", "primary-filtered", "primary-unknown", "length-then-length", "length-same-model", "legacy-length", "legacy-empty", "unset-length", "unset-empty", "configured-output"].includes(scenario))
-              return reply(["primary-empty", "unset-empty"].includes(scenario) ? "" : scenario === "primary-whitespace" ? " \n\t " : "Complete primary summary")(input).pipe(
-                Stream.map((event) =>
-                  scenario !== "primary-success" && (event.type === "finish" || event.type === "step-finish")
-                    ? { ...event, reason: scenario === "primary-filtered" ? "content-filter" as const : scenario === "primary-unknown" ? "unknown" as const : ["primary-empty", "primary-whitespace", "unset-empty"].includes(scenario) ? "stop" as const : "length" as const }
-                    : event,
-                ),
-              )
-            return Stream.fail(
-              scenario === "auth" || scenario === "quota" || scenario === "transport"
-                ? new APICallError({
-                    message: scenario,
-                    url: "http://localhost",
-                    requestBodyValues: {},
-                    statusCode: scenario === "auth" ? 401 : scenario === "quota" ? 429 : 503,
-                    isRetryable: false,
-                  })
-                : overflow,
-            )
-          },
-        }),
-      )
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const test = yield* TestInstance
-        const session = yield* ssn.create({})
-        if (scenario.startsWith("legacy-")) {
-          yield* createUserMessage(session.id, "Prior task")
-          yield* createSummaryCompaction(session.id)
-          const prior = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
-          yield* createSummaryAssistantMessage(session.id, prior.info.id, test.directory, "VALID-OLDER-ANCHOR")
-        }
-        const original = yield* createUserMessage(session.id, "Keep my task and decisions" + "x".repeat(80_000))
-        if (scenario.startsWith("legacy-")) {
-          yield* createSummaryCompaction(session.id)
-          const prior = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
-          const invalid = yield* createSummaryAssistantMessage(session.id, prior.info.id, test.directory, scenario === "legacy-empty" ? "" : "INVALID-PARTIAL-ANCHOR")
-          if (scenario === "legacy-length") yield* ssn.updateMessage({ ...invalid, finish: "length" })
-        }
-        const recent = yield* createUserMessage(session.id, "Recent user instruction must survive")
-        yield* createSummaryCompaction(session.id)
-        const selected = (yield* ssn.messages({ sessionID: session.id })).at(-1)!
-        if (selected.info.role !== "user") throw new Error("Compaction marker must be a user")
-        yield* ssn.updateMessage({ ...selected.info, model: { ...selected.info.model, variant: "xhigh" } })
-        const messages = yield* ssn.messages({ sessionID: session.id })
-        const parent = messages.at(-1)!
-        const errors: unknown[] = []
-        const finalized: unknown[] = []
-        const events = yield* EventV2Bridge.Service
-        const unsub = yield* events.listen((event) => {
-          if (event.type === SessionNs.Event.Error.type) errors.push(event)
-          if (event.type === "session.next.compaction.finalized") finalized.push(event)
-          return Effect.void
-        })
-        yield* Effect.addFinalizer(() => unsub)
-        const result = yield* SessionCompaction.use.process({
-          sessionID: session.id,
-          parentID: parent.info.id,
-          messages: scenario.startsWith("legacy-") ? MessageV2.filterCompacted(messages.toReversed()) : messages,
-          auto: false,
-        })
-        const after = yield* ssn.messages({ sessionID: session.id })
-        expect(after.find((item) => item.info.id === recent.id)).toEqual(
-          messages.find((item) => item.info.id === recent.id),
-        )
-        if (result !== "continue") expect(after.find((item) => item.info.id === parent.info.id)).toEqual(parent)
-        if (scenario === "primary-success") expect(resolutions).not.toContain("large")
-        expect(after.find((item) => item.info.id === original.id)).toEqual(
-          messages.find((item) => item.info.id === original.id),
-        )
-        const successful = ["overflow", "primary-success", "primary-length", "primary-empty", "primary-whitespace", "legacy-length", "legacy-empty", "configured-output"].includes(scenario)
-        expect(result).toBe(successful ? "continue" : "stop")
-        expect(calls).toEqual(
-          ["overflow", "fallback-overflow", "empty", "length", "no-progress", "primary-length", "primary-empty", "primary-whitespace", "length-then-length", "legacy-length", "legacy-empty", "configured-output"].includes(scenario)
-            ? ["test-model", "large"]
-            : ["test-model"],
-        )
-        if (requests.length === 2) expect(requests[1]).toBe(requests[0])
-        if (scenario.startsWith("legacy-")) {
-          expect(requests[1]).toContain("Keep my task and decisions")
-          expect(requests[1]).toContain("<prior-summary>\\nVALID-OLDER-ANCHOR\\n</prior-summary>")
-          for (const message of messages.slice(0, -1)) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-        }
-        expect(finalized.length).toBe(successful ? 1 : 0)
-        if (successful) {
-          expect(errors).toEqual([])
-          expect(after.filter((item) => item.info.role === "assistant" && item.info.summary && item.info.parentID === parent.info.id)).toHaveLength(1)
-        }
-        if (["length", "length-then-length", "length-same-model", "unset-length"].includes(scenario)) {
-          const failed = after.findLast((item) => item.info.role === "assistant" && item.info.summary)
-          expect(JSON.stringify(failed?.info)).toContain("finish=length")
-          expect(JSON.stringify(failed?.info)).toContain("reasoning=")
-          expect(failed?.parts).toEqual([])
-        }
-      }).pipe(
-        Effect.provideService(SessionRetry.RetryLimit, 0),
-        withCompaction({
-          provider,
-          llm: stream,
-          config: cfg({
-            fallback_max_output_tokens: scenario === "configured-output" ? 16_384 : undefined,
-            fallback_model:
-              scenario.startsWith("unset")
-                ? undefined
-                : scenario === "same-model" || scenario === "length-same-model"
-                  ? "test/test-model"
-                  : "test/large",
-          }),
-        }),
-      )
-    })
-  }
-})
-
-describe("session.compaction.same-model output recovery", () => {
-  for (const scenario of [
-    "length",
-    "empty",
-    "repeated-length",
-    "route-cap",
-    "runtime-cap",
-    "equal-cap",
-    "lower-cap",
-    "input-overflow",
-  ] as const) {
-    itCompaction.instance(scenario, () => {
-      const model = {
-        ...createModel({ context: 1_000_000, output: scenario === "route-cap" ? 4_096 : 128_000 }),
-        id: ModelV2.ID.make("deepseek-v4-flash"),
-      }
-      const requests: LLM.StreamInput[] = []
-      const llm = Layer.succeed(
-        LLM.Service,
-        LLM.Service.of({
-          stream: (input) => {
-            requests.push(input)
-            expect(input.model.id).toBe(model.id)
-            expect(input.user.model.variant).toBe("max")
-            expect(input.tools).toEqual({})
-            expect(input.compactionOutputTokens).toBe(requests.length === 1 ? undefined : 32_000)
-            if (scenario === "input-overflow")
-              return Stream.fail(
-                new APICallError({
-                  message: "request entity too large",
-                  url: "http://fixture.invalid",
-                  requestBodyValues: {},
-                  statusCode: 413,
-                  isRetryable: false,
-                }),
-              )
-            const length = requests.length === 1 ? scenario !== "empty" : scenario === "repeated-length"
-            return reply(
-              requests.length === 1
-                ? scenario === "empty"
-                  ? " \n\t "
-                  : "Partial summary"
-                : "Complete task, constraints and next action",
-            )(input).pipe(
-              Stream.map((event) =>
-                length && (event.type === "finish" || event.type === "step-finish")
-                  ? { ...event, reason: "length" as const }
-                  : event,
-              ),
-            )
-          },
-        }),
-      )
-      return Effect.gen(function* () {
-        const sessions = yield* SessionNs.Service
-        const chat = yield* sessions.create({})
-        const original = yield* createUserMessage(chat.id, "Preserve the complete original task and user constraints")
-        const selected = { providerID: model.providerID, modelID: model.id, variant: "max" }
-        yield* sessions.updateMessage({ ...original, model: selected })
-        yield* SessionCompaction.use.create({ sessionID: chat.id, agent: "build", model: selected, auto: false })
-        const marker = (yield* sessions.messages({ sessionID: chat.id })).at(-1)!
-        if (marker.info.role !== "user") throw new Error("Expected user compaction marker")
-        yield* sessions.updateMessage({ ...marker.info, model: selected })
-        const before = yield* sessions.messages({ sessionID: chat.id })
-        const events = yield* EventV2Bridge.Service
-        const finalized: unknown[] = []
-        const errors: unknown[] = []
-        const unlisten = yield* events.listen((event) => {
-          if (event.type === "session.next.compaction.finalized") finalized.push(event)
-          if (event.type === SessionNs.Event.Error.type) errors.push(event)
-          return Effect.void
-        })
-        yield* Effect.addFinalizer(() => unlisten)
-        const result = yield* SessionCompaction.use.process({
-          sessionID: chat.id,
-          parentID: marker.info.id,
-          messages: before,
-          auto: false,
-        })
-        const success = scenario === "length" || scenario === "empty"
-        const retry = success || scenario === "repeated-length"
-        expect(result).toBe(success ? "continue" : "stop")
-        expect(requests).toHaveLength(retry ? 2 : 1)
-        if (retry) expect(requests[1].messages).toEqual(requests[0].messages)
-        const after = yield* sessions.messages({ sessionID: chat.id })
-        for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-        expect(finalized).toHaveLength(success ? 1 : 0)
-        expect(errors).toHaveLength(success ? 0 : 1)
-        if (success) {
-          const summary = after.findLast(MessageV2.isCompletedSummary)
-          expect(summary?.info.modelID).toBe(model.id)
-          expect(summary?.info.variant).toBe("max")
-        }
-      }).pipe(
-        Effect.provideService(SessionRetry.RetryLimit, 0),
-        withCompaction({
-          provider: ProviderTest.fake({ model }),
-          llm,
-          outputTokenMax: scenario === "runtime-cap" ? 4_096 : undefined,
-          config: cfg({
-            fallback_model: `test/${model.id}`,
-            tail_turns: 0,
-            fallback_max_output_tokens: scenario === "equal-cap" ? 4_096 : scenario === "lower-cap" ? 2_048 : undefined,
-          }),
-        }),
-      )
-    })
-  }
-})
-
-// ─── Compaction brake (harness-opencode#31) ─────────────────────────────────
-//
-// A failed compaction attempt used to keep its errored summary row (with any
-// partial streamed output) inside the next attempt's serialization scope, so
-// every retry serialized strictly more than the last, and a compaction that
-// did not reduce the estimate re-entered compaction forever. These tests pin
-// the brake: failed attempts are marked out of model scope (never deleted —
-// the #18 no-history-deletion guarantee covers user turns AND the durable
-// rows the runtime wrote), and an overflow compaction that does not reduce
-// the estimate fails terminally with a typed error.
-describe("session.compaction.brake", () => {
-  itCompaction.instance(
-    "a failed compaction attempt does not enlarge the next attempt's serialized scope",
-    () => {
-      const stub = llm()
-      const attempts: string[] = []
-      const partial = "PARTIAL-SUMMARY-ATTEMPT-" + "x".repeat(2_000)
-      const failAfterPartial = (input: LLM.StreamInput) => {
-        attempts.push(JSON.stringify(input.messages))
-        return Stream.concat(
-          Stream.make(
-            LLMEvent.textStart({ id: "txt-0" }),
-            LLMEvent.textDelta({ id: "txt-0", text: partial }),
-            LLMEvent.textEnd({ id: "txt-0" }),
-          ),
-          Stream.fail(
-            new APICallError({
-              message: "provider exploded mid-summary",
-              url: "http://localhost",
-              requestBodyValues: {},
-              statusCode: 400,
-              isRetryable: false,
-            }),
-          ),
-        )
-      }
-      stub.push(failAfterPartial)
-      stub.push(failAfterPartial)
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const database = yield* Database.Service
-        const session = yield* ssn.create({})
-        yield* createUserMessage(session.id, "The original task and its constraints. " + "a".repeat(1_000))
-        yield* createUserMessage(session.id, "A follow-up instruction. " + "b".repeat(500))
-        const before = yield* ssn.messages({ sessionID: session.id })
-
-        const attempt = Effect.gen(function* () {
-          yield* SessionCompaction.use.create({ sessionID: session.id, agent: "build", model: ref, auto: true })
-          const msgs = yield* MessageV2.filterCompactedEffect(session.id).pipe(
-            Effect.provideService(Database.Service, database),
-          )
-          const marker = msgs.at(-1)!
-          if (marker.info.role !== "user") throw new Error("expected a compaction marker")
-          const result = yield* SessionCompaction.use.process({
-            parentID: marker.info.id,
-            messages: msgs,
-            sessionID: session.id,
-            auto: true,
-          })
-          expect(result).toBe("stop")
-        })
-        yield* attempt
-        yield* attempt
-
-        expect(attempts).toHaveLength(2)
-        // The errored first attempt (including its partial streamed output)
-        // must not re-enter the second attempt's serialized scope...
-        expect(attempts[1]).not.toContain("PARTIAL-SUMMARY-ATTEMPT-")
-        // ...so the second attempt is never larger than the first.
-        expect(attempts[1].length).toBeLessThanOrEqual(attempts[0].length)
-
-        // (#18) Nothing was deleted: every seeded user row is byte-identical
-        // and both errored summary rows remain durable for diagnosis.
-        const after = yield* ssn.messages({ sessionID: session.id })
-        for (const message of before)
-          expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-        const errored = after.filter((item) => item.info.role === "assistant" && item.info.summary)
-        expect(errored).toHaveLength(2)
-        for (const item of errored) {
-          if (item.info.role === "assistant") expect(item.info.error).toBeDefined()
-        }
-      }).pipe(
-        Effect.provideService(SessionRetry.RetryLimit, 0),
-        withCompaction({ llm: stub.llmLayer }),
-      )
-    },
-  )
-
-  itCompaction.instance(
-    "overflow compaction that does not reduce the estimate fails terminally instead of looping",
-    () => {
-      const stub = llm()
-      stub.push(reply("S".repeat(20_000)))
-      return Effect.gen(function* () {
-        const ssn = yield* SessionNs.Service
-        const database = yield* Database.Service
-        const events = yield* EventV2Bridge.Service
-        const session = yield* ssn.create({})
-        yield* createUserMessage(session.id, "small")
-        const before = yield* ssn.messages({ sessionID: session.id })
-        const finalized: unknown[] = []
-        const errors: unknown[] = []
-        const unsub = yield* events.listen((event) => {
-          if (event.type === "session.next.compaction.finalized") finalized.push(event)
-          if (event.type === SessionNs.Event.Error.type) errors.push(event)
-          return Effect.void
-        })
-        yield* Effect.addFinalizer(() => unsub)
-
-        yield* SessionCompaction.use.create({
-          sessionID: session.id,
-          agent: "build",
-          model: ref,
-          auto: true,
-          overflow: true,
-        })
-        const msgs = yield* MessageV2.filterCompactedEffect(session.id).pipe(
-          Effect.provideService(Database.Service, database),
-        )
-        const marker = msgs.at(-1)!
-        if (marker.info.role !== "user") throw new Error("expected a compaction marker")
-        const result = yield* SessionCompaction.use.process({
-          parentID: marker.info.id,
-          messages: msgs,
-          sessionID: session.id,
-          auto: true,
-          overflow: true,
-        })
-
-        // Terminal typed verdict instead of "continue" (which would re-enter
-        // the overflow/compaction cycle on the next request).
-        expect(result).toBe("stop")
-        expect(finalized).toHaveLength(0)
-        expect(errors.length).toBeGreaterThan(0)
-        const after = yield* ssn.messages({ sessionID: session.id })
-        const failed = after.findLast((item) => item.info.role === "assistant" && item.info.summary)
-        expect(failed?.info.role).toBe("assistant")
-        if (failed?.info.role === "assistant") {
-          expect(SessionV1.ContextOverflowError.isInstance(failed.info.error)).toBe(true)
-          expect(JSON.stringify(failed.info.error)).toContain("did not reduce")
-          expect(failed.info.finish).toBe("error")
-        }
-        // (#18) The user turn survives the terminal brake byte-identical.
-        for (const message of before)
-          expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-      }).pipe(
-        Effect.provideService(SessionRetry.RetryLimit, 0),
-        withCompaction({ llm: stub.llmLayer }),
-      )
-    },
-  )
 })

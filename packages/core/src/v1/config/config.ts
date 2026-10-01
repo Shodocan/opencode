@@ -19,10 +19,6 @@ import { ConfigSkillsV1 } from "./skills"
 
 export type Layout = ConfigLayoutV1.Layout
 
-// Fraction (0, 1] of a model's context window at which automatic compaction
-// triggers. `compaction.threshold` applies to all models;
-// `compaction.thresholds` selects a per-model fraction keyed by
-// "providerID/modelID" and wins over `threshold` for the matched model.
 const ThresholdFraction = Schema.Number.check(Schema.isGreaterThan(0), Schema.isLessThanOrEqualTo(1))
 
 export const WellKnown = Schema.Struct({
@@ -154,12 +150,6 @@ export const Info = Schema.Struct({
   }),
   compaction: Schema.optional(
     Schema.Struct({
-      fallback_model: Schema.optional(Schema.String).annotate({
-        description: "Optional provider/model used once if compaction exceeds its context window, reaches its output limit, or completes without summary text. Does not change the session model.",
-      }),
-      fallback_max_output_tokens: Schema.optional(PositiveInt).annotate({
-        description: "Maximum output tokens for the configured compaction fallback, including reasoning (default: 32000, capped by model and runtime limits). Primary compaction retains its 4096-token cap.",
-      }),
       auto: Schema.optional(Schema.Boolean).annotate({
         description: "Enable automatic compaction when context is full (default: true)",
       }),
@@ -189,7 +179,7 @@ export const Info = Schema.Struct({
          }),
        ),
      }),
-   ),
+  ),
   experimental: Schema.optional(
     Schema.Struct({
       disable_paste_summary: Schema.optional(Schema.Boolean),

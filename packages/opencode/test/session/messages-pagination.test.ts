@@ -616,7 +616,7 @@ describe("MessageV2.filterCompacted", () => {
         // Chronological: u1(+compaction part), a1(summary, parentID=u1), u2, a2
         // Stream (newest first): a2, u2, a1(adds u1 to completed), u1(in completed + compaction) -> break
         const u1 = yield* addUser(sessionID, "first question")
-        const a1 = yield* addAssistant(sessionID, u1, { summary: true, finish: "stop" })
+        const a1 = yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn" })
         yield* session.updatePart({
           id: PartID.ascending(),
           sessionID,
@@ -674,16 +674,12 @@ describe("MessageV2.filterCompacted", () => {
           message: "boom",
           isRetryable: true,
         }).toObject() as SessionV1.Assistant["error"]
-        yield* addAssistant(sessionID, u1, { summary: true, finish: "stop", error })
+        yield* addAssistant(sessionID, u1, { summary: true, finish: "end_turn", error })
         yield* addUser(sessionID, "retry")
 
         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        // Error assistant doesn't add to completed, so compaction boundary
-        // never triggers; the failed summary row is also excluded from model
-        // scope so a failed attempt cannot enlarge the next request
-        // (harness-opencode#31). The durable row itself is kept.
-        expect(result).toHaveLength(2)
-        expect(result.some((msg) => msg.info.role === "assistant")).toBe(false)
+        // Error assistant doesn't add to completed, so compaction boundary never triggers
+        expect(result).toHaveLength(3)
       }),
     ),
   )
@@ -699,10 +695,7 @@ describe("MessageV2.filterCompacted", () => {
         yield* addUser(sessionID, "next")
 
         const result = MessageV2.filterCompacted(yield* MessageV2.stream(sessionID))
-        // An in-flight/crash-remnant summary is not a completed summary: no
-        // boundary trigger, and excluded from model scope (harness-opencode#31).
-        expect(result).toHaveLength(2)
-        expect(result.some((msg) => msg.info.role === "assistant")).toBe(false)
+        expect(result).toHaveLength(3)
       }),
     ),
   )
@@ -732,7 +725,7 @@ describe("MessageV2.filterCompacted", () => {
 
         const c1 = yield* addUser(sessionID)
         yield* addCompactionPart(sessionID, c1, u2)
-        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "stop" })
+        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "end_turn" })
         yield* session.updatePart({
           id: PartID.ascending(),
           sessionID,
@@ -785,7 +778,7 @@ describe("MessageV2.filterCompacted", () => {
 
       const c1 = yield* addUser(created.id)
       yield* addCompactionPart(created.id, c1, u2)
-      const s1 = yield* addAssistant(created.id, c1, { summary: true, finish: "stop" })
+      const s1 = yield* addAssistant(created.id, c1, { summary: true, finish: "end_turn" })
       yield* session.updatePart({
         id: PartID.ascending(),
         sessionID: created.id,
@@ -855,7 +848,7 @@ describe("MessageV2.filterCompacted", () => {
 
         const c1 = yield* addUser(sessionID)
         yield* addCompactionPart(sessionID, c1, a3)
-        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "stop" })
+        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "end_turn" })
         yield* session.updatePart({
           id: PartID.ascending(),
           sessionID,
@@ -906,7 +899,7 @@ describe("MessageV2.filterCompacted", () => {
 
         const c1 = yield* addUser(sessionID)
         yield* addCompactionPart(sessionID, c1, u2)
-        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "stop" })
+        const s1 = yield* addAssistant(sessionID, c1, { summary: true, finish: "end_turn" })
         yield* session.updatePart({
           id: PartID.ascending(),
           sessionID,
@@ -927,7 +920,7 @@ describe("MessageV2.filterCompacted", () => {
 
         const c2 = yield* addUser(sessionID)
         yield* addCompactionPart(sessionID, c2, u3)
-        const s2 = yield* addAssistant(sessionID, c2, { summary: true, finish: "stop" })
+        const s2 = yield* addAssistant(sessionID, c2, { summary: true, finish: "end_turn" })
         yield* session.updatePart({
           id: PartID.ascending(),
           sessionID,

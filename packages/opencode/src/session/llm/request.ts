@@ -35,7 +35,6 @@ type PrepareInput = {
   readonly plugin: Plugin.Interface
   readonly flags: RuntimeFlags.Info
   readonly isWorkflow: boolean
-  readonly compactionOutputTokens?: number
 }
 
 export type Prepared = {
@@ -270,15 +269,10 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
 
   // Output allowance: normal requests keep the full runtime output allowance;
-  // Primary compaction remains 4_096. Only its independently selected fallback
-  // supplies a larger allowance, charged identically in admission and on the wire.
+  // compaction is bounded by min(4_096, route output limit, runtime cap).
   const outputAllowance =
     input.agent.name === "compaction"
-      ? Math.min(
-          input.compactionOutputTokens ?? 4_096,
-          input.model.limit.output,
-          input.flags?.outputTokenMax ?? ProviderTransform.OUTPUT_TOKEN_MAX,
-        )
+      ? Math.min(4_096, input.model.limit.output, input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER)
       : ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax)
 
   const budgetProjection = yield* Effect.tryPromise({

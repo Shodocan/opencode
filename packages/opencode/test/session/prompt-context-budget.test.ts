@@ -6,8 +6,7 @@ import { EventSequenceTable, EventTable } from "@opencode-ai/core/event/sql"
 import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { asc, eq } from "drizzle-orm"
-import { Context, Effect, Fiber, Layer, Schema } from "effect"
-import { SessionRetry } from "@/session/retry"
+import { Context, Effect, Layer, Schema } from "effect"
 import { describe, expect } from "bun:test"
 import path from "path"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -420,10 +419,12 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       expect(yield* llm.hits).toHaveLength(2)
       // The final request fits at preflight and is rejected by the provider
       // (reactive overflow): the one-shot cycle must run exactly once.
-      // Both summaries and the rebuilt response finish cleanly. The synthetic
-      // continuation after a complete checkpoint drives the rebuild once.
+      // The compaction reply intentionally has no finish_reason: the summary
+      // turn must not terminate the loop before the rebuild dispatch. The
+      // rebuild reply stops cleanly (.stop()), ending the session exactly
+      // after the one-shot cycle.
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok").stop())
+      yield* llm.push(reply().text("ok"))
       yield* llm.push(reply().text("rebuild ok").stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })
@@ -463,59 +464,6 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       expect(state.preDispatch.runtime).toBe("ai-sdk")
       expect(state.preDispatch.requestHash).toMatch(/^[0-9a-f]{64}$/)
       expect(state.watermark.outputSeq).toBeGreaterThanOrEqual(0)
-    }),
-    120_000,
-  )
-
-  it.instance("a later overflow compacts again instead of stopping (lineage gate is evidence-only)", () =>
-    Effect.gen(function* () {
-      const { llm } = yield* useServerConfig(qwenCfg)
-      const prompt = yield* SessionPrompt.Service
-      const sessions = yield* Session.Service
-      const chat = yield* sessions.create({
-        title: "QCB repeat overflow",
-        permission: [{ permission: "*", pattern: "*", action: "allow" }],
-      })
-      yield* buildHistory(prompt, llm, chat.id)
-      expect(yield* llm.hits).toHaveLength(2)
-      // First overflow: one compaction, one rebuild, admitted.
-      yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok").stop())
-      yield* llm.push(reply().text("rebuild ok").stop())
-      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
-      yield* prompt.loop({ sessionID: chat.id })
-      expect((yield* llm.hits)).toHaveLength(5)
-
-      // Second prompt in the same session: the durable lineage one-shot is
-      // spent (compaction_count === 1), so the old behavior terminated with
-      // the public overflow error. Now the overflow must start compaction
-      // right away — one more compaction, one more rebuild, no error.
-      yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok2").stop())
-      yield* llm.push(reply().text("rebuild ok2").stop())
-      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
-      const result = yield* prompt.loop({ sessionID: chat.id })
-
-      expect(result.info.role).toBe("assistant")
-      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
-      const hits = yield* llm.hits
-      // history×2 + (overflow, compaction, rebuild)×2
-      expect(hits).toHaveLength(8)
-      expect(maxTokens(hits[3]!.body)).toBe(4_096)
-      expect(maxTokens(hits[6]!.body)).toBe(4_096)
-      expect(maxTokens(hits[4]!.body)).toBe(32_000)
-      expect(maxTokens(hits[7]!.body)).toBe(32_000)
-      const messages = yield* sessions.messages({ sessionID: chat.id })
-      // Two compaction parts: the run never stopped on the second overflow.
-      expect(messages.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(2)
-      const rows = yield* lineageRows(chat.id)
-      if (rows.length === 0) throw new Error("T06 RED: missing durable-lineage one-shot compact/rebuild orchestration")
-      const state = decodeLineage(rows)
-      // The durable record still reflects the single settled one-shot cycle:
-      // the spent counter is terminal for RECORDING (no further durable
-      // publishes), but never for the repair itself.
-      expect(state.compaction_count).toBe(1)
-      expect(state.overflowHashes.length).toBeGreaterThanOrEqual(1)
     }),
     120_000,
   )
@@ -620,7 +568,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
       yield* buildHistory(prompt, llm, chat.id)
-      yield* llm.push(reply().text("ok").stop())
+      yield* llm.push(reply().text("ok"))
       // ~950k chars (~237.5k tokens): the preflight is oversized and the
       // latest turn alone exceeds the compaction request budget, so the
       // bounded planner fails closed (latest-turn-too-large) before any
@@ -710,7 +658,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       })
       yield* buildHistory(prompt, llm, chat.id)
       yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok").stop())
+      yield* llm.push(reply().text("ok"))
       // .stop(): the rebuilt turn must end the loop cleanly (upstream #43892
       // keeps the loop running on an "unknown" recorded finish).
       yield* llm.push(reply().text("rebuild ok").stop())
@@ -733,235 +681,4 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
   )
 })
 
-describe("auto-compaction threshold", () => {
-  it.instance("usage at the default 80% threshold auto-compacts without a provider error", () =>
-    Effect.gen(function* () {
-      const { llm } = yield* useServerConfig(qwenCfg)
-      const prompt = yield* SessionPrompt.Service
-      const sessions = yield* Session.Service
-      const chat = yield* sessions.create({
-        title: "QCB threshold auto-compact",
-        permission: [{ permission: "*", pattern: "*", action: "allow" }],
-      })
-      // Two small turns; the provider reports heavy usage on the second.
-      yield* prompt.prompt({
-        sessionID: chat.id,
-        agent: "build",
-        noReply: true,
-        parts: [{ type: "text", text: "QCB-THRESH-1" }],
-      })
-      yield* llm.push(reply().text("history reply 1").stop())
-      yield* prompt.loop({ sessionID: chat.id })
-      yield* prompt.prompt({
-        sessionID: chat.id,
-        agent: "build",
-        noReply: true,
-        parts: [{ type: "text", text: "QCB-THRESH-2" }],
-      })
-      // 210,000 total usage: above the default 80% threshold
-      // (0.8 x 262,144 = 209,715) but below the legacy usable boundary
-      // (262,144 - 32,000 = 230,144) — only the threshold can trigger here.
-      yield* llm.push(reply().text("history reply 2").usage({ input: 150_000, output: 60_000 }).stop())
-      yield* llm.push(reply().text("ok").stop()) // compaction summary
-      yield* llm.push(reply().text("rebuilt ok").stop()) // the pending turn, rebuilt on the compacted history
-      const compacted = yield* prompt.loop({ sessionID: chat.id })
-      expect((yield* llm.hits)).toHaveLength(4) // history x2 + one summary + one rebuilt turn
-      if (compacted.info.role === "assistant") expect(compacted.info.error).toBeUndefined()
-      const messages = yield* sessions.messages({ sessionID: chat.id })
-      expect(messages.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(1)
 
-      // The next prompt dispatches against the compacted history — no
-      // provider error, no second compaction.
-      yield* llm.push(reply().text("final ok").stop())
-      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
-      const result = yield* prompt.loop({ sessionID: chat.id })
-      expect(result.info.role).toBe("assistant")
-      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
-      const hits = yield* llm.hits
-      expect(hits).toHaveLength(5) // history x2 + summary + rebuilt turn + final dispatch
-      expect(maxTokens(hits[2]!.body)).toBe(4_096)
-      expect(maxTokens(hits[3]!.body)).toBe(32_000)
-      expect(maxTokens(hits[4]!.body)).toBe(32_000)
-    }),
-    120_000,
-  )
-})
-
-describe("compaction fallback through prompt and local provider", () => {
-  for (const localBudget of [false, true]) {
-    it.instance(localBudget ? "local compaction budget overflow" : "provider compaction context overflow", () =>
-      Effect.gen(function* () {
-        const { llm } = yield* useServerConfig((url) => {
-          const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
-          const models = config.provider!.qwen.models!
-          models["small-summary"] = {
-            ...models["qwen3-coder-plus"],
-            id: "small-summary",
-            limit: { context: localBudget ? 32_000 : 262_144, output: 4096 },
-          }
-          models["large-summary"] = {
-            ...models["qwen3-coder-plus"],
-            id: "large-summary",
-            limit: { context: 1_000_000, output: 4096 },
-          }
-          config.model = "qwen/qwen3-coder-plus"
-          config.agent = { compaction: { model: "qwen/small-summary" } }
-          return config
-        })
-        const prompt = yield* SessionPrompt.Service
-        const sessions = yield* Session.Service
-        const chat = yield* sessions.create({
-          title: "compaction fallback",
-          permission: [{ permission: "*", pattern: "*", action: "allow" }],
-        })
-        yield* buildHistory(prompt, llm, chat.id)
-        const before = yield* sessions.messages({ sessionID: chat.id })
-        yield* llm.error(413, { error: { message: "request entity too large" } })
-        if (!localBudget) yield* llm.error(413, { error: { message: "request entity too large" } })
-        yield* llm.push(reply().text("Preserved history markers QCB-HIST-1 QCB-HIST-2; task remains pending.").stop())
-        yield* llm.push(reply().text("original model resumed").stop())
-        yield* prompt.prompt({
-          sessionID: chat.id,
-          agent: "build",
-          noReply: true,
-          parts: [{ type: "text", text: FINAL_SMALL }],
-        })
-        const result = yield* prompt.loop({ sessionID: chat.id })
-        expect(result.info.role).toBe("assistant")
-        if (result.info.role === "assistant") {
-          expect(result.info.error).toBeUndefined()
-          expect(String(result.info.modelID)).toBe("qwen3-coder-plus")
-          expect(result.info.finish).toBe("stop")
-        }
-        const hits = yield* llm.hits
-        expect(hits.map((hit) => hit.body.model)).toEqual([
-          "qwen3-coder-plus",
-          "qwen3-coder-plus",
-          "qwen3-coder-plus",
-          ...(!localBudget ? ["small-summary"] : []),
-          "large-summary",
-          "qwen3-coder-plus",
-        ])
-        const fallback = hits.find((hit) => hit.body.model === "large-summary")!
-        expect(fallback.body.tools ?? []).toEqual([])
-        expect(JSON.stringify(fallback.body.messages)).toContain("QCB-HIST-1")
-        expect(JSON.stringify(fallback.body.messages)).toContain("QCB-HIST-2")
-        const after = yield* sessions.messages({ sessionID: chat.id })
-        for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-        const summaries = after.filter((item) => item.info.role === "assistant" && item.info.summary)
-        expect(summaries).toHaveLength(1)
-        expect(summaries[0].info.role === "assistant" && String(summaries[0].info.modelID)).toBe("large-summary")
-        const { db } = yield* Database.Service
-        const checkpoints = yield* db
-          .select()
-          .from(EventTable)
-          .where(eq(EventTable.aggregate_id, chat.id))
-          .all()
-          .pipe(Effect.orDie)
-        expect(checkpoints.filter((row) => row.type === "session.next.compaction.finalized.1")).toHaveLength(1)
-      }),
-    )
-  }
-})
-
-for (const status of [401, 429, 503, "cancel", "fallback-cancel"] as const) {
-  it.instance(`compaction fallback does not activate for ${status}`, () =>
-    Effect.gen(function* () {
-      const { llm } = yield* useServerConfig((url) => {
-        const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
-        config.model = "qwen/qwen3-coder-plus"
-        config.provider!.qwen.models!["large-summary"] = {
-          ...config.provider!.qwen.models!["qwen3-coder-plus"],
-          id: "large-summary",
-          limit: { context: 1_000_000, output: 4096 },
-        }
-        return config
-      })
-      const prompt = yield* SessionPrompt.Service
-      const sessions = yield* Session.Service
-      const chat = yield* sessions.create({ title: "compaction negative" })
-      yield* buildHistory(prompt, llm, chat.id)
-      const before = yield* sessions.messages({ sessionID: chat.id })
-      yield* llm.error(413, { error: { message: "request entity too large" } })
-      if (status === "fallback-cancel") yield* llm.error(413, { error: { message: "request entity too large" } })
-      if (status === "cancel" || status === "fallback-cancel")
-        yield* llm.push(
-          reply()
-            .text("unfinished summary")
-            .wait(new Promise(() => {})),
-        )
-      else
-        yield* llm.error(status, { error: { message: status === 429 ? "insufficient_quota" : "provider unavailable" } })
-      yield* prompt.prompt({
-        sessionID: chat.id,
-        agent: "build",
-        noReply: true,
-        parts: [{ type: "text", text: FINAL_SMALL }],
-      })
-      if (status === "cancel" || status === "fallback-cancel") {
-        const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-        yield* llm.wait(status === "fallback-cancel" ? 5 : 4)
-        yield* Fiber.interrupt(fiber)
-      } else {
-        const result = yield* prompt.loop({ sessionID: chat.id })
-        expect(result.info.role === "assistant" && result.info.error).toBeTruthy()
-      }
-      const hits = yield* llm.hits
-      expect(hits).toHaveLength(status === "fallback-cancel" ? 5 : 4)
-      expect(hits.slice(0, 4).every((hit) => hit.body.model === "qwen3-coder-plus")).toBe(true)
-      if (status === "fallback-cancel") expect(hits[4].body.model).toBe("large-summary")
-      const after = yield* sessions.messages({ sessionID: chat.id })
-      for (const message of before) expect(after.find((item) => item.info.id === message.info.id)).toEqual(message)
-      const { db } = yield* Database.Service
-      const checkpoints = yield* db
-        .select()
-        .from(EventTable)
-        .where(eq(EventTable.aggregate_id, chat.id))
-        .all()
-        .pipe(Effect.orDie)
-      expect(checkpoints.filter((row) => row.type === "session.next.compaction.finalized.1")).toHaveLength(0)
-    }).pipe(Effect.provideService(SessionRetry.RetryLimit, 0)),
-  )
-}
-
-it.instance("compaction fallback stops when rebuilt system context still cannot fit", () =>
-  Effect.gen(function* () {
-    const { llm } = yield* useServerConfig((url) => {
-      const config = qwenCfg(url, { fallback_model: "qwen/large-summary", tail_turns: 0 })
-      config.model = "qwen/qwen3-coder-plus"
-      const models = config.provider!.qwen.models!
-      models["small-summary"] = {
-        ...models["qwen3-coder-plus"],
-        id: "small-summary",
-        limit: { context: 32_000, output: 4096 },
-      }
-      models["large-summary"] = {
-        ...models["qwen3-coder-plus"],
-        id: "large-summary",
-        limit: { context: 1_000_000, output: 4096 },
-      }
-      config.agent = { compaction: { model: "qwen/small-summary" } }
-      return config
-    })
-    const prompt = yield* SessionPrompt.Service
-    const sessions = yield* Session.Service
-    const chat = yield* sessions.create({ title: "bounded no progress" })
-    yield* buildHistory(prompt, llm, chat.id)
-    yield* llm.push(reply().text("Complete compact summary of prior history.").stop())
-    yield* prompt.prompt({
-      sessionID: chat.id,
-      agent: "build",
-      noReply: true,
-      system: "s".repeat(1_100_000),
-      parts: [{ type: "text", text: FINAL_SMALL }],
-    })
-    const result = yield* prompt.loop({ sessionID: chat.id })
-    expect(result.info.role === "assistant" && JSON.stringify(result.info.error)).toContain(
-      "will not repeat without progress",
-    )
-    const hits = yield* llm.hits
-    expect(hits.map((hit) => hit.body.model)).toEqual(["qwen3-coder-plus", "qwen3-coder-plus", "large-summary"])
-    const after = yield* sessions.messages({ sessionID: chat.id })
-    expect(after.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(1)
-  }),
-)

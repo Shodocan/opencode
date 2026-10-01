@@ -52,16 +52,12 @@ export function migrate(info: typeof ConfigV1.Info.Type) {
     tool_output: info.tool_output,
     mcp: mcp(info),
     compaction: info.compaction && {
-      fallback_model: info.compaction.fallback_model,
-      fallback_max_output_tokens: info.compaction.fallback_max_output_tokens,
       auto: info.compaction.auto,
       prune: info.compaction.prune,
       keep: {
         tokens: info.compaction.preserve_recent_tokens,
       },
       buffer: info.compaction.reserved,
-      threshold: info.compaction.threshold,
-      thresholds: info.compaction.thresholds,
     },
     skills: info.skills && [...(info.skills.paths ?? []), ...(info.skills.urls ?? [])],
     commands: info.command,
