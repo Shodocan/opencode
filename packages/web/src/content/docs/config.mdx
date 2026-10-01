@@ -752,7 +752,11 @@ You can control context compaction behavior through the `compaction` option.
   "compaction": {
     "auto": true,
     "prune": false,
-    "reserved": 10000
+    "reserved": 10000,
+    "threshold": 0.8,
+    "thresholds": {
+      "deepseek/deepseek-chat": 0.4
+    }
   }
 }
 ```
@@ -760,6 +764,8 @@ You can control context compaction behavior through the `compaction` option.
 - `auto` - Automatically compact the session when context is full (default: `true`).
 - `prune` - Remove old tool outputs to save tokens (default: `false`). Set to `true` to enable pruning.
 - `reserved` - Token buffer for compaction. Leaves enough window to avoid overflow during compaction.
+- `threshold` - Auto-compaction threshold as a fraction (0-1) of the model's context window.
+- `thresholds` - Per-model auto-compaction thresholds as fractions of each model's context window, keyed by `"providerID/modelID"`.
 
 ---
 

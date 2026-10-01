@@ -9,6 +9,18 @@ import type { MessageV2 } from "./message-v2"
 
 const COMPACTION_BUFFER = 20_000
 
+export const DEFAULT_COMPACT_THRESHOLD = 0.8
+
+export function compactThreshold(input: { cfg: ConfigV1.Info; model: Provider.Model }): number {
+  const context = input.model.limit.context
+  if (context <= 0) return Number.POSITIVE_INFINITY
+  const override =
+    input.cfg.compaction?.thresholds?.[`${input.model.providerID}/${input.model.id}`] ??
+    input.cfg.compaction?.threshold ??
+    DEFAULT_COMPACT_THRESHOLD
+  return Math.max(0, Math.floor(context * override))
+}
+
 export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outputTokenMax?: number }) {
   const context = input.model.limit.context
   if (context === 0) return 0
@@ -16,9 +28,10 @@ export function usable(input: { cfg: ConfigV1.Info; model: Provider.Model; outpu
   const reserved =
     input.cfg.compaction?.reserved ??
     Math.min(COMPACTION_BUFFER, ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
-  return input.model.limit.input
+  const base = input.model.limit.input
     ? Math.max(0, input.model.limit.input - reserved)
     : Math.max(0, context - ProviderTransform.maxOutputTokens(input.model, input.outputTokenMax))
+  return Math.min(base, compactThreshold(input))
 }
 
 export function isOverflow(input: {
