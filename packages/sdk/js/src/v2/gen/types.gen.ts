@@ -2042,7 +2042,6 @@ export type Config = {
   }
   compaction?: {
     fallback_model?: string
-    fallback_max_output_tokens?: number
     auto?: boolean
     prune?: boolean
     tail_turns?: number
