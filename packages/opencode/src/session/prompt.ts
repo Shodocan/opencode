@@ -372,10 +372,10 @@ const layer = Layer.effect(
       return "recorded" as const
     })
 
-    const lineageTerminate = (msg: SessionV1.Assistant, message = "Input exceeds context window of this model") =>
+    const lineageTerminate = (msg: SessionV1.Assistant) =>
       Effect.gen(function* () {
         msg.error = new SessionV1.ContextOverflowError({
-          message,
+          message: "Input exceeds context window of this model",
         }).toObject()
         msg.finish = "error"
         msg.time.completed = Date.now()
@@ -1386,7 +1386,6 @@ const layer = Layer.effect(
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
-        let awaitingCompactionProgress = false
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         const lineageDraft = yield* lineageSeed(sessionID)
 
@@ -1460,7 +1459,6 @@ const layer = Layer.effect(
               overflow: task.overflow,
             })
             if (result === "stop") break
-            awaitingCompactionProgress = Boolean((yield* config.get()).compaction?.fallback_model)
             // T06: record the admitted one-shot compaction route exactly once
             // (the planned request identity is the durable ledger hash; the
             // executor's own dispatch is admitted without a hook).
@@ -1673,8 +1671,6 @@ const layer = Layer.effect(
               }
             }
 
-            if (result !== "compact" && !handle.message.error) awaitingCompactionProgress = false
-
             // T06: settle the one-shot repair cycle after the repaired
             // dispatch completes cleanly.
             if (lineageDraft.awaitingSettlement && !handle.message.error && result !== "compact") {
@@ -1706,13 +1702,6 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result === "compact") {
-              if (awaitingCompactionProgress) {
-                yield* lineageTerminate(
-                  msg,
-                  "The rebuilt request still exceeds the original model context after compaction. Reduce retained context or select a larger session model; compaction will not repeat without progress.",
-                )
-                return "break" as const
-              }
               // T06: record the overflow before any repair. The durable
               // lineage state is evidence-only and never stops the run: an
               // overflow (provider-reported or budget-gate rejection) starts
@@ -1734,11 +1723,10 @@ const layer = Layer.effect(
                   : { requestHash: lineageDraft.preDispatch?.requestHash ?? "", projection: {} }
               } catch (e) {
                 if (e instanceof CompactionImpossibleError) {
-                  if (!cfg.compaction?.fallback_model) {
-                    yield* lineageTerminate(msg)
-                    return "break" as const
-                  }
-                } else throw e
+                  yield* lineageTerminate(msg)
+                  return "break" as const
+                }
+                throw e
               }
               yield* compaction.create({
                 sessionID,
