@@ -525,14 +525,14 @@ const layer = Layer.effect(
           yield* session.updateMessage(processor.message)
         }
 
-        if (result === "continue" && fallback) {
+        if (result === "continue" && chosen !== first) {
           const completed = (yield* session.messages({ sessionID: input.sessionID }).pipe(Effect.orDie)).find(
             (item) => item.info.id === msg.id,
           )
           if (!completed || !summaryText(completed)?.trim() || processor.message.finish !== "stop") {
             const error = new SessionV1.ContextOverflowError({
               message:
-                "Compaction did not produce a complete summary. Original history is preserved; configure a compaction model with sufficient output capacity.",
+                "Fallback compaction did not produce a complete summary. Original history is preserved; configure a compaction model with sufficient output capacity.",
             }).toObject()
             yield* session.removeMessage({ sessionID: input.sessionID, messageID: msg.id })
             yield* session.updateMessage({ ...processor.message, error, finish: "error" })
