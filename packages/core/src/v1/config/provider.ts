@@ -5,6 +5,31 @@ import { PositiveInt } from "../../schema"
 
 export const ModelStatus = Schema.Literals(["alpha", "beta", "deprecated", "active"])
 
+// Session-level provider retry policy. When set it is the authority for this
+// provider's retry budget; when unset the built-in defaults apply unchanged.
+export const Retry = Schema.Struct({
+  maxAttempts: Schema.optional(PositiveInt).annotate({
+    description: "Total provider attempts per step, including the first (default 6).",
+  }),
+  initialDelayMs: Schema.optional(PositiveInt).annotate({
+    description: "First backoff delay and the minimum wait after a Retry-After hint, in milliseconds (default 2000).",
+  }),
+  maxDelayMs: Schema.optional(PositiveInt).annotate({
+    description: "Ceiling for one backoff wait, including Retry-After hints, in milliseconds (default 30000).",
+  }),
+  maxElapsedMs: Schema.optional(PositiveInt).annotate({
+    description: "Stop retrying once this much time has passed since the first failure, in milliseconds.",
+  }),
+  backoffFactor: Schema.optional(Schema.Number).annotate({
+    description: "Exponential backoff multiplier (default 2).",
+  }),
+  retryableStatuses: Schema.optional(Schema.mutable(Schema.Array(Schema.Int))).annotate({
+    description:
+      "HTTP statuses that are retried (default 408, 429 and every 5xx). Other statuses are never retried.",
+  }),
+}).annotate({ identifier: "ProviderRetryConfig" })
+export type Retry = Schema.Schema.Type<typeof Retry>
+
 const InterleavedField = Schema.Union([
   Schema.Literals(["reasoning", "reasoning_content", "reasoning_text"]),
   Schema.String,
@@ -123,6 +148,7 @@ export const Info = Schema.Struct({
           description:
             "Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.",
         }),
+        retry: Schema.optional(Retry),
       }),
       [Schema.Record(Schema.String, Schema.Any)],
     ),

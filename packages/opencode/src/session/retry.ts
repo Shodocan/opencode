@@ -44,38 +44,69 @@ const RETRYABLE_MESSAGE_PATTERNS = [
   /\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b/i,
 ]
 
+/**
+ * Per-provider retry policy from `provider.<id>.options.retry`. When it is
+ * absent every default above applies unchanged; when present it is the
+ * authority for the provider's session retry budget.
+ */
+export type Config = {
+  readonly maxAttempts?: number
+  readonly initialDelayMs?: number
+  readonly maxDelayMs?: number
+  readonly maxElapsedMs?: number
+  readonly backoffFactor?: number
+  readonly retryableStatuses?: readonly number[]
+}
+
+/** Error code for a failure that must not be replayed (a tool already started). */
+export const RETRY_UNSAFE_CODE = "ProviderRetryUnsafeError"
+
+function statusRetryable(status: number, config: Config) {
+  if (config.retryableStatuses) return config.retryableStatuses.includes(status)
+  return status === 408 || status === 429 || (status >= 500 && status < 600)
+}
+
 function cap(ms: number) {
   return Math.min(ms, RETRY_MAX_DELAY)
 }
 
-export function delay(attempt: number, error?: SessionV1.APIError, random = Math.random()) {
-  if (error) {
-    const headers = error.data.responseHeaders
-    if (headers) {
-      const retryAfterMs = headers["retry-after-ms"]
-      if (retryAfterMs) {
-        const parsedMs = Number.parseFloat(retryAfterMs)
-        if (!Number.isNaN(parsedMs)) {
-          return cap(parsedMs)
-        }
-      }
+function hinted(error?: SessionV1.APIError) {
+  const headers = error?.data.responseHeaders
+  if (!headers) return undefined
+  const retryAfterMs = headers["retry-after-ms"]
+  if (retryAfterMs) {
+    const parsedMs = Number.parseFloat(retryAfterMs)
+    if (!Number.isNaN(parsedMs)) return parsedMs
+  }
+  const retryAfter = headers["retry-after"]
+  if (retryAfter) {
+    const parsedSeconds = Number.parseFloat(retryAfter)
+    // convert seconds to milliseconds
+    if (!Number.isNaN(parsedSeconds)) return Math.ceil(parsedSeconds * 1000)
+    // Try parsing as HTTP date format
+    const parsed = Date.parse(retryAfter) - Date.now()
+    if (!Number.isNaN(parsed) && parsed > 0) return Math.ceil(parsed)
+  }
+  return undefined
+}
 
-      const retryAfter = headers["retry-after"]
-      if (retryAfter) {
-        const parsedSeconds = Number.parseFloat(retryAfter)
-        if (!Number.isNaN(parsedSeconds)) {
-          // convert seconds to milliseconds
-          return cap(Math.ceil(parsedSeconds * 1000))
-        }
-        // Try parsing as HTTP date format
-        const parsed = Date.parse(retryAfter) - Date.now()
-        if (!Number.isNaN(parsed) && parsed > 0) {
-          return cap(Math.ceil(parsed))
-        }
-      }
-
-      return cap(exponential(attempt, random))
-    }
+export function delay(attempt: number, error?: SessionV1.APIError, random = Math.random(), config?: Config) {
+  if (config) {
+    // Configured policy: Retry-After wins over backoff; maxDelayMs bounds both
+    // and initialDelayMs floors a hint so a "retry now" answer cannot spin.
+    const ceiling = config.maxDelayMs ?? RETRY_MAX_DELAY_NO_HEADERS
+    const initial = config.initialDelayMs ?? RETRY_INITIAL_DELAY
+    const hint = hinted(error)
+    if (hint !== undefined) return cap(Math.min(Math.max(hint, initial), ceiling))
+    const base = initial * Math.pow(config.backoffFactor ?? RETRY_BACKOFF_FACTOR, attempt - 1)
+    // Jitter below the ceiling so sessions that failed together spread out.
+    if (base >= ceiling) return cap(Math.ceil(ceiling - ceiling * RETRY_JITTER_FACTOR * random))
+    return cap(Math.min(Math.ceil(base + base * RETRY_JITTER_FACTOR * random), ceiling))
+  }
+  if (error?.data.responseHeaders) {
+    const hint = hinted(error)
+    if (hint !== undefined) return cap(hint)
+    return cap(exponential(attempt, random))
   }
 
   return cap(Math.min(exponential(attempt, random), RETRY_MAX_DELAY_NO_HEADERS))
@@ -86,14 +117,19 @@ function exponential(attempt: number, random: number) {
   return Math.ceil(base + base * RETRY_JITTER_FACTOR * random)
 }
 
-export function retryable(error: Err, provider: string) {
+export function retryable(error: Err, provider: string, config?: Config) {
   // context overflow errors should not be retried
   if (SessionV1.ContextOverflowError.isInstance(error)) return undefined
   if (SessionV1.APIError.isInstance(error)) {
+    if (error.data.metadata?.code === RETRY_UNSAFE_CODE) return undefined
     const status = error.data.statusCode
-    // 5xx errors are transient server failures and should always be retried,
-    // even when the provider SDK doesn't explicitly mark them as retryable.
-    if (
+    if (config && status !== undefined) {
+      // A configured policy classifies status-bearing failures by status only:
+      // 400/401/402/403/404/422 are never retried, whatever the message says.
+      if (!statusRetryable(status, config)) return undefined
+    } else if (
+      // 5xx errors are transient server failures and should always be retried,
+      // even when the provider SDK doesn't explicitly mark them as retryable.
       !error.data.isRetryable &&
       !(status !== undefined && status >= 500) &&
       !matchesRetryableMessage(error.data.message) &&
@@ -184,19 +220,58 @@ function parseJSON(value: unknown) {
   })
 }
 
+/**
+ * One retry decision. `attempt` is the 1-based retry about to be scheduled and
+ * `elapsed` the time since the first failure. Returns undefined to stop.
+ *
+ * Without `config` the invocation `limit` (RetryLimit) bounds the retries. A
+ * configured provider policy is the authority instead, including for tasks
+ * whose caller lowered RetryLimit.
+ */
+export function decide(input: {
+  error: Err
+  provider: string
+  attempt: number
+  elapsed: number
+  limit: number
+  config?: Config
+  random?: number
+}): (Retryable & { wait: number }) | undefined {
+  const retry = retryable(input.error, input.provider, input.config)
+  if (!retry) return undefined
+  const retries = input.config ? Math.max(0, (input.config.maxAttempts ?? RETRY_MAX_RETRIES + 1) - 1) : input.limit
+  if (input.attempt > retries) return undefined
+  const error = SessionV1.APIError.isInstance(input.error) ? input.error : undefined
+  let wait = delay(input.attempt, error, input.random, input.config)
+  const budget = input.config?.maxElapsedMs
+  if (budget !== undefined) {
+    const remaining = budget - input.elapsed
+    if (remaining <= 0) return undefined
+    wait = Math.min(wait, remaining)
+  }
+  return { ...retry, wait }
+}
+
 export function policy(opts: {
   provider: string
   parse: (error: unknown) => Err
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
+  config?: Config
 }) {
   return Schedule.fromStepWithMetadata(
     Effect.map(RetryLimit, (limit) => (meta: Schedule.InputMetadata<unknown>) => {
       const error = opts.parse(meta.input)
-      const retry = retryable(error, opts.provider)
+      const retry = decide({
+        error,
+        provider: opts.provider,
+        attempt: meta.attempt,
+        elapsed: meta.elapsed,
+        limit,
+        config: opts.config,
+      })
       if (!retry) return Cause.done(meta.attempt)
-      if (meta.attempt > limit) return Cause.done(meta.attempt)
       return Effect.gen(function* () {
-        const wait = delay(meta.attempt, SessionV1.APIError.isInstance(error) ? error : undefined)
+        const wait = retry.wait
         const now = yield* Clock.currentTimeMillis
         yield* opts.set({
           attempt: meta.attempt,

@@ -20,6 +20,27 @@ export class ResponseStreamError extends Error {
   }
 }
 
+/**
+ * A retryable provider failure that arrived after a tool call of the same
+ * attempt had started executing. Replaying the request could execute the tool
+ * again, so the session stops with this typed error instead of retrying.
+ */
+export class RetryUnsafeError extends Error {
+  public override readonly name = "ProviderRetryUnsafeError"
+
+  constructor(
+    public readonly tools: string[],
+    reason: string,
+    cause?: unknown,
+  ) {
+    super(
+      `Provider stream failed after tool call(s) started executing (${tools.join(", ")}); ` +
+        `not retried so they are not executed twice: ${reason}`,
+      { cause },
+    )
+  }
+}
+
 function isOpenAiErrorRetryable(e: APICallError) {
   const status = e.statusCode
   if (!status) return e.isRetryable
@@ -86,7 +107,10 @@ function json(input: unknown) {
   return undefined
 }
 
-const GATEWAY_STREAM_ERROR = /litellm\.APIConnectionError|Response payload is not completed|TransferEncodingError/i
+// LiteLLM upstream failures that can arrive as a bare mid-stream payload
+// without a usable 5xx code (MidStreamFallbackError wraps the original cause).
+const GATEWAY_STREAM_ERROR =
+  /litellm\.(?:APIConnectionError|MidStreamFallbackError|ServiceUnavailableError|InternalServerError)|Response payload is not completed|TransferEncodingError/i
 
 export type ParsedStreamError =
   | {
@@ -114,6 +138,8 @@ export function parseStreamError(input: unknown): ParsedStreamError | undefined 
     const message = typeof body.message === "string" ? body.message : body.error?.message
     if (typeof message !== "string") return
     const code = Number(body.code ?? body.error?.code)
+    // An explicit 4xx stays a client error even inside a gateway wrapper.
+    if (Number.isInteger(code) && code >= 400 && code < 500) return
     const server = Number.isInteger(code) && code >= 500 && code < 600
     if (!server && !GATEWAY_STREAM_ERROR.test(message)) return
     if (isContextOverflow(message)) return { type: "context_overflow", message, responseBody }

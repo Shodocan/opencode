@@ -1703,17 +1703,33 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result !== "compact") softCompactions = 0
-            if (result === "compact" && handle.message.finish && !handle.message.error) {
+            // A pre-dispatch budget refusal after this turn already finished
+            // steps (a subagent's tool results grew the request) sent nothing
+            // to the provider, so it is a need to compact, not a provider
+            // overflow. Without this, the one-shot gates end such a turn: the
+            // planner keeps the intact latest turn, which for a single-turn
+            // session is the whole transcript, and a spent counter is
+            // terminal for the rest of the session (harness-opencode#560).
+            // A refusal on the first step of a turn keeps the one-shot path.
+            const refusedMidTurn =
+              handle.budgetRefused === true &&
+              lastFinished !== undefined &&
+              lastFinished.parentID === lastUser.id &&
+              !lastFinished.summary &&
+              !lastFinished.error
+            if (result === "compact" && ((handle.message.finish && !handle.message.error) || refusedMidTurn)) {
               // The step finished without error and only crossed the soft
-              // compaction threshold. Its output is durable, so it is not an
-              // overflow: it bypasses the one-shot lineage record and the
-              // planner (a soft compaction never spends the hard-overflow
-              // repair) and always compacts. It is bounded instead: a
-              // compaction that leaves the very next step over the threshold
-              // may be retried once (a single large tool result can land right
-              // after a compaction), then the run fails rather than compacting
-              // forever. The failure goes on a separate message so the
-              // finished step keeps its tool calls in context.
+              // compaction threshold, or was refused mid-turn (above). Its
+              // output is durable, so it is not an overflow: it bypasses the
+              // one-shot lineage record and the planner (a soft compaction
+              // never spends the hard-overflow repair) and always compacts.
+              // The summary request still passes its own budget admission,
+              // and a summary that cannot fit stops the run. It is bounded
+              // instead: a compaction that leaves the very next step over the
+              // threshold may be retried once (a single large tool result can
+              // land right after a compaction), then the run fails rather than
+              // compacting forever. The failure goes on a separate message so
+              // the finished step keeps its tool calls in context.
               if (softCompactions >= SOFT_COMPACTION_LIMIT) {
                 yield* lineageTerminate(
                   {
