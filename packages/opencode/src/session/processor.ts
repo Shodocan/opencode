@@ -32,6 +32,11 @@ export type Result = "compact" | "stop" | "continue"
 
 export interface Handle {
   readonly message: SessionV1.Assistant
+  /**
+   * The last `process` call stopped at the final pre-network budget
+   * admission (ContextBudgetExceededError): nothing reached the provider.
+   */
+  readonly budgetRefused?: boolean
   readonly updateToolCall: (
     toolCallID: string,
     update: (part: SessionV1.ToolPart) => SessionV1.ToolPart,
@@ -71,6 +76,7 @@ interface ProcessorContext extends Input {
   snapshot: string | undefined
   blocked: boolean
   needsCompaction: boolean
+  budgetRefused: boolean
   currentText: SessionV1.TextPart | undefined
   reasoningMap: Record<string, SessionV1.ReasoningPart>
 }
@@ -110,6 +116,7 @@ const layer = Layer.effect(
         snapshot: initialSnapshot,
         blocked: false,
         needsCompaction: false,
+        budgetRefused: false,
         currentText: undefined,
         reasoningMap: {},
       }
@@ -710,6 +717,7 @@ const layer = Layer.effect(
             return
           }
           ctx.needsCompaction = true
+          ctx.budgetRefused = e instanceof ContextBudgetExceededError
           yield* events.publish(Session.Event.Error, { sessionID: ctx.sessionID, error })
           return
         }
@@ -727,6 +735,7 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
         })
         ctx.needsCompaction = false
+        ctx.budgetRefused = false
         ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
 
         return yield* Effect.gen(function* () {
@@ -795,6 +804,9 @@ const layer = Layer.effect(
       return {
         get message() {
           return ctx.assistantMessage
+        },
+        get budgetRefused() {
+          return ctx.budgetRefused
         },
         updateToolCall,
         completeToolCall,
