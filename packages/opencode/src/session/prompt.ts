@@ -121,6 +121,8 @@ const LINEAGE_TYPE_V1 = EventV2.versionedType(SessionEvent.ContextBudgetLineage.
 // The event's own data schema is the decode authority for the serialized
 // full state; decodeUnknownOption infers the payload type from it.
 const LINEAGE_DATA = SessionEvent.ContextBudgetLineage.data
+// Soft-threshold compactions allowed back to back before the run fails.
+const SOFT_COMPACTION_LIMIT = 2
 
 // Seam projections may carry non-JSON leaves (undefined properties the
 // canonical form drops); the durable state stores the canonical JSON form.
@@ -370,11 +372,9 @@ const layer = Layer.effect(
       return "recorded" as const
     })
 
-    const lineageTerminate = (msg: SessionV1.Assistant) =>
+    const lineageTerminate = (msg: SessionV1.Assistant, message = "Input exceeds context window of this model") =>
       Effect.gen(function* () {
-        msg.error = new SessionV1.ContextOverflowError({
-          message: "Input exceeds context window of this model",
-        }).toObject()
+        msg.error = new SessionV1.ContextOverflowError({ message }).toObject()
         msg.finish = "error"
         msg.time.completed = Date.now()
         yield* sessions.updateMessage(msg)
@@ -1386,6 +1386,9 @@ const layer = Layer.effect(
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
         const lineageDraft = yield* lineageSeed(sessionID)
+        // Consecutive soft-threshold compactions with no step finishing below
+        // the threshold in between (see the "compact" branch below).
+        let softCompactions = 0
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1698,6 +1701,50 @@ const layer = Layer.effect(
                 yield* lineageOverflow(lineageDraft, lastUser.id)
               }
               return "break" as const
+            }
+            if (result !== "compact") softCompactions = 0
+            if (result === "compact" && handle.message.finish && !handle.message.error) {
+              // The step finished without error and only crossed the soft
+              // compaction threshold. Its output is durable, so it is not an
+              // overflow: it bypasses the one-shot lineage record and the
+              // planner (a soft compaction never spends the hard-overflow
+              // repair) and always compacts. It is bounded instead: a
+              // compaction that leaves the very next step over the threshold
+              // may be retried once (a single large tool result can land right
+              // after a compaction), then the run fails rather than compacting
+              // forever. The failure goes on a separate message so the
+              // finished step keeps its tool calls in context.
+              if (softCompactions >= SOFT_COMPACTION_LIMIT) {
+                yield* lineageTerminate(
+                  {
+                    id: MessageID.ascending(),
+                    parentID: lastUser.id,
+                    role: "assistant",
+                    mode: agent.name,
+                    agent: agent.name,
+                    variant: lastUser.model.variant,
+                    path: msg.path,
+                    cost: 0,
+                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    modelID: model.id,
+                    providerID: model.providerID,
+                    time: { created: Date.now() },
+                    sessionID,
+                  },
+                  `Context still exceeds the compaction threshold after ${SOFT_COMPACTION_LIMIT} consecutive compactions`,
+                )
+                return "break" as const
+              }
+              softCompactions++
+              lineageDraft.plan = undefined
+              yield* compaction.create({
+                sessionID,
+                agent: lastUser.agent,
+                model: lastUser.model,
+                auto: true,
+                overflow: false,
+              })
+              return "continue" as const
             }
             if (result === "compact") {
               // T06: record the overflow before any repair; the bounded
