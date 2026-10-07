@@ -244,6 +244,39 @@ describe("session.retry.retryable", () => {
     expect(SessionRetry.retryable(error, retryProvider)).toEqual({ message: "Request failed" })
   })
 
+  const litellmCut = {
+    message:
+      "litellm.APIConnectionError: APIConnectionError: OpenAIException - Response payload is not completed: <TransferEncodingError: 400, message='Not enough data to satisfy transfer length header.'>",
+    code: "500",
+  }
+
+  test("retries a LiteLLM mid-stream 5xx error event", () => {
+    const request = MessageV2.fromError(litellmCut, { providerID })
+    expect(SessionV1.APIError.isInstance(request)).toBe(true)
+    expect(SessionV1.APIError.isInstance(request) && request.data.statusCode).toBe(500)
+    expect(SessionRetry.retryable(request, retryProvider)).toEqual({ message: litellmCut.message })
+  })
+
+  test("retries a mid-stream error with a numeric 5xx code", () => {
+    const request = MessageV2.fromError({ message: "upstream exploded", code: 503 }, { providerID })
+    expect(SessionRetry.retryable(request, retryProvider)).toEqual({ message: "upstream exploded" })
+  })
+
+  test("does not retry a mid-stream 4xx error event", () => {
+    const request = MessageV2.fromError({ message: "bad request body", code: "400" }, { providerID })
+    expect(SessionV1.APIError.isInstance(request)).toBe(false)
+    expect(SessionRetry.retryable(request, retryProvider)).toBeUndefined()
+  })
+
+  test("keeps stream context overflow non-retryable", () => {
+    const request = MessageV2.fromError(
+      { type: "error", error: { code: "context_length_exceeded", message: "too long" } },
+      { providerID },
+    )
+    expect(SessionV1.ContextOverflowError.isInstance(request)).toBe(true)
+    expect(SessionRetry.retryable(request, retryProvider)).toBeUndefined()
+  })
+
   test("retries transport timeout errors", () => {
     const request = MessageV2.fromError(new ProviderError.HeaderTimeoutError(10000), { providerID })
     expect(SessionV1.APIError.isInstance(request)).toBe(true)

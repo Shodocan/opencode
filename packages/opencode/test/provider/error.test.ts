@@ -21,4 +21,21 @@ describe("provider stream errors", () => {
         responseBody: JSON.stringify({ type: "error", error: { message } }),
       })
   })
+
+  test("maps LiteLLM mid-stream 5xx payloads to a retryable api error", () => {
+    const message = "litellm.APIConnectionError: Response payload is not completed: <TransferEncodingError: 400>"
+    expect(ProviderError.parseStreamError({ message, code: "500" })).toMatchObject({
+      type: "api_error",
+      statusCode: 500,
+      isRetryable: true,
+    })
+    expect(ProviderError.parseStreamError({ message })).toMatchObject({ type: "api_error", statusCode: 500 })
+  })
+
+  test("ignores 4xx stream payloads and keeps overflow classification", () => {
+    expect(ProviderError.parseStreamError({ message: "bad request", code: "400" })).toBeUndefined()
+    expect(
+      ProviderError.parseStreamError({ type: "error", error: { code: "context_length_exceeded", message: "x" } }),
+    ).toMatchObject({ type: "context_overflow" })
+  })
 })
