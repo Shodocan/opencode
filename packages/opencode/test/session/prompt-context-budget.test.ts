@@ -918,3 +918,139 @@ describe("soft compaction threshold crossing (harness-opencode#560)", () => {
 })
 
 
+// A reviewer subagent runs as one user turn (its dispatch prompt, often a
+// large diff) followed by tool-calls steps. Provider usage stays far below
+// the soft trigger, but a step's output and tool results push the next
+// request past the pre-dispatch budget (209,664 here): the request is
+// refused before any provider call, after durable output in the same turn.
+const bigFile = (index: number) =>
+  Array.from({ length: 2_000 }, (_, line) => `QCB-READ-${index}-${line} ${"r".repeat(8)}`).join("\n")
+const writeBigFiles = Effect.fn("test.writeBigFiles")(function* (dir: string, count: number) {
+  for (let index = 0; index < count; index++) yield* writeText(path.join(dir, `big-${index}.txt`), bigFile(index))
+})
+// Estimated sizes (4 chars per token): prompt ~120k, each read result ~15.5k,
+// the last step's reasoning ~60k. Four read steps stay admitted (~190k with
+// the system prompt and tools); the fifth step takes the next request to
+// ~265k. The single-turn transcript (~257k plus the 4,096 summary reserve)
+// exceeds the 237,568 compaction-phase budget that the planner applies to
+// the intact latest turn, while the summary request itself (tool results
+// truncated) still fits.
+const READ_STEPS = 5
+const REVIEW_PROMPT = "QCB-REVIEW" + "d".repeat(479_990)
+const readStep = (dir: string, index: number) =>
+  (index === READ_STEPS - 1 ? reply().reason("QCB-THINK" + "t".repeat(239_991)) : reply())
+    .tool("read", { filePath: path.join(dir, `big-${index}.txt`) })
+    .usage({ input: 20_000, output: 100 })
+
+describe("pre-dispatch budget refusal after durable output (harness-opencode#560)", () => {
+  // Shape of the kneutral/kneutral2 failures on 4.3.0.11: one reviewer user
+  // turn, several tool-calls steps whose provider usage stays far below the
+  // soft trigger, then a step whose tool results push the next request past
+  // the pre-dispatch budget. The refusal used to end the run: the planner
+  // keeps the latest user turn intact, and for a single-turn session that
+  // turn is the whole transcript ("latest-turn-too-large").
+  const readSteps = (dir: string) => Array.from({ length: READ_STEPS }, (_, index) => readStep(dir, index))
+
+  it.instance("a single-turn session refused mid-turn compacts and continues", () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      yield* writeBigFiles(dir, READ_STEPS)
+      const chat = yield* sessions.create({
+        title: "refused mid-turn",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      for (const step of readSteps(dir)) yield* llm.push(step)
+      yield* llm.push(reply().text("summary"))
+      yield* llm.push(reply().text("done").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: REVIEW_PROMPT }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const hits = yield* llm.hits
+      // read steps, then the refused request never hits the wire: one
+      // compaction (4,096 output) and one continued step.
+      expect(hits).toHaveLength(READ_STEPS + 2)
+      expect(maxTokens(hits[READ_STEPS]!.body)).toBe(4_096)
+      expect(JSON.stringify(hits[READ_STEPS + 1]!.body)).not.toContain("QCB-THINK")
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(overflowErrors(messages)).toHaveLength(0)
+      expect(compactions(messages)).toHaveLength(1)
+      // Every read step stays a finished tool-calls step.
+      const steps = messages.filter(
+        (message) => message.info.role === "assistant" && message.info.finish === "tool-calls",
+      )
+      expect(steps).toHaveLength(READ_STEPS)
+      // A budget refusal is not a provider overflow: it spends no one-shot.
+      const rows = yield* lineageRows(chat.id)
+      if (rows.length > 0) expect(decodeLineage(rows).compaction_count).toBe(0)
+    }),
+    120_000,
+  )
+
+  it.instance("a mid-turn refusal after the one-shot repair is spent compacts instead of ending the run", () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      yield* writeBigFiles(dir, READ_STEPS)
+      const chat = yield* sessions.create({
+        title: "refused after one-shot",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // Spend the durable one-shot repair (compaction_count=1), as the
+      // workflow re-dispatch did on kneutral.
+      yield* buildHistory(prompt, llm, chat.id)
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("rebuild ok").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* llm.hits).toHaveLength(5)
+      expect(decodeLineage(yield* lineageRows(chat.id)).compaction_count).toBe(1)
+
+      for (const step of readSteps(dir)) yield* llm.push(step)
+      yield* llm.push(reply().text("summary"))
+      yield* llm.push(reply().text("done").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: REVIEW_PROMPT }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      expect(yield* llm.hits).toHaveLength(5 + READ_STEPS + 2)
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(overflowErrors(messages)).toHaveLength(0)
+      expect(compactions(messages)).toHaveLength(2)
+    }),
+    120_000,
+  )
+
+  it.instance("a lone oversized prompt is still refused terminally with no provider call", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "lone oversized prompt",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.push(reply().text("must never be consumed").stop())
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "QCB-LONE" + "L".repeat(999_990) }],
+      })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.hits).toHaveLength(0)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error?.name).toBe("ContextOverflowError")
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(compactions(messages)).toHaveLength(0)
+    }),
+    120_000,
+  )
+})
