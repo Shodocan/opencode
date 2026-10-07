@@ -737,9 +737,10 @@ const layer = Layer.effect(
         const current = attempt
         attempt = undefined
         if (!current) return yield* Effect.fail(e)
-        // A caller that owns retries (RetryLimit 0, no provider policy) gets the
-        // failed attempt exactly as before: no replay, nothing removed.
-        if (!config && (yield* SessionRetry.RetryLimit) === 0) return yield* Effect.fail(e)
+        // Without a provider retry policy the failed attempt is handled exactly as
+        // before (no settling, nothing removed); the settle path is opt-in via
+        // provider.<id>.options.retry.
+        if (!config) return yield* Effect.fail(e)
         const error = boundaryError(e, parse(e))
         if (!SessionRetry.retryable(error, input.model.providerID, config)) {
           return yield* Effect.fail(e)
