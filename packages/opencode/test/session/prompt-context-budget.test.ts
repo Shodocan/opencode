@@ -527,7 +527,15 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       const state = decodeLineage(rows)
       expect(state.compaction_count).toBe(1)
       expect(state.preDispatch.runtime).toBe("native")
-      expect(state.routeLedger.some((entry) => entry.runtime === "native")).toBe(true)
+      expect(state.routeLedger.length).toBeGreaterThanOrEqual(3)
+      const hashes = new Set(state.routeLedger.map((entry) => entry.requestHash))
+      expect(hashes.size).toBe(state.routeLedger.length)
+      expect(state.routeLedger.every((entry) => entry.runtime === "native")).toBe(true)
+      expect(state.routeLedger.every((entry) => /^[0-9a-f]{64}$/.test(entry.requestHash))).toBe(true)
+      expect(state.routeLedger.every((entry) => entry.providerID === "opencode" && entry.modelID === "qwen3-coder-plus")).toBe(true)
+      expect(state.routeLedger.some((entry) => entry.outcome === "overflow")).toBe(true)
+      expect(state.routeLedger.some((entry) => entry.outcome === "admitted")).toBe(true)
+      expect(state.overflowHashes.length).toBeGreaterThanOrEqual(1)
     }),
     120_000,
   )

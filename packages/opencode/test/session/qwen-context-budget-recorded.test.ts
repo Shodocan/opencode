@@ -53,20 +53,18 @@ import { LLM } from "../../src/session/llm"
 import { TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 
-// ─── T06 RED contract ────────────────────────────────────────────────────────
+// ─── Recorded soft-threshold proof ──────────────────────────────────────────
 //
-// The cassette is credential-free no-regression evidence: it replays the
-// Qwen-shaped one-shot overflow cycle (history, late provider-reported usage
-// overflow, one 4,096-summary compaction, one 32,000 rebuild) against the
-// recorded HTTP client on the NATIVE runtime (experimentalNativeLlm; the
-// repo's supported recording seam, llm-native-recorded.test.ts precedent) —
-// no live network, no credentials. The native seam reports the overflow
-// reactively at step-finish from the provider-reported usage total (240,050)
-// crossing the model's legacy usable boundary (262,144 - 32,000 = 230,144);
-// the session does not map a 413 executor failure to the overflow repair on
-// the native runtime. On pre-T06 source the loop replays through the legacy
-// repair (no durable lineage); the suite must fail with the orchestration
-// sentinel below, never with a load or environment error.
+// The cassette is credential-free no-regression evidence: it replays a
+// Qwen-shaped late crossing (history, a late provider-reported usage total,
+// one 4,096-summary compaction, one 32,000 rebuild) against the recorded HTTP
+// client on the NATIVE runtime (experimentalNativeLlm; the repo's supported
+// recording seam, llm-native-recorded.test.ts precedent) — no live network,
+// no credentials. The usage total (240,050) arrives on a normally finished
+// step, so it is a soft threshold crossing: it compacts and rebuilds without
+// recording an overflow or spending the hard-overflow one-shot repair
+// (harness-opencode#560). The hard one-shot cycle on the native runtime is
+// covered in prompt-context-budget.test.ts.
 
 const LINEAGE_TYPE = "session.next.context-budget.lineage"
 const LINEAGE_V1 = `${LINEAGE_TYPE}.1`
@@ -85,30 +83,6 @@ function lineageDefinition() {
   return definition
 }
 
-type LineageState = {
-  readonly sessionID: string
-  readonly userMessageID: string
-  readonly expectedGeneration: number
-  readonly newGeneration: number
-  readonly compaction_count: number
-  readonly routeLedger: readonly {
-    readonly providerID: string
-    readonly modelID: string
-    readonly requestHash: string
-    readonly runtime: string
-    readonly outcome: string
-  }[]
-  readonly overflowHashes: readonly string[]
-  readonly preDispatch: {
-    readonly providerID: string
-    readonly modelID: string
-    readonly runtime: string
-    readonly requestHash: string
-    readonly projection: unknown
-  }
-  readonly watermark: { readonly outputSeq: number }
-}
-
 const lineageRows = Effect.fn("test.lineageRows")(function* (sessionID: SessionID) {
   const { db } = yield* Database.Service
   const rows = yield* db
@@ -120,12 +94,6 @@ const lineageRows = Effect.fn("test.lineageRows")(function* (sessionID: SessionI
     .pipe(Effect.orDie)
   return rows.filter((row) => row.type === LINEAGE_V1)
 })
-
-function decodeLineage(rows: readonly { data: Record<string, unknown> }[]): LineageState {
-  const definition = lineageDefinition()
-  const last = rows[rows.length - 1]!
-  return Schema.decodeUnknownSync(definition.data as never)(last.data) as LineageState
-}
 
 // ─── Recorded HTTP wiring ────────────────────────────────────────────────────
 
@@ -359,7 +327,7 @@ const HISTORY_MARKERS = ["QCB-HIST-1", "QCB-HIST-2"] as const
 // ─── Test ────────────────────────────────────────────────────────────────────
 
 describe("Qwen context-budget recorded proof", () => {
-  it.instance("replays the credential-free recorded one-shot overflow repair without live network", () =>
+  it.instance("replays the credential-free recorded soft-threshold compaction and rebuild without live network", () =>
     Effect.gen(function* () {
       yield* writeQwenConfig()
       const prompt = yield* SessionPrompt.Service
@@ -400,13 +368,10 @@ describe("Qwen context-budget recorded proof", () => {
       // The soft crossing neither records an overflow nor spends the one-shot
       // repair; the hard-overflow cycle on the native runtime is covered in
       // prompt-context-budget.test.ts.
-      const rows = yield* lineageRows(chat.id)
-      if (rows.length > 0) {
-        const state = decodeLineage(rows)
-        expect(state.compaction_count).toBe(0)
-        expect(state.routeLedger.some((entry) => entry.outcome === "overflow")).toBe(false)
-        expect(state.overflowHashes).toHaveLength(0)
-      }
+      // The lineage filter matches the real durable event type (so the empty
+      // read is not vacuous).
+      expect(LINEAGE_V1).toBe(`${lineageDefinition().type}.1`)
+      expect(yield* lineageRows(chat.id)).toHaveLength(0)
       // No-regression boundary: the replayed rebuild was admitted by the
       // Qwen gate, which bounds the estimate at 209,664.
       const base = Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info
