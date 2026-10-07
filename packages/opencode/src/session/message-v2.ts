@@ -713,6 +713,18 @@ export function fromError(
         },
         { cause: e },
       ).toObject()
+    case e instanceof ProviderError.RetryUnsafeError:
+      return new APIError(
+        {
+          message: e.message,
+          isRetryable: false,
+          metadata: {
+            code: e.name,
+            tools: e.tools.join(","),
+          },
+        },
+        { cause: e },
+      ).toObject()
     case e instanceof ProviderError.ResponseStreamError:
       return new APIError(
         {

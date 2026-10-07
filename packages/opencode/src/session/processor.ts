@@ -3,7 +3,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Image } from "@/image/image"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { QuotaFallback } from "@opencode-ai/schema/quota"
-import { Cause, Deferred, Effect, Exit, Layer, Context, Scope, Schema } from "effect"
+import { Cause, Deferred, Effect, Exit, Layer, Context, Option, Scope, Schema } from "effect"
 import * as Stream from "effect/Stream"
 import { Agent } from "@/agent/agent"
 import { Config } from "@/config/config"
@@ -22,10 +22,11 @@ import { SessionSummary } from "./summary"
 import type { Provider } from "@/provider/provider"
 import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
+import { ProviderError } from "@/provider/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
-import { Usage, type LLMEvent } from "@opencode-ai/llm"
+import { LLMEvent, Usage } from "@opencode-ai/llm"
 
 const DOOM_LOOP_THRESHOLD = 3
 export type Result = "compact" | "stop" | "continue"
@@ -52,6 +53,22 @@ export interface Handle {
   ) => Effect.Effect<void>
   readonly process: (streamInput: LLM.StreamInput) => Effect.Effect<Result>
 }
+
+/** A tool body invoked by the transport, with the value its execute returned. */
+type ToolRun = { name: string; input: unknown; result: unknown }
+
+/** Parts that existed before a provider attempt and tools it started. */
+type Attempt = {
+  before: Set<string>
+  started: Map<string, ToolRun>
+  stepFinished: boolean
+}
+
+// Bounded wait for tools of a failed attempt to record their result.
+const TOOL_SETTLE_GRACE = "2 seconds"
+
+const thenable = (value: unknown): value is PromiseLike<unknown> =>
+  typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function"
 
 type Input = {
   assistantMessage: SessionV1.Assistant
@@ -121,6 +138,7 @@ const layer = Layer.effect(
         reasoningMap: {},
       }
       let aborted = false
+      let attempt: Attempt | undefined
 
       const parse = (e: unknown) =>
         MessageV2.fromError(e, {
@@ -558,6 +576,7 @@ const layer = Layer.effect(
                   : undefined,
             })
             yield* session.updateMessage(ctx.assistantMessage)
+            if (attempt) attempt.stepFinished = true
             if (ctx.snapshot) {
               const patch = yield* snapshot.patch(ctx.snapshot)
               if (patch.files.length) {
@@ -700,6 +719,112 @@ const layer = Layer.effect(
         yield* session.updateMessage(ctx.assistantMessage)
       })
 
+      const removeParts = Effect.fn("SessionProcessor.removeParts")(function* (parts: SessionV1.Part[]) {
+        for (const part of parts) {
+          if (part.type === "tool") yield* settleToolCall(part.callID)
+          yield* session.removePart({ sessionID: part.sessionID, messageID: part.messageID, partID: part.id })
+        }
+      })
+
+      // Runs after a failed attempt's stream scope closed, so its request is
+      // already aborted. A retryable failure is replayed only when the attempt
+      // left nothing durable; its partial output is removed first so history
+      // never holds the same text or tool call twice.
+      const settleAttempt = Effect.fn("SessionProcessor.settleAttempt")(function* (
+        e: unknown,
+        config: SessionRetry.Config | undefined,
+      ) {
+        const current = attempt
+        attempt = undefined
+        if (!current) return yield* Effect.fail(e)
+        // A caller that owns retries (RetryLimit 0, no provider policy) gets the
+        // failed attempt exactly as before: no replay, nothing removed.
+        if (!config && (yield* SessionRetry.RetryLimit) === 0) return yield* Effect.fail(e)
+        const error = boundaryError(e, parse(e))
+        if (!SessionRetry.retryable(error, input.model.providerID, config)) {
+          return yield* Effect.fail(e)
+        }
+        yield* Effect.forEach(
+          Object.values(ctx.toolcalls),
+          (call) => Deferred.await(call.done).pipe(Effect.timeout(TOOL_SETTLE_GRACE), Effect.ignore),
+          { concurrency: "unbounded" },
+        )
+        const attemptParts = () =>
+          MessageV2.parts(ctx.assistantMessage.id).pipe(
+            Effect.provideService(Database.Service, database),
+            Effect.map((parts) => parts.filter((part) => !current.before.has(part.id))),
+          )
+        // A tool body that ran while its stream died may have finished after
+        // the consumer stopped reading: record that result from its execute
+        // promise instead of losing it (or replaying the tool).
+        const seen = new Set((yield* attemptParts()).flatMap((part) => (part.type === "tool" ? [part.callID] : [])))
+        yield* Effect.forEach(current.started, ([callID, run]) =>
+          Effect.gen(function* () {
+            if (!seen.has(callID)) yield* ensureToolCall({ id: callID, name: run.name })
+            const match = yield* readToolCall(callID)
+            if (!match || (match.part.state.status !== "pending" && match.part.state.status !== "running")) return
+            const result = run.result
+            if (!thenable(result)) return
+            const value = yield* Effect.promise(() =>
+              Promise.resolve(result).then(
+                (value) => ({ value }),
+                () => undefined,
+              ),
+            ).pipe(Effect.timeoutOption(TOOL_SETTLE_GRACE))
+            if (Option.isNone(value) || value.value === undefined) return
+            const input = isRecord(run.input) ? run.input : { value: run.input }
+            yield* updateToolCall(callID, (part) =>
+              part.state.status === "pending"
+                ? { ...part, state: { status: "running", input, time: { start: Date.now() } } }
+                : part,
+            )
+            yield* handleEvent(
+              LLMEvent.toolResult({ id: callID, name: run.name, result: { type: "json", value: value.value.value } }),
+            )
+          }),
+        )
+        const parts = yield* attemptParts()
+        const started = (part: SessionV1.Part): part is SessionV1.ToolPart =>
+          part.type === "tool" && (part.state.status !== "pending" || current.started.has(part.callID))
+        const ran = parts.filter(started)
+
+        if (ran.length === 0 && !current.stepFinished) {
+          yield* removeParts(parts)
+          ctx.toolcalls = {}
+          ctx.currentText = undefined
+          ctx.reasoningMap = {}
+          return yield* Effect.fail(e)
+        }
+
+        const unsettled = ran.filter(
+          (part) =>
+            part.state.status === "pending" ||
+            part.state.status === "running" ||
+            (part.state.status === "error" && part.state.metadata?.interrupted === true),
+        )
+        if (unsettled.length > 0) {
+          const cause = isRecord(error.data) && typeof error.data.message === "string" ? error.data.message : errorMessage(e)
+          return yield* Effect.fail(
+            new ProviderError.RetryUnsafeError(
+              unsettled.map((part) => part.tool),
+              cause,
+              e,
+            ),
+          )
+        }
+
+        // Every started tool recorded its result (or the step had finished):
+        // keep that progress and let the loop continue from it.
+        yield* removeParts(parts.filter((part) => part.type === "tool" && !started(part)))
+        if (!current.stepFinished) ctx.assistantMessage.finish = "tool-calls"
+        yield* Effect.logWarning("provider attempt failed after durable progress; continuing without replay", {
+          "session.id": input.sessionID,
+          messageID: input.assistantMessage.id,
+          tools: ran.map((part) => part.tool).join(","),
+          error: errorMessage(e),
+        })
+      })
+
       const halt = Effect.fn("SessionProcessor.halt")(function* (e: unknown) {
         yield* Effect.logError("process", {
           "session.id": input.sessionID,
@@ -729,6 +854,27 @@ const layer = Layer.effect(
         yield* status.set(ctx.sessionID, { type: "idle" })
       })
 
+      // Record every tool body the transport invokes so a failed attempt is
+      // never replayed over a side effect, even when its tool-call event was
+      // lost with the stream; the execute result lets that attempt keep it.
+      const track = (tools: LLM.StreamInput["tools"]): LLM.StreamInput["tools"] =>
+        Object.fromEntries(
+          Object.entries(tools).map(([name, item]) => {
+            const execute = item.execute
+            if (!execute) return [name, item]
+            const tracked: typeof execute = (args, options) => {
+              let result: unknown
+              try {
+                result = execute(args, options)
+                return result as ReturnType<typeof execute>
+              } finally {
+                attempt?.started.set(options.toolCallId, { name, input: args, result })
+              }
+            }
+            return [name, { ...item, execute: tracked }]
+          }),
+        )
+
       const process = Effect.fn("SessionProcessor.process")(function* (streamInput: LLM.StreamInput) {
         yield* Effect.logInfo("process", {
           "session.id": input.sessionID,
@@ -736,12 +882,18 @@ const layer = Layer.effect(
         })
         ctx.needsCompaction = false
         ctx.budgetRefused = false
-        ctx.shouldBreak = (yield* config.get()).experimental?.continue_loop_on_deny !== true
+        const cfg = yield* config.get()
+        ctx.shouldBreak = cfg.experimental?.continue_loop_on_deny !== true
+        const retryConfig: SessionRetry.Config | undefined = cfg.provider?.[input.model.providerID]?.options?.retry
 
         return yield* Effect.gen(function* () {
           yield* Effect.gen(function* () {
             ctx.currentText = undefined
             ctx.reasoningMap = {}
+            const existing = yield* MessageV2.parts(ctx.assistantMessage.id).pipe(
+              Effect.provideService(Database.Service, database),
+            )
+            attempt = { before: new Set(existing.map((part) => part.id)), started: new Map(), stepFinished: false }
             yield* status.set(ctx.sessionID, { type: "busy" })
             // A workflow quota switch creates a fresh child, so an earlier
             // provider turn cannot be replayed safely. Read durable unfiltered
@@ -751,6 +903,7 @@ const layer = Layer.effect(
               : undefined
             const stream = llm.stream({
               ...streamInput,
+              tools: track(streamInput.tools),
               quotaPriorActivity: history?.some((message) => message.info.role === "assistant" && (
                 message.info.id !== input.assistantMessage.id || message.parts.some((part) =>
                   part.type !== "step-start" && part.type !== "step-finish" && part.type !== "snapshot",
@@ -776,9 +929,11 @@ const layer = Layer.effect(
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) => Effect.fail(Cause.squash(cause)),
             ),
+            Effect.catch((e) => settleAttempt(e, retryConfig)),
             Effect.retry(
               SessionRetry.policy({
                 provider: input.model.providerID,
+                config: retryConfig,
                 parse,
                 set: (info) => {
                   return status.set(ctx.sessionID, {
