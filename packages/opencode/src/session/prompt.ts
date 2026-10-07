@@ -1703,30 +1703,55 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result !== "compact") softCompactions = 0
-            if (result === "compact") {
-              // A step that finished without error only crossed the soft
-              // compaction threshold: its output is durable, so the one-shot
-              // lineage gates (spent counter, seen hash, moved output
-              // watermark) and the planner verdict must not end the run. They
-              // stay terminal only for a hard overflow (no finish, no output).
-              // A soft crossing is bounded instead: a compaction that leaves
-              // the very next step over the threshold may be retried once (a
-              // single large tool result can land right after a compaction),
-              // then the run fails rather than compacting forever.
-              const soft = !!handle.message.finish && !handle.message.error
-              if (soft && softCompactions >= SOFT_COMPACTION_LIMIT) {
+            if (result === "compact" && handle.message.finish && !handle.message.error) {
+              // The step finished without error and only crossed the soft
+              // compaction threshold. Its output is durable, so it is not an
+              // overflow: it bypasses the one-shot lineage record and the
+              // planner (a soft compaction never spends the hard-overflow
+              // repair) and always compacts. It is bounded instead: a
+              // compaction that leaves the very next step over the threshold
+              // may be retried once (a single large tool result can land right
+              // after a compaction), then the run fails rather than compacting
+              // forever. The failure goes on a separate message so the
+              // finished step keeps its tool calls in context.
+              if (softCompactions >= SOFT_COMPACTION_LIMIT) {
                 yield* lineageTerminate(
-                  msg,
+                  {
+                    id: MessageID.ascending(),
+                    parentID: lastUser.id,
+                    role: "assistant",
+                    mode: agent.name,
+                    agent: agent.name,
+                    variant: lastUser.model.variant,
+                    path: msg.path,
+                    cost: 0,
+                    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                    modelID: model.id,
+                    providerID: model.providerID,
+                    time: { created: Date.now() },
+                    sessionID,
+                  },
                   `Context still exceeds the compaction threshold after ${SOFT_COMPACTION_LIMIT} consecutive compactions`,
                 )
                 return "break" as const
               }
-              if (soft) softCompactions++
+              softCompactions++
+              lineageDraft.plan = undefined
+              yield* compaction.create({
+                sessionID,
+                agent: lastUser.agent,
+                model: lastUser.model,
+                auto: true,
+                overflow: false,
+              })
+              return "continue" as const
+            }
+            if (result === "compact") {
               // T06: record the overflow before any repair; the bounded
               // planner gates the one-shot repair on an unchanged durable
               // output watermark.
               const recorded = yield* lineageOverflow(lineageDraft, lastUser.id)
-              if (recorded === "terminal" && !soft) {
+              if (recorded === "terminal") {
                 yield* lineageTerminate(msg)
                 return "break" as const
               }
@@ -1742,16 +1767,12 @@ const layer = Layer.effect(
                   ? { requestHash: plan.proposals[0].requestHash, projection: plan.proposals[0].request }
                   : { requestHash: lineageDraft.preDispatch?.requestHash ?? "", projection: {} }
               } catch (e) {
-                if (!(e instanceof CompactionImpossibleError)) throw e
-                if (!soft) {
+                if (e instanceof CompactionImpossibleError) {
                   yield* lineageTerminate(msg)
                   return "break" as const
                 }
-                lineageDraft.plan = undefined
+                throw e
               }
-              // An unrecorded soft compaction must not claim the one-shot
-              // cycle when the compaction task settles.
-              if (recorded === "terminal") lineageDraft.plan = undefined
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,

@@ -479,10 +479,11 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       //   upstream #43892 a turn recorded with an "unknown" finish (a stream
       //   without finish_reason) no longer ends the loop, so explicit stops
       //   keep each history turn a single transport call on both runtimes;
-      // - native overflow is reactive at step-finish: the final turn is
-      //   admitted preflight (E <= 209,664) and the provider-reported usage
-      //   total (240,050) crosses the model's legacy usable boundary
-      //   (262,144 - 32,000 = 230,144), driving the one-shot cycle.
+      // - the final turn is admitted preflight (E <= 209,664) and rejected
+      //   by the provider with no output (a hard overflow), driving the
+      //   one-shot cycle. A usage crossing on a finished step is a soft
+      //   threshold crossing: it compacts without the one-shot cycle
+      //   (harness-opencode#560, covered below).
       const { llm } = yield* useServerConfig((url) => ({
         ...qwenProviderCfg(url, "opencode"),
         model: "opencode/qwen3-coder-plus",
@@ -504,9 +505,9 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
         yield* prompt.loop({ sessionID: chat.id })
       }
       expect(yield* llm.hits).toHaveLength(2)
-      // Initially fitting, overflows late: final turn (usage overflow),
+      // Initially fitting, overflows late: final turn (provider overflow),
       // one compaction, one rebuild — no duplicate transport, no second repair.
-      yield* llm.push(reply().text("ok").usage({ input: 240_000, output: 50 }).stop())
+      yield* llm.error(413, { error: { message: "request entity too large" } })
       yield* llm.push(reply().text("ok").usage({ input: 500, output: 200 }).stop())
       yield* llm.push(reply().text("rebuild ok").usage({ input: 500, output: 50 }).stop())
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
@@ -798,6 +799,77 @@ describe("soft compaction threshold crossing (harness-opencode#560)", () => {
       const messages = yield* sessions.messages({ sessionID: chat.id })
       expect(compactions(messages)).toHaveLength(2)
       expect(overflowErrors(messages)).toHaveLength(1)
+      // The failure sits on its own message: every crossing step stays a
+      // finished tool-calls step, so its tool calls remain in context.
+      const crossed = messages.filter(
+        (message) => message.info.role === "assistant" && message.info.tokens.total === SOFT_TRIGGER + 11,
+      )
+      expect(crossed).toHaveLength(3)
+      for (const message of crossed) {
+        if (message.info.role !== "assistant") continue
+        expect(message.info.finish).toBe("tool-calls")
+        expect(message.info.error).toBeUndefined()
+      }
+    }),
+    120_000,
+  )
+
+  it.instance("a soft compaction does not spend the one-shot repair of a later pre-dispatch budget overflow", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(softCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "soft then hard",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // Soft crossing: compacts and finishes the turn.
+      yield* llm.push(softCrossing())
+      yield* llm.push(reply().text("summary"))
+      yield* llm.push(reply().text("done").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: "review" }] })
+      yield* prompt.loop({ sessionID: chat.id })
+      expect(yield* llm.hits).toHaveLength(3)
+      // Two ~360k-char turns (~90k tokens each) after the compaction; each
+      // history request is still admitted.
+      for (const marker of ["SOFT-HIST-1", "SOFT-HIST-2"]) {
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          noReply: true,
+          parts: [{ type: "text", text: marker + "H".repeat(359_990) }],
+        })
+        yield* llm.push(reply().text(`history reply ${marker}`).stop())
+        yield* prompt.loop({ sessionID: chat.id })
+      }
+      expect(yield* llm.hits).toHaveLength(5)
+      // ~160k chars (~40k tokens) on top of the history: the pre-dispatch
+      // budget (209,664) refuses the request with no provider call. The
+      // one-shot repair must still compact and rebuild it.
+      yield* llm.push(reply().text("ok"))
+      yield* llm.push(reply().text("rebuild ok").stop())
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "SOFT-FINAL" + "F".repeat(159_990) }],
+      })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const hits = yield* llm.hits
+      // + one compaction, one rebuild; the refused request never hit the wire.
+      expect(hits).toHaveLength(7)
+      expect(maxTokens(hits[5]!.body)).toBe(4_096)
+      expect(JSON.stringify(hits[6]!.body)).toContain("SOFT-FINAL")
+      expect(JSON.stringify(hits[6]!.body)).not.toContain("SOFT-HIST-1")
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(overflowErrors(messages)).toHaveLength(0)
+      expect(compactions(messages)).toHaveLength(2)
+      const state = decodeLineage(yield* lineageRows(chat.id))
+      expect(state.compaction_count).toBe(1)
+      expect(state.routeLedger.filter((entry) => entry.outcome === "overflow")).toHaveLength(1)
     }),
     120_000,
   )
