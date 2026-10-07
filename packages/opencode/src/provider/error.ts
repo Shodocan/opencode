@@ -86,6 +86,8 @@ function json(input: unknown) {
   return undefined
 }
 
+const GATEWAY_STREAM_ERROR = /litellm\.APIConnectionError|Response payload is not completed|TransferEncodingError/i
+
 export type ParsedStreamError =
   | {
       type: "context_overflow"
@@ -95,6 +97,7 @@ export type ParsedStreamError =
   | {
       type: "api_error"
       message: string
+      statusCode?: number
       isRetryable: boolean
       responseBody: string
     }
@@ -105,7 +108,23 @@ export function parseStreamError(input: unknown): ParsedStreamError | undefined 
   if (!body) return
 
   const responseBody = JSON.stringify(body)
-  if (body.type !== "error") return
+  if (body.type !== "error") {
+    // Gateways such as LiteLLM deliver upstream failures mid-stream as a bare
+    // `{ message, code }` payload after the HTTP 200 was already sent.
+    const message = typeof body.message === "string" ? body.message : body.error?.message
+    if (typeof message !== "string") return
+    const code = Number(body.code ?? body.error?.code)
+    const server = Number.isInteger(code) && code >= 500 && code < 600
+    if (!server && !GATEWAY_STREAM_ERROR.test(message)) return
+    if (isContextOverflow(message)) return { type: "context_overflow", message, responseBody }
+    return {
+      type: "api_error",
+      message,
+      statusCode: server ? code : 500,
+      isRetryable: true,
+      responseBody,
+    }
+  }
 
   switch (body?.error?.code) {
     case "context_length_exceeded":
