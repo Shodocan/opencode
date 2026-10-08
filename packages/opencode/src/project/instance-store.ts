@@ -6,7 +6,7 @@ import { WorkspaceContext } from "@/control-plane/workspace-context"
 import { InstanceRef } from "@/effect/instance-ref"
 import { disposeInstance as runDisposers } from "@/effect/instance-registry"
 import { FSUtil } from "@opencode-ai/core/fs-util"
-import { Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
+import { Cause, Context, Deferred, Duration, Effect, Exit, Layer, Scope } from "effect"
 import { type InstanceContext } from "./instance-context"
 import { InstanceBootstrap } from "./bootstrap-service"
 import * as Project from "./project"
@@ -76,6 +76,20 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
         yield* Deferred.done(entry.deferred, exit).pipe(Effect.asVoid)
       })
 
+    // Settles the entry of a fiber that ended before its load did. These
+    // fibers live in the scope of the store: its close interrupts them and
+    // then waits for every entry (`disposeAll`), so an entry left pending
+    // would make that close, and the shutdown of the process, wait for ever.
+    const settle = (directory: string, entry: Entry) => (exit: Exit.Exit<unknown>) =>
+      Effect.gen(function* () {
+        if (Exit.isSuccess(exit)) return
+        yield* removeEntry(directory, entry)
+        // A bootstrap cut short has started services for the directory that no
+        // instance will ever dispose. Disposing twice is harmless.
+        yield* Effect.promise(() => runDisposers(directory))
+        yield* Deferred.failCause(entry.deferred, exit.cause)
+      })
+
     const emitDisposed = (input: { directory: string; project?: string }) =>
       Effect.sync(() =>
         GlobalBus.emit("event", {
@@ -117,7 +131,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
           yield* Effect.gen(function* () {
             yield* Effect.logInfo("creating instance", { directory: directory })
             yield* completeLoad(directory, input, entry)
-          }).pipe(Effect.forkIn(scope, { startImmediately: true }))
+          }).pipe(Effect.onExit(settle(directory, entry)), Effect.forkIn(scope, { startImmediately: true }))
           return yield* restore(Deferred.await(entry.deferred))
         }),
       ).pipe(Effect.withSpan("InstanceStore.load"))
@@ -138,7 +152,7 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
               yield* emitDisposed({ directory, project: input.project?.id })
             }
             yield* completeLoad(directory, input, entry)
-          }).pipe(Effect.forkIn(scope, { startImmediately: true }))
+          }).pipe(Effect.onExit(settle(directory, entry)), Effect.forkIn(scope, { startImmediately: true }))
           return yield* restore(Deferred.await(entry.deferred))
         }),
       ).pipe(Effect.withSpan("InstanceStore.reload"))
@@ -171,7 +185,9 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
           Effect.gen(function* () {
             const exit = yield* Deferred.await(item[1].deferred).pipe(Effect.exit)
             if (Exit.isFailure(exit)) {
-              yield* Effect.logWarning("instance dispose failed", { key: item[0], cause: exit.cause })
+              // A load cut by the close of the store has already released what it started.
+              if (!Cause.hasInterruptsOnly(exit.cause))
+                yield* Effect.logWarning("instance dispose failed", { key: item[0], cause: exit.cause })
               yield* removeEntry(item[0], item[1])
               return
             }
