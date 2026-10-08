@@ -39,13 +39,33 @@ function start(script: string, msg: unknown, dir: string) {
   return child
 }
 
+// Kills the process group of the child and waits until the child is gone.
 function stop(child: ChildProcess) {
   children.delete(child)
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return Promise.resolve()
+  const gone = new Promise<void>((resolve) => child.once("close", () => resolve()))
   try {
     process.kill(-child.pid, "SIGKILL")
   } catch {
     child.kill("SIGKILL")
+  }
+  return gone
+}
+
+const reap = () => Promise.all(Array.from(children, stop))
+
+// Every wait of these tests has a limit: past it the children are killed and
+// the test fails saying what it was waiting for.
+async function within<T>(wait: Promise<T>, millis: number, what: string) {
+  const timer = Promise.withResolvers<never>()
+  const timeout = setTimeout(() => timer.reject(new Error(`${what} did not finish within ${millis}ms`)), millis)
+  try {
+    return await Promise.race([wait, timer.promise])
+  } catch (error) {
+    await reap()
+    throw error
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -69,13 +89,15 @@ function held(child: ChildProcess) {
 // statements are collected, and until then it keeps its share of the file
 // locks, which a holder of every lock would wait for.
 async function create(file: string, dir: string) {
-  const result = await finished(start(worker, { file, worker: 0, events: 0 }, dir))
+  const result = await within(
+    finished(start(worker, { file, worker: 0, events: 0 }, dir)),
+    20_000,
+    "the process creating the database",
+  )
   if (result.code !== 0) throw new Error(`could not create the database: ${result.stderr.slice(0, 200)}`)
 }
 
-afterEach(() => {
-  for (const child of children) stop(child)
-})
+afterEach(reap)
 
 test.skipIf(process.platform === "win32")(
   "processes sharing one database file publish every event once under write-lock contention",
@@ -86,18 +108,12 @@ test.skipIf(process.platform === "win32")(
 
     const lock = start(holder, { file, cycles: 4, holdMs: 600, gapMs: 30 }, tmp.path)
     const released = finished(lock)
-    await held(lock)
+    await within(held(lock), 10_000, "the lock holder taking the lock")
     const workers = Array.from({ length: WORKERS }, (_, index) =>
       finished(start(worker, { file, worker: index, events: EVENTS, busyTimeout: BUSY_TIMEOUT }, tmp.path)),
     )
 
-    const timer = Promise.withResolvers<"timeout">()
-    const timeout = setTimeout(() => timer.resolve("timeout"), DEADLINE)
-    const results = await Promise.race([Promise.all([released, ...workers]), timer.promise]).finally(() => {
-      clearTimeout(timeout)
-      for (const child of children) stop(child)
-    })
-    if (results === "timeout") throw new Error(`contention run did not finish within ${DEADLINE}ms`)
+    const results = await within(Promise.all([released, ...workers]), DEADLINE, "the contention run").finally(reap)
 
     expect(
       results.flatMap((result, index) =>
@@ -149,12 +165,16 @@ test.skipIf(process.platform === "win32")(
     // connection opens without a busy handler, so its first statement failed.
     const lock = start(holder, { file, cycles: 1, holdMs: 400, gapMs: 0, exclusive: true }, tmp.path)
     const released = finished(lock)
-    await held(lock)
+    await within(held(lock), 10_000, "the lock holder taking every lock")
     const started = Date.now()
-    await Effect.runPromise(Layer.build(Database.layerFromPath(file)).pipe(Effect.scoped))
+    await within(
+      Effect.runPromise(Layer.build(Database.layerFromPath(file)).pipe(Effect.scoped)),
+      15_000,
+      "opening the database while every lock is held",
+    )
 
     expect(Date.now() - started).toBeGreaterThanOrEqual(200)
-    expect((await released).code).toBe(0)
+    expect((await within(released, 10_000, "the lock holder exiting")).code).toBe(0)
   },
   30_000,
 )
@@ -168,7 +188,7 @@ test.skipIf(process.platform === "win32")(
 
     const lock = start(holder, { file, cycles: 1, holdMs: 20_000, gapMs: 0 }, tmp.path)
     const released = finished(lock)
-    await held(lock)
+    await within(held(lock), 10_000, "the lock holder taking the lock")
     const waiting = start(worker, { file, worker: 0, events: EVENTS }, tmp.path)
     const exited = finished(waiting)
     // Long enough for the worker to be in its lock wait, far short of its budget.
@@ -176,12 +196,12 @@ test.skipIf(process.platform === "win32")(
     expect(waiting.exitCode).toBeNull()
     const signalled = Date.now()
     waiting.kill("SIGTERM")
-    const result = await exited
+    const result = await within(exited, 10_000, "the waiting process exiting on SIGTERM")
 
     expect(result.signal).toBe("SIGTERM")
     expect(Date.now() - signalled).toBeLessThan(2_000)
-    stop(lock)
-    await released
+    await stop(lock)
+    await within(released, 10_000, "the lock holder exiting")
     const db = new BunDatabase(file)
     expect(db.query("SELECT count(*) AS count FROM event WHERE aggregate_id = 'shared'").get()).toEqual({ count: 0 })
     db.run("CREATE TABLE still_writable (value INTEGER)")

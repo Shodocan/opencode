@@ -1,4 +1,4 @@
-import { describe, expect } from "bun:test"
+import { describe, expect, setDefaultTimeout } from "bun:test"
 import { Database as BunDatabase } from "bun:sqlite"
 import { Cause, Effect, Exit, Fiber, Predicate, Schema } from "effect"
 import type * as Scope from "effect/Scope"
@@ -20,6 +20,11 @@ const Locked = EventV2.define({
 
 const BUSY = "database is locked (SQLITE_BUSY) during BEGIN IMMEDIATE"
 
+// No test here waits for a lock longer than 5s (the longest budget below), so
+// 10s means a wait that did not end; the runner stops the test at 15s.
+setDefaultTimeout(15_000)
+const LIMIT = 10_000
+
 // A file database opened by the product layer with a 1ms busy handler, plus a
 // second connection that plays another OpenCode process holding the lock.
 const contended = <A, E>(
@@ -38,7 +43,13 @@ const contended = <A, E>(
         (db) => Effect.sync(() => db.close()),
       )
       other.run("CREATE TABLE lock_probe (value INTEGER)")
-      return yield* body(other)
+      return yield* body(other).pipe(
+        Effect.timeoutOrElse({
+          duration: LIMIT,
+          orElse: () =>
+            Effect.die(new Error(`not finished after ${LIMIT}ms: a write is still waiting for the database lock`)),
+        }),
+      )
     }).pipe(
       Effect.provide(
         AppNodeBuilder.build(LayerNode.group([Database.node, EventV2.node]), [
