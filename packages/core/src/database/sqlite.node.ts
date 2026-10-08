@@ -58,13 +58,16 @@ const make = (options: Config) =>
         const statement = native.prepare(query)
         statement.setReadBigInts(Context.get(fiber.context, Client.SafeIntegers))
         try {
-          return Effect.succeed(statement.all(...(params as SQLInputValue[])) as Array<Record<string, unknown>>)
-        } catch (cause) {
-          return Effect.fail(
-            new SqlError({
-              reason: classifySqliteError(cause, { message: "Failed to execute statement", operation: "execute" }),
-            }),
+          return Effect.succeed(
+            Sqlite.withBusyTimeout(
+              Context.get(fiber.context, Sqlite.BeginBusyTimeout),
+              query,
+              (sql) => native.prepare(sql).get(),
+              () => statement.all(...(params as SQLInputValue[])) as Array<Record<string, unknown>>,
+            ),
           )
+        } catch (cause) {
+          return Effect.fail(Sqlite.failure(cause, query))
         }
       })
 
@@ -78,11 +81,7 @@ const make = (options: Config) =>
             statement.all(...(params as SQLInputValue[])) as unknown as ReadonlyArray<ReadonlyArray<unknown>>,
           )
         } catch (cause) {
-          return Effect.fail(
-            new SqlError({
-              reason: classifySqliteError(cause, { message: "Failed to execute statement", operation: "execute" }),
-            }),
-          )
+          return Effect.fail(Sqlite.failure(cause, query))
         }
       })
 
@@ -150,7 +149,7 @@ const nativeLayer = (config: Config) =>
     Effect.gen(function* () {
       const native = new DatabaseSync(config.filename, {
         readOnly: config.readonly,
-        timeout: config.timeout,
+        timeout: config.timeout ?? Sqlite.BUSY_TIMEOUT,
         allowExtension: config.allowExtension,
         enableForeignKeyConstraints: true,
         open: true,

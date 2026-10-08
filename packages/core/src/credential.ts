@@ -98,25 +98,20 @@ const layer = Layer.effect(
           label: input.label ?? "default",
           value: input.value,
         })
-        yield* db
-          .transaction((tx) =>
-            Effect.gen(function* () {
-              yield* tx
-                .delete(CredentialTable)
-                .where(eq(CredentialTable.integration_id, credential.integrationID))
-                .run()
-              yield* tx
-                .insert(CredentialTable)
-                .values({
-                  id: credential.id,
-                  integration_id: credential.integrationID,
-                  label: credential.label,
-                  value: credential.value,
-                })
-                .run()
-            }),
-          )
-          .pipe(Effect.orDie)
+        yield* Database.immediate(db, (tx) =>
+          Effect.gen(function* () {
+            yield* tx.delete(CredentialTable).where(eq(CredentialTable.integration_id, credential.integrationID)).run()
+            yield* tx
+              .insert(CredentialTable)
+              .values({
+                id: credential.id,
+                integration_id: credential.integrationID,
+                label: credential.label,
+                value: credential.value,
+              })
+              .run()
+          }),
+        ).pipe(Effect.orDie)
         return credential
       }),
       update: Effect.fn("Credential.update")(function* (id, updates) {
