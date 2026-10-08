@@ -241,26 +241,24 @@ const layer = Layer.effect(
         Effect.map((sets) => new Map(sets.flat(2).map((item) => [item.directory, item] as const)).values().toArray()),
       )
       const removed = checked.filter((item) => !item.exists).map((item) => item.directory)
-      const result = yield* db
-        .transaction((tx) =>
-          Effect.all({
-            updated: Effect.forEach(discovered, (item) =>
-              directories.create(
-                {
-                  projectID: input.projectID,
-                  directory: item.directory,
-                  strategy: item.strategy,
-                  behavior: "replace",
-                },
-                tx,
-              ),
+      const result = yield* Database.immediate(db, (tx) =>
+        Effect.all({
+          updated: Effect.forEach(discovered, (item) =>
+            directories.create(
+              {
+                projectID: input.projectID,
+                directory: item.directory,
+                strategy: item.strategy,
+                behavior: "replace",
+              },
+              tx,
             ),
-            removed: Effect.forEach(removed, (directory) =>
-              directories.remove({ projectID: input.projectID, directory }, tx),
-            ),
-          }),
-        )
-        .pipe(Effect.orDie)
+          ),
+          removed: Effect.forEach(removed, (directory) =>
+            directories.remove({ projectID: input.projectID, directory }, tx),
+          ),
+        }),
+      ).pipe(Effect.orDie)
       const changes = {
         updated: discovered.filter((_, index) => result.updated[index]).map((item) => item.directory),
         removed: removed.filter((_, index) => result.removed[index]),

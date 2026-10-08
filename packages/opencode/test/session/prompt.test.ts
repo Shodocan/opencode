@@ -5,9 +5,11 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { expect } from "bun:test"
+import { afterAll, expect } from "bun:test"
+import { Database as BunDatabase } from "bun:sqlite"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
-import { readFile } from "fs/promises"
+import { readFile, rm } from "fs/promises"
+import os from "os"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -2992,4 +2994,217 @@ unix(
     }),
   { git: true },
   30_000,
+)
+
+// Shell under a held database write lock. A file database: a second connection
+// plays another OpenCode process, which an in-memory database cannot have.
+const lockFile = path.join(os.tmpdir(), `opencode-prompt-lock-${process.pid}-${Date.now()}.sqlite`)
+afterAll(async () => {
+  await Promise.all(["", "-wal", "-shm"].map((suffix) => rm(lockFile + suffix, { force: true })))
+})
+const lockedDatabase = testEffect(
+  LayerNode.compile(promptRoot, [
+    [SessionSummary.node, summary],
+    [LSP.node, lsp],
+    [MCP.node, makeMcp()],
+    [RuntimeFlags.node, runtimeFlags],
+    [Database.node, Database.layerFromPath(lockFile)],
+  ]),
+)
+const unixLockedDatabase = process.platform !== "win32" ? lockedDatabase.instance : lockedDatabase.instance.skip
+
+// No test below waits for the database longer than 20s (the longest budget it
+// sets), so 25s means a wait that did not end; the runner stops a test at 30s.
+const LOCK_TEST_TIMEOUT = 30_000
+const finishes = (name: string) =>
+  Effect.timeoutOrElse({
+    duration: 25_000,
+    orElse: () =>
+      Effect.die(new Error(`${name}: not finished after 25s: something is still waiting for the database lock`)),
+  })
+
+// Takes the write lock from another connection once the shell command of the
+// session is stored as running, so the lock is met by the writes that end it.
+const lockOnceRunning = Effect.fn("test.lockOnceRunning")(function* (sessionID: SessionID) {
+  const other = yield* Effect.acquireRelease(
+    Effect.sync(() => new BunDatabase(lockFile)),
+    (db) => Effect.sync(() => db.close()),
+  )
+  const locked = yield* Deferred.make<void>()
+  yield* Effect.gen(function* () {
+    while (
+      !other
+        .query<{ data: string }, [string]>("SELECT data FROM part WHERE session_id = ?")
+        .all(sessionID)
+        .some((row) => row.data.includes('"status":"running"'))
+    )
+      yield* Effect.sleep("5 millis")
+    other.run("BEGIN IMMEDIATE")
+    yield* Deferred.succeed(locked, undefined)
+  }).pipe(Effect.forkScoped)
+  return { other, locked }
+})
+
+unixLockedDatabase(
+  "shell finish under a held database lock gives up within its one bounded wait",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const lock = yield* lockOnceRunning(chat.id)
+
+      // Uninterruptible and two writes: one shared wait, not one each and not for ever.
+      const started = Date.now()
+      const exit = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 0.3" }).pipe(
+        Effect.provideService(Database.LockRetry, {
+          budget: 250,
+          outcome: 20_000,
+          abort: 20_000,
+          busy: 5,
+          base: 2,
+          cap: 10,
+        }),
+        Effect.exit,
+      )
+      const elapsed = Date.now() - started
+      lock.other.run("COMMIT")
+
+      expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBeInstanceOf(Database.LockedError)
+      expect(elapsed).toBeGreaterThanOrEqual(500)
+      expect(elapsed).toBeLessThan(3_000)
+    }).pipe(finishes("shell finish under a held database lock gives up within its one bounded wait")),
+  { config: cfg },
+  LOCK_TEST_TIMEOUT,
+)
+
+unixLockedDatabase(
+  "an aborted shell under a held database lock ends within the abort wait",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const lock = yield* lockOnceRunning(chat.id)
+
+      // Any other write would wait 20 seconds here.
+      const shell = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: "sleep 30" }).pipe(
+        Effect.provideService(Database.LockRetry, {
+          budget: 20_000,
+          outcome: 20_000,
+          abort: 150,
+          busy: 5,
+          base: 2,
+          cap: 10,
+        }),
+        Effect.forkChild,
+      )
+      yield* Deferred.await(lock.locked)
+      const started = Date.now()
+      yield* Fiber.interrupt(shell)
+      const elapsed = Date.now() - started
+      lock.other.run("COMMIT")
+
+      expect(elapsed).toBeGreaterThanOrEqual(140)
+      expect(elapsed).toBeLessThan(5_000)
+    }).pipe(finishes("an aborted shell under a held database lock ends within the abort wait")),
+  { config: cfg },
+  LOCK_TEST_TIMEOUT,
+)
+
+const lockedBlockingProcessor = testEffect(
+  LayerNode.compile(promptRoot, [
+    [SessionSummary.node, summary],
+    [LSP.node, lsp],
+    [MCP.node, makeMcp()],
+    [RuntimeFlags.node, runtimeFlags],
+    [SessionProcessor.node, blockingProcessor],
+    [Database.node, Database.layerFromPath(lockFile)],
+  ]),
+)
+
+// Any write outside a stopping path would wait four seconds here.
+const whileStopping = Effect.provideService(Database.LockRetry, {
+  budget: 4_000,
+  outcome: 4_000,
+  abort: 150,
+  busy: 5,
+  base: 2,
+  cap: 10,
+})
+
+lockedDatabase.instance(
+  "cancelling a subtask under a held database lock ends within the abort wait",
+  () =>
+    Effect.gen(function* () {
+      const ready = yield* Deferred.make<void>()
+      const registry = yield* ToolRegistry.Service
+      const { task } = yield* registry.named()
+      const original = task.execute
+      task.execute = () =>
+        Effect.callback<never>(() => {
+          succeedVoid(ready)
+          return Effect.void
+        })
+      yield* Effect.addFinalizer(() => Effect.sync(() => void (task.execute = original)))
+
+      const { prompt, chat } = yield* boot()
+      const msg = yield* user(chat.id, "hello")
+      yield* addSubtask(chat.id, msg.id)
+      const other = yield* Effect.acquireRelease(
+        Effect.sync(() => new BunDatabase(lockFile)),
+        (db) => Effect.sync(() => db.close()),
+      )
+
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(whileStopping, Effect.forkChild)
+      yield* awaitWithTimeout(Deferred.await(ready), "timed out waiting for task tool to start", "10 seconds")
+      other.run("BEGIN IMMEDIATE")
+      const started = Date.now()
+      yield* prompt.cancel(chat.id).pipe(whileStopping)
+      yield* Fiber.await(fiber)
+      const elapsed = Date.now() - started
+      other.run("COMMIT")
+
+      // The two writes that mark the subtask cancelled share one short wait.
+      expect(elapsed).toBeGreaterThanOrEqual(140)
+      expect(elapsed).toBeLessThan(2_000)
+    }).pipe(finishes("cancelling a subtask under a held database lock ends within the abort wait")),
+  { config: cfg },
+  LOCK_TEST_TIMEOUT,
+)
+
+lockedBlockingProcessor.instance(
+  "an interrupted assistant message under a held database lock ends within the abort wait",
+  () =>
+    Effect.gen(function* () {
+      processorCreateStarted.length = 0
+      yield* Effect.addFinalizer(() => Effect.sync(() => void (processorCreateStarted.length = 0)))
+
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Interrupted under lock" })
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "first" }],
+      })
+      const other = yield* Effect.acquireRelease(
+        Effect.sync(() => new BunDatabase(lockFile)),
+        (db) => Effect.sync(() => db.close()),
+      )
+
+      const created = defer<void>()
+      processorCreateStarted.push(created.resolve)
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(whileStopping, Effect.forkChild)
+      yield* Effect.promise(() => created.promise)
+      other.run("BEGIN IMMEDIATE")
+      const started = Date.now()
+      yield* prompt.cancel(chat.id).pipe(whileStopping)
+      yield* Fiber.await(fiber)
+      const elapsed = Date.now() - started
+      other.run("COMMIT")
+
+      // The write that marks the message aborted waited, and not for long.
+      expect(elapsed).toBeGreaterThanOrEqual(140)
+      expect(elapsed).toBeLessThan(2_000)
+    }).pipe(finishes("an interrupted assistant message under a held database lock ends within the abort wait")),
+  { config: cfg },
+  LOCK_TEST_TIMEOUT,
 )

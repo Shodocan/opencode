@@ -33,8 +33,9 @@ const layer = Layer.effect(
       readonly sessionID: SessionSchema.ID
       readonly todos: ReadonlyArray<Info>
     }) {
-      yield* db
-        .transaction((tx) =>
+      yield* Database.immediate(
+        db,
+        (tx) =>
           Effect.gen(function* () {
             yield* tx.delete(TodoTable).where(eq(TodoTable.session_id, input.sessionID)).run()
             if (input.todos.length === 0) return
@@ -51,8 +52,8 @@ const layer = Layer.effect(
               )
               .run()
           }),
-        )
-        .pipe(Effect.orDie)
+        input.sessionID,
+      ).pipe(Effect.orDie)
       yield* events.publish(Event.Updated, input)
     })
 

@@ -626,7 +626,8 @@ const layer = Layer.effect(
                 },
               } satisfies SessionV1.ToolPart)
             }
-          }),
+            // Cancelling must stay quick: this cannot be interrupted again.
+          }).pipe(Database.lockWithin("abort")),
         ),
       )
 
@@ -645,40 +646,45 @@ const layer = Layer.effect(
         )
       }
 
-      assistantMessage.finish = "tool-calls"
-      assistantMessage.time.completed = Date.now()
-      yield* sessions.updateMessage(assistantMessage)
+      // The subtask was run: its result or failure exists nowhere else, so
+      // these writes share one wait for the database far longer than the
+      // usual one. Not a finalizer: an interrupt ends the wait.
+      yield* Effect.gen(function* () {
+        assistantMessage.finish = "tool-calls"
+        assistantMessage.time.completed = Date.now()
+        yield* sessions.updateMessage(assistantMessage)
 
-      if (result && part.state.status === "running") {
-        yield* sessions.updatePart({
-          ...part,
-          state: {
-            status: "completed",
-            input: part.state.input,
-            title: result.title,
-            metadata: result.metadata,
-            output: result.output,
-            attachments,
-            time: { ...part.state.time, end: Date.now() },
-          },
-        } satisfies SessionV1.ToolPart)
-      }
-
-      if (!result) {
-        yield* sessions.updatePart({
-          ...part,
-          state: {
-            status: "error",
-            error: error ? `Tool execution failed: ${error.message}` : "Tool execution failed",
-            time: {
-              start: part.state.status === "running" ? part.state.time.start : Date.now(),
-              end: Date.now(),
+        if (result && part.state.status === "running") {
+          yield* sessions.updatePart({
+            ...part,
+            state: {
+              status: "completed",
+              input: part.state.input,
+              title: result.title,
+              metadata: result.metadata,
+              output: result.output,
+              attachments,
+              time: { ...part.state.time, end: Date.now() },
             },
-            metadata: part.state.status === "pending" ? undefined : part.state.metadata,
-            input: part.state.input,
-          },
-        } satisfies SessionV1.ToolPart)
-      }
+          } satisfies SessionV1.ToolPart)
+        }
+
+        if (!result) {
+          yield* sessions.updatePart({
+            ...part,
+            state: {
+              status: "error",
+              error: error ? `Tool execution failed: ${error.message}` : "Tool execution failed",
+              time: {
+                start: part.state.status === "running" ? part.state.time.start : Date.now(),
+                end: Date.now(),
+              },
+              metadata: part.state.status === "pending" ? undefined : part.state.metadata,
+              input: part.state.input,
+            },
+          } satisfies SessionV1.ToolPart)
+        }
+      }).pipe(Database.lockWithin("outcome"))
 
       if (!task.command) return
 
@@ -839,7 +845,9 @@ const layer = Layer.effect(
           if (Exit.isFailure(exit) && Cause.hasInterrupts(exit.cause) && !Cause.hasDies(exit.cause)) {
             aborted = true
           }
-          yield* finish
+          // Not interruptible: one bounded wait for the database covers both
+          // writes, a short one once the command was aborted.
+          yield* finish.pipe(Database.lockWithin(aborted ? "abort" : "budget"))
 
           if (Exit.isFailure(exit) && !aborted && !Cause.hasInterruptsOnly(exit.cause)) {
             return yield* Effect.failCause(exit.cause)
@@ -1559,7 +1567,8 @@ const layer = Layer.effect(
               aborted: true,
             })
             msg.time.completed = Date.now()
-            yield* sessions.updateMessage(msg)
+            // Runs on interrupt only: stopping must stay quick.
+            yield* sessions.updateMessage(msg).pipe(Database.lockWithin("abort"))
           })
 
           const handle = yield* processor

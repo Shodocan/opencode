@@ -163,13 +163,16 @@ export class EffectSQLiteSession<TRelations extends AnyRelations> extends SQLite
                             ),
                           )
                         : this.executeTransactionStatement(connection, `release savepoint effect_sql_${id}`)
-                      : id === 0
-                        ? this.executeTransactionStatement(connection, "rollback")
-                        : this.executeTransactionStatement(connection, `rollback to savepoint effect_sql_${id}`).pipe(
-                            Effect.andThen(
-                              this.executeTransactionStatement(connection, `release savepoint effect_sql_${id}`),
-                            ),
-                          )
+                      : // SQLite has already rolled the transaction back after errors such as a full
+                        // disk; the rollback then fails and must not replace the error of the body.
+                        (id === 0
+                          ? this.executeTransactionStatement(connection, "rollback")
+                          : this.executeTransactionStatement(connection, `rollback to savepoint effect_sql_${id}`).pipe(
+                              Effect.andThen(
+                                this.executeTransactionStatement(connection, `release savepoint effect_sql_${id}`),
+                              ),
+                            )
+                        ).pipe(Effect.catch(() => Effect.void))
 
                     return finalize.pipe(Effect.flatMap(() => exit))
                   }),

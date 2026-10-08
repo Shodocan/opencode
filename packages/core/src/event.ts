@@ -234,133 +234,139 @@ export const layerWith = (options?: LayerOptions) =>
                 )
               }
               const list = projectors.get(event.type) ?? []
-              return yield* Effect.uninterruptible(
-                Effect.gen(function* () {
-                  const committed = yield* db
-                    .transaction(
-                      () =>
-                        Effect.gen(function* () {
-                          const row = yield* db
-                            .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
-                            .from(EventSequenceTable)
-                            .where(eq(EventSequenceTable.aggregate_id, aggregateID))
-                            .get()
-                            .pipe(Effect.orDie)
-                          const latest = row?.seq ?? -1
-                          const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<
-                            string,
-                            unknown
-                          >
-                          if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
-                            yield* Effect.die(
-                              new InvalidDurableEventError({
-                                type: event.type,
-                                message: `Replay owner mismatch for aggregate ${aggregateID}: expected ${row.ownerID}, got ${input.ownerID ?? "none"}`,
-                              }),
-                            )
-                          }
-                          if (input && input.seq <= latest) {
-                            const stored = yield* db
-                              .select()
-                              .from(EventTable)
-                              .where(and(eq(EventTable.aggregate_id, aggregateID), eq(EventTable.seq, input.seq)))
+              // Only BEGIN IMMEDIATE is retried for the write lock: `begun` marks the
+              // point after which seq and ids are assigned and nothing runs twice.
+              // Writes of one aggregate keep the order they were made in.
+              return yield* Database.awaitLock(
+                (begun) =>
+                  Effect.gen(function* () {
+                    const committed = yield* db
+                      .transaction(
+                        () =>
+                          Effect.gen(function* () {
+                            yield* begun
+                            const row = yield* db
+                              .select({ seq: EventSequenceTable.seq, ownerID: EventSequenceTable.owner_id })
+                              .from(EventSequenceTable)
+                              .where(eq(EventSequenceTable.aggregate_id, aggregateID))
                               .get()
                               .pipe(Effect.orDie)
-                            if (
-                              stored?.id === event.id &&
-                              stored.type === versionedType(definition.type, durable.version) &&
-                              isDeepStrictEqual(stored.data, encoded)
-                            ) {
-                              if (input.ownerID && row?.ownerID == null) {
-                                yield* db
-                                  .update(EventSequenceTable)
-                                  .set({ owner_id: input.ownerID })
-                                  .where(eq(EventSequenceTable.aggregate_id, aggregateID))
-                                  .run()
-                                  .pipe(Effect.orDie)
+                            const latest = row?.seq ?? -1
+                            const encoded = Schema.encodeUnknownSync(definition.data)(event.data) as Record<
+                              string,
+                              unknown
+                            >
+                            if (input?.strictOwner && row?.ownerID && row.ownerID !== input.ownerID) {
+                              yield* Effect.die(
+                                new InvalidDurableEventError({
+                                  type: event.type,
+                                  message: `Replay owner mismatch for aggregate ${aggregateID}: expected ${row.ownerID}, got ${input.ownerID ?? "none"}`,
+                                }),
+                              )
+                            }
+                            if (input && input.seq <= latest) {
+                              const stored = yield* db
+                                .select()
+                                .from(EventTable)
+                                .where(and(eq(EventTable.aggregate_id, aggregateID), eq(EventTable.seq, input.seq)))
+                                .get()
+                                .pipe(Effect.orDie)
+                              if (
+                                stored?.id === event.id &&
+                                stored.type === versionedType(definition.type, durable.version) &&
+                                isDeepStrictEqual(stored.data, encoded)
+                              ) {
+                                if (input.ownerID && row?.ownerID == null) {
+                                  yield* db
+                                    .update(EventSequenceTable)
+                                    .set({ owner_id: input.ownerID })
+                                    .where(eq(EventSequenceTable.aggregate_id, aggregateID))
+                                    .run()
+                                    .pipe(Effect.orDie)
+                                }
+                                return
                               }
+                              yield* Effect.die(
+                                new InvalidDurableEventError({
+                                  type: event.type,
+                                  message: `Replay diverged at aggregate ${aggregateID} sequence ${input.seq}`,
+                                }),
+                              )
+                            }
+                            if (input && row?.ownerID && row.ownerID !== input.ownerID) {
                               return
                             }
-                            yield* Effect.die(
-                              new InvalidDurableEventError({
-                                type: event.type,
-                                message: `Replay diverged at aggregate ${aggregateID} sequence ${input.seq}`,
-                              }),
-                            )
-                          }
-                          if (input && row?.ownerID && row.ownerID !== input.ownerID) {
-                            return
-                          }
-                          const seq = input?.seq ?? latest + 1
-                          if (input && seq !== latest + 1) {
-                            yield* Effect.die(
-                              new InvalidDurableEventError({
-                                type: event.type,
-                                message: `Sequence mismatch for aggregate ${aggregateID}: expected ${latest + 1}, got ${seq}`,
-                              }),
-                            )
-                          }
-                          const stored = yield* db
-                            .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
-                            .from(EventTable)
-                            .where(eq(EventTable.id, event.id))
-                            .get()
-                            .pipe(Effect.orDie)
-                          if (stored)
-                            yield* Effect.die(
-                              new InvalidDurableEventError({
-                                type: event.type,
-                                message: `Event ${event.id} already exists at aggregate ${stored.aggregateID} sequence ${stored.seq}`,
-                              }),
-                            )
-                          const committed = {
-                            ...event,
-                            durable: { aggregateID, seq, version: durable.version },
-                          } as Payload
-                          for (const projector of list) {
-                            yield* projector(committed)
-                          }
-                          if (commit) yield* commit(seq)
-                          yield* db
-                            .insert(EventSequenceTable)
-                            .values([{ aggregate_id: aggregateID, seq, owner_id: input?.ownerID }])
-                            .onConflictDoUpdate({
-                              target: EventSequenceTable.aggregate_id,
-                              set: {
-                                seq,
-                                ...(input?.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
-                              },
-                            })
-                            .run()
-                            .pipe(Effect.orDie)
-                          yield* db
-                            .insert(EventTable)
-                            .values([
-                              {
-                                id: event.id,
-                                aggregate_id: aggregateID,
-                                seq,
-                                type: versionedType(definition.type, durable.version),
-                                data: encoded,
-                              },
-                            ])
-                            .run()
-                            .pipe(Effect.orDie)
-                          return { aggregateID, seq }
-                        }),
-                      { behavior: "immediate" },
-                    )
-                    .pipe(Effect.orDie)
-                  if (committed) {
-                    yield* Effect.forEach(
-                      pubsub.durable.get(committed.aggregateID) ?? [],
-                      (wake) => PubSub.publish(wake, undefined),
-                      { discard: true },
-                    )
-                  }
-                  return committed
-                }),
-              )
+                            const seq = input?.seq ?? latest + 1
+                            if (input && seq !== latest + 1) {
+                              yield* Effect.die(
+                                new InvalidDurableEventError({
+                                  type: event.type,
+                                  message: `Sequence mismatch for aggregate ${aggregateID}: expected ${latest + 1}, got ${seq}`,
+                                }),
+                              )
+                            }
+                            const stored = yield* db
+                              .select({ aggregateID: EventTable.aggregate_id, seq: EventTable.seq })
+                              .from(EventTable)
+                              .where(eq(EventTable.id, event.id))
+                              .get()
+                              .pipe(Effect.orDie)
+                            if (stored)
+                              yield* Effect.die(
+                                new InvalidDurableEventError({
+                                  type: event.type,
+                                  message: `Event ${event.id} already exists at aggregate ${stored.aggregateID} sequence ${stored.seq}`,
+                                }),
+                              )
+                            const committed = {
+                              ...event,
+                              durable: { aggregateID, seq, version: durable.version },
+                            } as Payload
+                            for (const projector of list) {
+                              yield* projector(committed)
+                            }
+                            if (commit) yield* commit(seq)
+                            yield* db
+                              .insert(EventSequenceTable)
+                              .values([{ aggregate_id: aggregateID, seq, owner_id: input?.ownerID }])
+                              .onConflictDoUpdate({
+                                target: EventSequenceTable.aggregate_id,
+                                set: {
+                                  seq,
+                                  ...(input?.ownerID && row?.ownerID == null ? { owner_id: input.ownerID } : {}),
+                                },
+                              })
+                              .run()
+                              .pipe(Effect.orDie)
+                            yield* db
+                              .insert(EventTable)
+                              .values([
+                                {
+                                  id: event.id,
+                                  aggregate_id: aggregateID,
+                                  seq,
+                                  type: versionedType(definition.type, durable.version),
+                                  data: encoded,
+                                },
+                              ])
+                              .run()
+                              .pipe(Effect.orDie)
+                            return { aggregateID, seq }
+                          }),
+                        { behavior: "immediate" },
+                      )
+                      .pipe(Effect.orDie)
+                    if (committed) {
+                      yield* Effect.forEach(
+                        pubsub.durable.get(committed.aggregateID) ?? [],
+                        (wake) => PubSub.publish(wake, undefined),
+                        { discard: true },
+                      )
+                    }
+                    return committed
+                  }).pipe(Effect.uninterruptible),
+                aggregateID,
+              ).pipe(Effect.orDie)
             }
           }
         })
@@ -512,14 +518,15 @@ export const layerWith = (options?: LayerOptions) =>
       }
 
       function remove(aggregateID: string) {
-        return db
-          .transaction(() =>
+        return Database.immediate(
+          db,
+          () =>
             Effect.gen(function* () {
               yield* db.delete(EventSequenceTable).where(eq(EventSequenceTable.aggregate_id, aggregateID)).run()
               yield* db.delete(EventTable).where(eq(EventTable.aggregate_id, aggregateID)).run()
             }),
-          )
-          .pipe(Effect.orDie)
+          aggregateID,
+        ).pipe(Effect.orDie)
       }
 
       function claim(aggregateID: string, ownerID: string) {

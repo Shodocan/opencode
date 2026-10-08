@@ -84,7 +84,7 @@ const layer = Layer.effect(
 
     const remove = Effect.fn("AccountRepo.remove")((accountID: AccountID) =>
       query(
-        db.transaction((tx) =>
+        Database.immediate(db, (tx) =>
           Effect.gen(function* () {
             yield* tx
               .update(AccountStateTable)
@@ -123,7 +123,7 @@ const layer = Layer.effect(
 
     const persistAccount = Effect.fn("AccountRepo.persistAccount")((input) =>
       query(
-        db.transaction((tx) =>
+        Database.immediate(db, (tx) =>
           Effect.gen(function* () {
             const url = normalizeServerUrl(input.url)
 

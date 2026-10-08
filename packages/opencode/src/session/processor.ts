@@ -98,7 +98,7 @@ type Attempt = {
  */
 type Chain = { attempts: number; elapsed: number; start: number | undefined; resume: Resume | undefined }
 
-const NOT_EXECUTED = "Not executed: the provider stream was cut before this tool call started"
+export const NOT_EXECUTED = "Not executed: the provider stream was cut before this tool call started"
 
 // Bounded wait for tools of a failed attempt to record their result.
 const TOOL_SETTLE_GRACE = "2 seconds"
@@ -176,6 +176,12 @@ const layer = Layer.effect(
         reasoningMap: {},
       }
       let aborted = false
+      // Done once the turn has ended. Until then a tool that ran records its
+      // outcome, also from its own fiber after an abort. From then on the last
+      // writes of the turn say what the call looks like: an outcome still
+      // waiting for the database is given up and a later one is not written,
+      // so nothing lands after the turn has said how it ended.
+      const ended = yield* Deferred.make<void>()
       let attempt: Attempt | undefined
       let chain: Chain = { attempts: 0, elapsed: 0, start: undefined, resume: undefined }
 
@@ -232,6 +238,32 @@ const layer = Layer.effect(
         return part
       })
 
+      // A tool that ran: its outcome exists nowhere else, and losing it leaves the
+      // call looking interrupted, to be run again. Its write waits for the
+      // database far longer than any other, and the session says so meanwhile.
+      // False when the turn ended first and the outcome was not written.
+      const recordOutcome = <A, E, R>(write: Effect.Effect<A, E, R>) =>
+        Effect.gen(function* () {
+          if (yield* Deferred.isDone(ended)) return false
+          return yield* write.pipe(
+            Database.lockWithin("outcome", (notice) =>
+              status.set(
+                ctx.sessionID,
+                notice.next === undefined
+                  ? { type: "busy" }
+                  : {
+                      type: "retry",
+                      attempt: notice.attempts,
+                      message: "Database is busy: waiting to store a tool result",
+                      next: notice.next,
+                    },
+              ),
+            ),
+            Effect.as(true),
+            Effect.raceFirst(Deferred.await(ended).pipe(Effect.as(false))),
+          )
+        })
+
       const completeToolCall = Effect.fn("SessionProcessor.completeToolCall")(function* (
         toolCallID: string,
         output: {
@@ -243,25 +275,29 @@ const layer = Layer.effect(
       ) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return
-        yield* session.updatePart({
-          ...match.part,
-          state: {
-            status: "completed",
-            input: match.part.state.input,
-            output: output.output,
-            metadata: output.metadata,
-            title: output.title,
-            time: { start: match.part.state.time.start, end: Date.now() },
-            attachments: output.attachments,
-          },
-        })
+        const stored = yield* recordOutcome(
+          session.updatePart({
+            ...match.part,
+            state: {
+              status: "completed",
+              input: match.part.state.input,
+              output: output.output,
+              metadata: output.metadata,
+              title: output.title,
+              time: { start: match.part.state.time.start, end: Date.now() },
+              attachments: output.attachments,
+            },
+          }),
+        )
+        if (!stored) return
         yield* settleToolCall(toolCallID)
       })
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
         if (!match || match.part.state.status !== "running") return false
-        yield* session.updatePart({
+        const rejected = error instanceof PermissionV1.RejectedError || error instanceof Question.RejectedError
+        const failed = session.updatePart({
           ...match.part,
           state: {
             status: "error",
@@ -272,7 +308,12 @@ const layer = Layer.effect(
             time: { start: match.part.state.time.start, end: Date.now() },
           },
         })
-        if (error instanceof PermissionV1.RejectedError || error instanceof Question.RejectedError) {
+        // A call that was refused or never started has no outcome to keep.
+        const stored = yield* rejected || errorMessage(error) === NOT_EXECUTED
+          ? failed.pipe(Effect.as(true))
+          : recordOutcome(failed)
+        if (!stored) return false
+        if (rejected) {
           ctx.blocked = ctx.shouldBreak
         }
         yield* settleToolCall(toolCallID)
@@ -735,6 +776,8 @@ const layer = Layer.effect(
           (call) => Deferred.await(call.done).pipe(Effect.timeout("250 millis"), Effect.ignore),
           { concurrency: "unbounded" },
         )
+        // Calls still open are marked below: their outcomes no longer count.
+        yield* Deferred.succeed(ended, undefined)
 
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
           const match = yield* readToolCall(toolCallID)
@@ -1099,7 +1142,21 @@ const layer = Layer.effect(
               }),
             ),
             Effect.catch(halt),
-            Effect.ensuring(cleanup()),
+            // A turn that was aborted or failed ends quickly: its last writes
+            // share one short wait for the database instead of a full one each.
+            Effect.ensuring(
+              Effect.suspend(() =>
+                aborted || ctx.assistantMessage.error ? cleanup().pipe(Database.lockWithin("abort")) : cleanup(),
+              ).pipe(
+                // Also when those writes failed: the turn is over either way.
+                Effect.ensuring(
+                  Effect.suspend(() => {
+                    ctx.toolcalls = {}
+                    return Deferred.succeed(ended, undefined)
+                  }),
+                ),
+              ),
+            ),
           )
 
           if (ctx.needsCompaction) return "compact"

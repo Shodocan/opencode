@@ -1,4 +1,8 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test"
+import { Database as BunDatabase } from "bun:sqlite"
+import { rm } from "fs/promises"
+import os from "os"
+import path from "path"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
@@ -249,6 +253,35 @@ const compactionEnv = AppNodeBuilder.build(
   LayerNode.group([SessionNs.node, SessionProjector.node, Database.node, EventV2Bridge.node, CrossSpawnSpawner.node]),
 )
 const itCompaction = testEffect(compactionEnv)
+
+// Compaction on a file database, with a summary request that never answers: a
+// second connection to the file plays another OpenCode process holding its lock.
+const lockFile = path.join(os.tmpdir(), `opencode-compaction-lock-${process.pid}-${Date.now()}.sqlite`)
+const summaryStarted: Array<() => void> = []
+afterAll(async () => {
+  await Promise.all(["", "-wal", "-shm"].map((suffix) => rm(lockFile + suffix, { force: true })))
+})
+const lockedCompaction = testEffect(
+  LayerNode.compile(compactionTestNode, [
+    [Provider.node, defaultProvider.layer],
+    [RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })],
+    [SessionSummary.node, summary],
+    [Database.node, Database.layerFromPath(lockFile)],
+    [
+      SessionProcessorModule.SessionProcessor.node,
+      Layer.succeed(
+        SessionProcessorModule.SessionProcessor.Service,
+        SessionProcessorModule.SessionProcessor.Service.of({
+          create: (input) =>
+            Effect.succeed({
+              ...fake(input, "continue"),
+              process: () => Effect.sync(() => summaryStarted.shift()?.()).pipe(Effect.andThen(Effect.never)),
+            }),
+        }),
+      ),
+    ],
+  ]),
+)
 
 type CompactionProcessOptions = {
   result?: "continue" | "compact"
@@ -1383,6 +1416,58 @@ describe("session.compaction.process", () => {
         }).pipe(withCompaction({ plugin: plugin(ready) }))
       }),
     { git: true },
+  )
+
+  lockedCompaction.instance(
+    "an aborted compaction under a held database lock ends within the abort wait",
+    () =>
+      Effect.gen(function* () {
+        const ready = Promise.withResolvers<void>()
+        summaryStarted.push(ready.resolve)
+        yield* Effect.addFinalizer(() => Effect.sync(() => void (summaryStarted.length = 0)))
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        const msg = yield* createUserMessage(session.id, "hello")
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const other = yield* Effect.acquireRelease(
+          Effect.sync(() => new BunDatabase(lockFile)),
+          (db) => Effect.sync(() => db.close()),
+        )
+
+        // Any write outside a stopping path would wait four seconds here.
+        const fiber = yield* SessionCompaction.use
+          .process({ parentID: msg.id, messages: msgs, sessionID: session.id, auto: false })
+          .pipe(
+            Effect.provideService(Database.LockRetry, {
+              budget: 4_000,
+              outcome: 4_000,
+              abort: 150,
+              busy: 5,
+              base: 2,
+              cap: 10,
+            }),
+            Effect.forkChild,
+          )
+        yield* Effect.promise(() => ready.promise).pipe(Effect.timeout("5 seconds"))
+        other.run("BEGIN IMMEDIATE")
+        const started = Date.now()
+        yield* Fiber.interrupt(fiber)
+        const elapsed = Date.now() - started
+        other.run("COMMIT")
+
+        // Removing the summary message waited for the database, and not for long.
+        expect(elapsed).toBeGreaterThanOrEqual(140)
+        expect(elapsed).toBeLessThan(2_000)
+      }).pipe(
+        // No wait here is longer than 4s: 15s means one that did not end.
+        Effect.timeoutOrElse({
+          duration: 15_000,
+          orElse: () =>
+            Effect.die(new Error("not finished after 15s: something is still waiting for the database lock")),
+        }),
+      ),
+    { git: true },
+    { timeout: 20_000 },
   )
 
   itCompaction.instance(
