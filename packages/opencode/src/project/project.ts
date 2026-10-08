@@ -151,45 +151,37 @@ const layer = Layer.effect(
       if (oldID === ProjectV2.ID.global) return
       if (oldID === newID) return
 
-      yield* db
-        .transaction(
-          (d) =>
-            Effect.gen(function* () {
-              const oldProject = yield* d.select().from(ProjectTable).where(eq(ProjectTable.id, oldID)).get()
-              const newProject = yield* d.select().from(ProjectTable).where(eq(ProjectTable.id, newID)).get()
-              if (oldProject && !newProject) {
-                yield* d
-                  .insert(ProjectTable)
-                  .values({
-                    ...oldProject,
-                    id: newID,
-                    time_updated: Date.now(),
-                  })
-                  .run()
-              }
+      yield* Database.immediate(db, (d) =>
+        Effect.gen(function* () {
+          const oldProject = yield* d.select().from(ProjectTable).where(eq(ProjectTable.id, oldID)).get()
+          const newProject = yield* d.select().from(ProjectTable).where(eq(ProjectTable.id, newID)).get()
+          if (oldProject && !newProject) {
+            yield* d
+              .insert(ProjectTable)
+              .values({
+                ...oldProject,
+                id: newID,
+                time_updated: Date.now(),
+              })
+              .run()
+          }
 
-              // Project directories may be shared across distinct
-              // checkouts which have diverged. Clear the directory
-              // list and rely on it being re-populated to ensure
-              // accuracy
-              yield* d.delete(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, oldID)).run()
+          // Project directories may be shared across distinct
+          // checkouts which have diverged. Clear the directory
+          // list and rely on it being re-populated to ensure
+          // accuracy
+          yield* d.delete(ProjectDirectoryTable).where(eq(ProjectDirectoryTable.project_id, oldID)).run()
 
-              yield* d
-                .update(SessionTable)
-                .set({ project_id: newID, time_updated: sql`${SessionTable.time_updated}` })
-                .where(eq(SessionTable.project_id, oldID))
-                .run()
-              yield* d
-                .update(WorkspaceTable)
-                .set({ project_id: newID })
-                .where(eq(WorkspaceTable.project_id, oldID))
-                .run()
+          yield* d
+            .update(SessionTable)
+            .set({ project_id: newID, time_updated: sql`${SessionTable.time_updated}` })
+            .where(eq(SessionTable.project_id, oldID))
+            .run()
+          yield* d.update(WorkspaceTable).set({ project_id: newID }).where(eq(WorkspaceTable.project_id, oldID)).run()
 
-              if (oldProject) yield* d.delete(ProjectTable).where(eq(ProjectTable.id, oldID)).run()
-            }),
-          { behavior: "immediate" },
-        )
-        .pipe(Effect.orDie)
+          if (oldProject) yield* d.delete(ProjectTable).where(eq(ProjectTable.id, oldID)).run()
+        }),
+      ).pipe(Effect.orDie)
     })
 
     const saveProjectDirectory = Effect.fn("Project.saveProjectDirectory")(function* (input: {
@@ -254,48 +246,52 @@ const layer = Layer.effect(
         { concurrency: "unbounded" },
       ).pipe(Effect.map((arr) => arr.filter((x): x is string => x !== undefined)))
 
-      yield* db
-        .insert(ProjectTable)
-        .values({
-          id: result.id,
-          worktree: AbsolutePath.make(result.worktree),
-          vcs: result.vcs ?? null,
-          name: result.name,
-          icon_url: result.icon?.url,
-          icon_url_override: result.icon?.override,
-          icon_color: result.icon?.color,
-          time_created: result.time.created,
-          time_updated: result.time.updated,
-          time_initialized: result.time.initialized,
-          sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
-          commands: result.commands,
-        })
-        .onConflictDoUpdate({
-          target: ProjectTable.id,
-          set: {
-            worktree: AbsolutePath.make(result.worktree),
-            vcs: result.vcs ?? null,
-            name: result.name,
-            icon_url: result.icon?.url,
-            icon_url_override: result.icon?.override,
-            icon_color: result.icon?.color,
-            time_updated: result.time.updated,
-            time_initialized: result.time.initialized,
-            sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
-            commands: result.commands,
-          },
-        })
-        .run()
-        .pipe(Effect.orDie)
+      // Every process writes this when it starts, so a burst of starts meets
+      // here: the write waits for the database lock like a session write does.
+      yield* Database.immediate(db, (tx) =>
+        Effect.gen(function* () {
+          yield* tx
+            .insert(ProjectTable)
+            .values({
+              id: result.id,
+              worktree: AbsolutePath.make(result.worktree),
+              vcs: result.vcs ?? null,
+              name: result.name,
+              icon_url: result.icon?.url,
+              icon_url_override: result.icon?.override,
+              icon_color: result.icon?.color,
+              time_created: result.time.created,
+              time_updated: result.time.updated,
+              time_initialized: result.time.initialized,
+              sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
+              commands: result.commands,
+            })
+            .onConflictDoUpdate({
+              target: ProjectTable.id,
+              set: {
+                worktree: AbsolutePath.make(result.worktree),
+                vcs: result.vcs ?? null,
+                name: result.name,
+                icon_url: result.icon?.url,
+                icon_url_override: result.icon?.override,
+                icon_color: result.icon?.color,
+                time_updated: result.time.updated,
+                time_initialized: result.time.initialized,
+                sandboxes: result.sandboxes.map((sandbox) => AbsolutePath.make(sandbox)),
+                commands: result.commands,
+              },
+            })
+            .run()
 
-      if (projectID !== ProjectV2.ID.global) {
-        yield* db
-          .update(SessionTable)
-          .set({ project_id: projectID })
-          .where(and(eq(SessionTable.project_id, ProjectV2.ID.global), eq(SessionTable.directory, data.directory)))
-          .run()
-          .pipe(Effect.orDie)
-      }
+          if (projectID !== ProjectV2.ID.global) {
+            yield* tx
+              .update(SessionTable)
+              .set({ project_id: projectID })
+              .where(and(eq(SessionTable.project_id, ProjectV2.ID.global), eq(SessionTable.directory, data.directory)))
+              .run()
+          }
+        }),
+      ).pipe(Effect.orDie)
 
       yield* saveProjectDirectory({
         projectID,
