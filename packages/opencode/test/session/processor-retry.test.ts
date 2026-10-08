@@ -647,17 +647,19 @@ itServer.live("without a retry config a cut still aborts a running tool and fail
   ),
 )
 
-itServer.live("a dropped connection while a started tool runs waits for it and continues without replay", () =>
+// The body ends early as a clean chunked end: no error payload and no finish
+// event. The transport reports no failure, so this is not a cut and nothing is
+// settled or resumed; the step finishes with reason `unknown`.
+itServer.live("a response body that ends without a finish event while a tool runs finishes the step normally", () =>
   provideTmpdirServer(
     ({ dir, llm }) =>
       Effect.gen(function* () {
         let executions = 0
-        const cutSent = sleep(100)
-        // An upstream restart: the socket closes mid-body, no error payload.
+        const ended = sleep(100)
         yield* llm.push(
           raw({
             head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')],
-            wait: cutSent,
+            wait: ended,
             error: new Error("upstream restarted"),
           }),
         )
@@ -665,9 +667,9 @@ itServer.live("a dropped connection while a started tool runs waits for it and c
         const result = yield* run(dir, {
           lookup: lookup(async (input, options) => {
             executions++
-            await cutSent
+            await ended
             await sleep(400)
-            if (options.abortSignal?.aborted) throw new Error("aborted by the cut")
+            if (options.abortSignal?.aborted) throw new Error("aborted by the early end")
             return { title: "lookup", output: `result:${input.query}`, metadata: {} }
           }),
         })
@@ -676,6 +678,51 @@ itServer.live("a dropped connection while a started tool runs waits for it and c
         expect(result.message.error).toBeUndefined()
         expect(result.value).toBe("continue")
         expect(toolParts(result.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+        expect(result.message.finish).toBe("unknown")
+        expect(result.parts.filter((part) => part.type === "step-finish")).toHaveLength(1)
+        expect(result.resume).toBeUndefined()
+      }),
+    { config: (url) => cfg({ url, retry }) },
+  ),
+)
+
+// A transport abort, as the fleet router delivers an upstream cut: the socket
+// is destroyed mid-body after the complete tool call, with no finish event.
+itServer.live("a socket destroyed while a started tool runs waits for it and resumes without replay", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        let abortedAtEnd: boolean | undefined
+        yield* llm.push(
+          raw({
+            head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')],
+            // Measured from the request, so the call is delivered first.
+            wait: lazy(() => sleep(100)),
+            reset: true,
+          }),
+        )
+        yield* llm.text("never")
+        const result = yield* run(dir, {
+          lookup: lookup(async (input, options) => {
+            executions++
+            // Still running ~500 ms after the socket died.
+            await sleep(600)
+            abortedAtEnd = options.abortSignal?.aborted
+            return { title: "lookup", output: `result:${input.query}`, metadata: {} }
+          }),
+        })
+        // A replay or a detached second start would show up here.
+        yield* Effect.sleep("200 millis")
+        expect(executions).toBe(1)
+        expect(abortedAtEnd).toBe(false)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.message.error).toBeUndefined()
+        expect(result.value).toBe("continue")
+        expect(toolParts(result.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+        expect(result.message.finish).toBe("tool-calls")
+        expect(result.parts.filter((part) => part.type === "step-finish")).toHaveLength(0)
+        expect(result.resume?.attempts).toBe(1)
       }),
     { config: (url) => cfg({ url, retry }) },
   ),
@@ -772,11 +819,12 @@ itScripted.live("time spent waiting for a started tool does not consume the retr
   ),
 )
 
+// Real time, no injected clock: the settle step of the continuation must not
+// measure from the first cut either. The first tool outlives a 200 ms budget.
 itScripted.live("a second cut after a tool outlived the retry budget still resumes", () =>
   provideTmpdirInstance(
     (dir) =>
       Effect.gen(function* () {
-        const time = yield* jumpClock
         const ran: string[] = []
         reset((call, input) => cutWhileRunning(input, `call_${call}`, `q${call}`))
         const tools = {
@@ -784,12 +832,13 @@ itScripted.live("a second cut after a tool outlived the retry budget still resum
             ran.push(input.query)
             if (input.query !== "q1") return found(input.query)
             await closed(1)
-            time.jump(31 * 60_000)
+            await sleep(600)
             return found(input.query)
           }),
         }
-        const first = yield* run(dir, tools).pipe(Effect.provideService(Clock.Clock, time.clock))
-        const second = yield* run(dir, tools, first.resume).pipe(Effect.provideService(Clock.Clock, time.clock))
+        const first = yield* run(dir, tools)
+        expect(first.value).toBe("continue")
+        const second = yield* run(dir, tools, first.resume)
         expect(calls).toBe(2)
         expect(ran).toStrictEqual(["q1", "q2"])
         expect(second.value).toBe("continue")
@@ -797,7 +846,7 @@ itScripted.live("a second cut after a tool outlived the retry budget still resum
         expect(toolParts(second.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:q2" })
         expect(second.resume?.attempts).toBe(2)
       }),
-    { config: cfg({ retry: fleet }) },
+    { config: cfg({ retry: { ...retry, maxAttempts: 200, maxElapsedMs: 200 } }) },
   ),
 )
 

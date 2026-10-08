@@ -2776,6 +2776,19 @@ const cutAfterBash = (id: string, command: string, dir: string, wait: () => Prom
     tail: [streamCut],
   })
 
+// The fleet's real cut: the router aborts the client connection, so the
+// socket is destroyed mid-body with no error payload and no finish event.
+// `args` is the bash call's arguments as streamed so far.
+const dropAfterBash = (id: string, args: string, wait: () => Promise<unknown>) =>
+  raw({
+    head: [
+      chunk({ role: "assistant", content: `running ${id}` }),
+      chunk({ tool_calls: [{ index: 0, id, type: "function", function: { name: "bash", arguments: args } }] }),
+    ],
+    wait: lazy(wait),
+    reset: true,
+  })
+
 const resumeSession = Effect.fn("test.resumeSession")(function* () {
   const prompt = yield* SessionPrompt.Service
   const sessions = yield* Session.Service
@@ -2909,3 +2922,74 @@ unix(
   30_000,
 )
 
+unix(
+  "a socket destroyed while a tool call is running waits for it, resumes, and it runs once",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      const command = `sleep 1.5; printf x >> ${JSON.stringify(marker)}`
+      // The complete call is delivered, then the socket dies ~1.4s before the
+      // command finishes.
+      yield* llm.push(
+        dropAfterBash("call_1", JSON.stringify({ command, workdir: path.resolve(dir) }), () => delay(100)),
+      )
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8"))).toBe("x")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual(["call_1"])
+      expect(toolResults(inputs[1])).toStrictEqual(["call_1"])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const tools = history.flatMap((msg) => msg.parts).filter((part) => part.type === "tool")
+      expect(tools.map((part) => [part.callID, part.state.status])).toStrictEqual([["call_1", "completed"]])
+      // The step was cut and resumed, not ended: no finish event ever arrived.
+      const cut = history.find((msg) => msg.parts.some((part) => part.type === "tool"))
+      expect(cut?.info.role === "assistant" && cut.info.finish).toBe("tool-calls")
+      expect(cut?.parts.some((part) => part.type === "step-finish")).toBe(false)
+      expect(cut?.parts.find((part) => part.type === "text")).toMatchObject({
+        text: "running call_1",
+        metadata: { incomplete: true },
+      })
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "a socket destroyed while tool call arguments are streaming runs nothing and the turn recovers",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      const args = JSON.stringify({ command: `printf x >> ${JSON.stringify(marker)}`, workdir: path.resolve(dir) })
+      // Only the first half of the arguments arrives before the socket dies.
+      yield* llm.push(dropAfterBash("call_1", args.slice(0, Math.floor(args.length / 2)), () => delay(100)))
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      // A late start of the cut call would show up here.
+      yield* Effect.promise(() => delay(300))
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8").catch(() => "never ran"))).toBe("never ran")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual([])
+      expect(toolResults(inputs[1])).toStrictEqual([])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const assistants = history.filter((msg) => msg.info.role === "assistant")
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.parts.filter((part) => part.type === "tool")).toHaveLength(0)
+      expect(assistants[0]?.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))).toStrictEqual(["done"])
+    }),
+  { git: true },
+  30_000,
+)
