@@ -257,8 +257,8 @@ export function policy(opts: {
   parse: (error: unknown) => Err
   set: (input: { attempt: number; message: string; action?: Retryable["action"]; next: number }) => Effect.Effect<void>
   config?: Config
-  /** Failed attempts and first-failure time already spent by this turn. */
-  carried?: { attempts: number; since: number }
+  /** Failed attempts and retry time this turn already spent in earlier steps. */
+  carried?: { attempts: number; elapsed: number }
 }) {
   return Schedule.fromStepWithMetadata(
     Effect.map(RetryLimit, (limit) => (meta: Schedule.InputMetadata<unknown>) => {
@@ -267,7 +267,7 @@ export function policy(opts: {
         error,
         provider: opts.provider,
         attempt: (opts.carried?.attempts ?? 0) + meta.attempt,
-        elapsed: opts.carried ? meta.now - opts.carried.since : meta.elapsed,
+        elapsed: (opts.carried?.elapsed ?? 0) + meta.elapsed,
         limit,
         config: opts.config,
       })

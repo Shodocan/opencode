@@ -1390,10 +1390,14 @@ const layer = Layer.effect(
         // the threshold in between (see the "compact" branch below).
         let softCompactions = 0
         // Provider retry budget spent by safe resumes after stream cuts in
-        // this turn; a step that does not resume after a cut resets it.
+        // this turn. Only the step right after a resume inherits it: every
+        // iteration takes it, so a subtask, a compaction or a step that ends
+        // without a resume leaves nothing behind for a later step.
         let resume: SessionProcessor.Resume | undefined
 
         while (true) {
+          const carried = resume
+          resume = undefined
           yield* status.set(sessionID, { type: "busy" })
           yield* Effect.logInfo("loop", { "session.id": sessionID, step })
 
@@ -1563,7 +1567,7 @@ const layer = Layer.effect(
               assistantMessage: msg,
               sessionID,
               model,
-              resume,
+              resume: carried,
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
