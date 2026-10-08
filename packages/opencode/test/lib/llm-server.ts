@@ -430,12 +430,19 @@ function send(item: Sse) {
   return HttpServerResponse.stream(Stream.concat(body, end), { contentType: "text/event-stream" })
 }
 
+// Destroys the socket mid-body: no finish event, no clean chunked end. With
+// `wait`, the head reaches the client first and the socket is destroyed once
+// `wait` resolves, as a proxy does when it aborts on an upstream cut.
 const reset = Effect.fn("TestLLMServer.reset")(function* (item: Sse) {
   const req = yield* HttpServerRequest.HttpServerRequest
   const res = NodeHttpServerRequest.toServerResponse(req)
+  const wait = item.wait
   yield* Effect.sync(() => {
     res.writeHead(200, { "content-type": "text/event-stream" })
     for (const part of item.head) res.write(line(part))
+  })
+  if (wait) yield* Effect.promise(() => Promise.resolve(wait))
+  yield* Effect.sync(() => {
     for (const part of item.tail) res.write(line(part))
     res.destroy(new Error("connection reset"))
   })

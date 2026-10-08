@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { Cause, Deferred, Duration, Effect, Exit, Fiber, Layer } from "effect"
+import { readFile } from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
 import { NamedError } from "@opencode-ai/core/util/error"
@@ -52,7 +53,8 @@ import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "../../src/format"
 import { TestInstance } from "../fixture/fixture"
 import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
-import { reply, TestLLMServer } from "../lib/llm-server"
+import { raw, reply, TestLLMServer } from "../lib/llm-server"
+import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -2703,5 +2705,291 @@ noLLMServer.instance(
         }
       }
     }),
+  30_000,
+)
+
+// Safe resume after a provider stream cut (V4-182 follow-up). A LiteLLM
+// mid-stream cut after HTTP 200, as fleet upstream restarts deliver it.
+const streamCut = {
+  error: {
+    message: "litellm.APIConnectionError: TransferEncodingError: Not enough data to satisfy transfer length header.",
+    type: null,
+    param: null,
+    code: "500",
+  },
+}
+const resumeRetry = { maxAttempts: 4, initialDelayMs: 1, maxDelayMs: 5 }
+
+function resumeCfg(retry?: Record<string, unknown>) {
+  return (url: string) => {
+    const base = providerCfg(url)
+    return {
+      ...base,
+      provider: {
+        ...base.provider,
+        test: { ...base.provider.test, options: { ...base.provider.test.options, ...(retry ? { retry } : {}) } },
+      },
+    }
+  }
+}
+
+const chunk = (delta: Record<string, unknown>) => ({
+  id: "chatcmpl-test",
+  object: "chat.completion.chunk",
+  choices: [{ index: 0, delta }],
+})
+
+// Resolves only once the server starts the response body, so the delay is
+// measured from the request rather than from test setup.
+const lazy = (wait: () => Promise<unknown>): PromiseLike<unknown> => ({
+  then: (done, fail) => wait().then(done, fail),
+})
+const delay = (ms: number) => new Promise((done) => setTimeout(done, ms))
+// Wait until the side-effect file exists, then a little more so the tool
+// result reaches the processor before the cut.
+const written = (file: string, content?: string) => async () => {
+  for (let i = 0; i < 250; i++) {
+    const text = await readFile(file, "utf8").catch(() => undefined)
+    if (text !== undefined && (content === undefined || text === content)) break
+    await delay(20)
+  }
+  await delay(300)
+}
+
+// One streamed bash call whose stream is cut once `wait` resolves.
+const cutAfterBash = (id: string, command: string, dir: string, wait: () => Promise<unknown>) =>
+  raw({
+    head: [
+      chunk({ role: "assistant", content: `running ${id}` }),
+      chunk({
+        tool_calls: [
+          {
+            index: 0,
+            id,
+            type: "function",
+            function: { name: "bash", arguments: JSON.stringify({ command, workdir: path.resolve(dir) }) },
+          },
+        ],
+      }),
+    ],
+    wait: lazy(wait),
+    tail: [streamCut],
+  })
+
+// The fleet's real cut: the router aborts the client connection, so the
+// socket is destroyed mid-body with no error payload and no finish event.
+// `args` is the bash call's arguments as streamed so far.
+const dropAfterBash = (id: string, args: string, wait: () => Promise<unknown>) =>
+  raw({
+    head: [
+      chunk({ role: "assistant", content: `running ${id}` }),
+      chunk({ tool_calls: [{ index: 0, id, type: "function", function: { name: "bash", arguments: args } }] }),
+    ],
+    wait: lazy(wait),
+    reset: true,
+  })
+
+const resumeSession = Effect.fn("test.resumeSession")(function* () {
+  const prompt = yield* SessionPrompt.Service
+  const sessions = yield* Session.Service
+  const chat = yield* sessions.create({
+    title: "Safe resume",
+    permission: [{ permission: "*", pattern: "*", action: "allow" }],
+  })
+  yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: "run it" }] })
+  return { prompt, chat }
+})
+
+// Every tool message the continuation request carried, by call id.
+const toolResults = (body: Record<string, unknown> | undefined) =>
+  (Array.isArray(body?.messages) ? body.messages : []).flatMap((message) =>
+    isRecord(message) && message.role === "tool" && typeof message.tool_call_id === "string"
+      ? [message.tool_call_id]
+      : [],
+  )
+const toolCallIDs = (body: Record<string, unknown> | undefined) =>
+  (Array.isArray(body?.messages) ? body.messages : []).flatMap((message) =>
+    isRecord(message) && Array.isArray(message.tool_calls)
+      ? message.tool_calls.flatMap((call) => (isRecord(call) && typeof call.id === "string" ? [call.id] : []))
+      : [],
+  )
+
+unix(
+  "a stream cut after a completed tool call resumes from history and the tool runs once",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      yield* llm.push(cutAfterBash("call_1", `printf x >> ${JSON.stringify(marker)}`, dir, written(marker)))
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8"))).toBe("x")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual(["call_1"])
+      expect(toolResults(inputs[1])).toStrictEqual(["call_1"])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const cut = history.find((msg) => msg.parts.some((part) => part.type === "tool"))
+      expect(cut?.parts.find((part) => part.type === "tool")?.state).toMatchObject({ status: "completed" })
+      expect(cut?.parts.find((part) => part.type === "text")).toMatchObject({
+        text: "running call_1",
+        metadata: { incomplete: true },
+      })
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "a stream cut while a tool call is still running waits for it, resumes, and it runs once",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      // The cut lands ~1.4s before the command finishes.
+      yield* llm.push(cutAfterBash("call_1", `sleep 1.5; printf x >> ${JSON.stringify(marker)}`, dir, () => delay(100)))
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8"))).toBe("x")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual(["call_1"])
+      expect(toolResults(inputs[1])).toStrictEqual(["call_1"])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const tool = history.flatMap((msg) => msg.parts).find((part) => part.type === "tool")
+      expect(tool?.state.status).toBe("completed")
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "a stream cut with no tool calls keeps the replay retry path",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      yield* llm.push(raw({ head: [chunk({ role: "assistant", content: "partial" })], tail: [streamCut] }))
+      yield* llm.text("whole answer")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const assistants = history.filter((msg) => msg.info.role === "assistant")
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))).toStrictEqual([
+        "whole answer",
+      ])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "an exhausted retry budget stops a repeated cut with the same error as before",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg({ ...resumeRetry, maxAttempts: 2 }))
+      const marker = path.join(dir, "ran.txt")
+      yield* llm.push(cutAfterBash("call_1", `printf a >> ${JSON.stringify(marker)}`, dir, written(marker)))
+      yield* llm.push(cutAfterBash("call_2", `printf b >> ${JSON.stringify(marker)}`, dir, written(marker, "ab")))
+      yield* llm.text("never")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8"))).toBe("ab")
+      const error = result.info.role === "assistant" ? result.info.error : undefined
+      expect(SessionV1.APIError.isInstance(error)).toBe(true)
+      if (!SessionV1.APIError.isInstance(error)) return
+      expect(error.data.isRetryable).toBe(false)
+      expect(error.data.metadata?.code).toBe("ProviderRetryUnsafeError")
+      expect(error.data.metadata?.tools).toBe("bash")
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "a socket destroyed while a tool call is running waits for it, resumes, and it runs once",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      const command = `sleep 1.5; printf x >> ${JSON.stringify(marker)}`
+      // The complete call is delivered, then the socket dies ~1.4s before the
+      // command finishes.
+      yield* llm.push(
+        dropAfterBash("call_1", JSON.stringify({ command, workdir: path.resolve(dir) }), () => delay(100)),
+      )
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8"))).toBe("x")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual(["call_1"])
+      expect(toolResults(inputs[1])).toStrictEqual(["call_1"])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      expect(result.parts.some((part) => part.type === "text" && part.text === "done")).toBe(true)
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const tools = history.flatMap((msg) => msg.parts).filter((part) => part.type === "tool")
+      expect(tools.map((part) => [part.callID, part.state.status])).toStrictEqual([["call_1", "completed"]])
+      // The step was cut and resumed, not ended: no finish event ever arrived.
+      const cut = history.find((msg) => msg.parts.some((part) => part.type === "tool"))
+      expect(cut?.info.role === "assistant" && cut.info.finish).toBe("tool-calls")
+      expect(cut?.parts.some((part) => part.type === "step-finish")).toBe(false)
+      expect(cut?.parts.find((part) => part.type === "text")).toMatchObject({
+        text: "running call_1",
+        metadata: { incomplete: true },
+      })
+    }),
+  { git: true },
+  30_000,
+)
+
+unix(
+  "a socket destroyed while tool call arguments are streaming runs nothing and the turn recovers",
+  () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(resumeCfg(resumeRetry))
+      const marker = path.join(dir, "ran.txt")
+      const args = JSON.stringify({ command: `printf x >> ${JSON.stringify(marker)}`, workdir: path.resolve(dir) })
+      // Only the first half of the arguments arrives before the socket dies.
+      yield* llm.push(dropAfterBash("call_1", args.slice(0, Math.floor(args.length / 2)), () => delay(100)))
+      yield* llm.text("done")
+      const { prompt, chat } = yield* resumeSession()
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      // A late start of the cut call would show up here.
+      yield* Effect.promise(() => delay(300))
+
+      expect(yield* llm.calls).toBe(2)
+      expect(yield* Effect.promise(() => readFile(marker, "utf8").catch(() => "never ran"))).toBe("never ran")
+      const inputs = yield* llm.inputs
+      expect(toolCallIDs(inputs[1])).toStrictEqual([])
+      expect(toolResults(inputs[1])).toStrictEqual([])
+      expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+      const history = yield* MessageV2.filterCompactedEffect(chat.id)
+      const assistants = history.filter((msg) => msg.info.role === "assistant")
+      expect(assistants).toHaveLength(1)
+      expect(assistants[0]?.parts.filter((part) => part.type === "tool")).toHaveLength(0)
+      expect(assistants[0]?.parts.flatMap((part) => (part.type === "text" ? [part.text] : []))).toStrictEqual(["done"])
+    }),
+  { git: true },
   30_000,
 )

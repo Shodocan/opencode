@@ -124,6 +124,14 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
   })
 }
 
+// A provider stream cut leaves its partial text or reasoning marked
+// `incomplete`; the marker is internal and never reaches a provider.
+function partMeta(metadata: Record<string, any> | undefined) {
+  if (!metadata || !("incomplete" in metadata)) return metadata
+  const { incomplete: _, ...rest } = metadata
+  return rest
+}
+
 function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
   const { providerExecuted: _, ...rest } = metadata
@@ -282,7 +290,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           assistantMessage.parts.push({
             type: "text",
             text,
-            ...(differentModel ? {} : { providerMetadata: part.metadata }),
+            ...(differentModel ? {} : { providerMetadata: partMeta(part.metadata) }),
           })
         }
         if (part.type === "step-start")
@@ -373,7 +381,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           assistantMessage.parts.push({
             type: "reasoning",
             text: part.text,
-            providerMetadata: part.metadata,
+            providerMetadata: partMeta(part.metadata),
           })
         }
       }
