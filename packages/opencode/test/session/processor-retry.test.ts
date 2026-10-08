@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Effect, Layer, Stream } from "effect"
+import { Clock, Effect, Fiber, Layer, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -79,20 +79,22 @@ const cut = {
 }
 
 // Scripted fake transport: one stream per attempt, with open/close journal.
+// The script receives the stream input, so it can invoke a tracked tool body
+// the way a transport does.
 const journal: string[] = []
-let script: (call: number) => Stream.Stream<LLMEvent, unknown> = () => Stream.empty
+let script: (call: number, input: LLM.StreamInput) => Stream.Stream<LLMEvent, unknown> = () => Stream.empty
 let calls = 0
 const scriptedLLM = Layer.succeed(
   LLM.Service,
   LLM.Service.of({
-    stream: () => {
+    stream: (input) => {
       const call = ++calls
       return Stream.scoped(
         Stream.unwrap(
           Effect.acquireRelease(
             Effect.sync(() => journal.push(`open:${call}`)),
             () => Effect.sync(() => journal.push(`close:${call}`)),
-          ).pipe(Effect.map(() => script(call))),
+          ).pipe(Effect.map(() => script(call, input))),
         ),
       )
     },
@@ -134,7 +136,11 @@ const itServer = testEffect(
   ),
 )
 
-const run = Effect.fn("test.run")(function* (dir: string, tools: Record<string, any> = {}) {
+const start = Effect.fn("test.start")(function* (
+  dir: string,
+  tools: Record<string, any> = {},
+  resume?: SessionProcessor.Resume,
+) {
   const processors = yield* SessionProcessor.Service
   const session = yield* Session.Service
   const provider = yield* Provider.Service
@@ -164,8 +170,13 @@ const run = Effect.fn("test.run")(function* (dir: string, tools: Record<string, 
   }
   yield* session.updateMessage(msg)
   const mdl = yield* provider.getModel(ref.providerID, ref.modelID)
-  const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id as SessionID, model: mdl })
-  const value = yield* handle.process({
+  const handle = yield* processors.create({
+    assistantMessage: msg,
+    sessionID: chat.id as SessionID,
+    model: mdl,
+    resume,
+  })
+  const process = handle.process({
     user: {
       id: parent.id,
       sessionID: chat.id,
@@ -181,8 +192,17 @@ const run = Effect.fn("test.run")(function* (dir: string, tools: Record<string, 
     messages: [{ role: "user", content: "go" }],
     tools,
   })
-  const parts = yield* MessageV2.parts(msg.id)
-  return { value, parts, message: handle.message }
+  return { handle, process, parts: MessageV2.parts(msg.id) }
+})
+
+const run = Effect.fn("test.run")(function* (
+  dir: string,
+  tools: Record<string, any> = {},
+  resume?: SessionProcessor.Resume,
+) {
+  const step = yield* start(dir, tools, resume)
+  const value = yield* step.process
+  return { value, parts: yield* step.parts, message: step.handle.message, resume: step.handle.resume }
 })
 
 const texts = (parts: SessionV1.Part[]) =>
@@ -442,6 +462,11 @@ const cutLine = { error: { message: cut.message, type: null, param: null, code: 
 const lookupCall = (index: number, id: string, args: string) =>
   line({ tool_calls: [{ index, id, type: "function", function: { name: "lookup", arguments: args } }] })
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
+// Resolves only once the server starts the response body, so the delay is
+// measured from the request rather than from test setup.
+const lazy = (wait: () => Promise<unknown>): PromiseLike<unknown> => ({
+  then: (done, fail) => wait().then(done, fail),
+})
 // One complete lookup call, then the cut once `wait` resolves.
 const cutAfterLookup = (wait: PromiseLike<unknown>) =>
   raw({ head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')], wait, tail: [cutLine] })
@@ -654,4 +679,366 @@ itServer.live("a dropped connection while a started tool runs waits for it and c
       }),
     { config: (url) => cfg({ url, retry }) },
   ),
+)
+
+// Review follow-ups. The scripted transport invokes the tracked tool body
+// itself, so the order of the cut, the settle step and each execute is forced
+// instead of raced.
+const invoke = async (input: LLM.StreamInput, id: string, query: string) =>
+  input.tools.lookup?.execute?.({ query }, { toolCallId: id, messages: [] })
+// Resolves once the stream scope of attempt `call` closed: its settle step follows.
+const closed = async (call: number) => {
+  while (!journal.includes(`close:${call}`)) await sleep(5)
+}
+const scriptedCall = (id: string, query: string) => [
+  LLMEvent.toolInputStart({ id, name: "lookup" }),
+  LLMEvent.toolCall({ id, name: "lookup", input: { query } }),
+]
+// One lookup call whose body the transport started, then the cut.
+const cutWhileRunning = (input: LLM.StreamInput, id = "call_1", query = "weather") =>
+  Stream.concat(
+    Stream.make(LLMEvent.stepStart({ index: 0 }), ...scriptedCall(id, query)),
+    Stream.unwrap(
+      Effect.sync(() => {
+        void invoke(input, id, query).catch(() => undefined)
+        return Stream.fail(cut)
+      }),
+    ),
+  )
+const answer = (text: string) =>
+  Stream.make(
+    LLMEvent.stepStart({ index: 0 }),
+    LLMEvent.textStart({ id: "t" }),
+    LLMEvent.textDelta({ id: "t", text }),
+    LLMEvent.textEnd({ id: "t" }),
+    LLMEvent.stepFinish({ index: 0, reason: "stop" }),
+    LLMEvent.finish({ reason: "stop" }),
+  )
+const found = (query: string): LookupOutput => ({ title: "lookup", output: `result:${query}`, metadata: {} })
+
+// The fleet retry budget (30 minutes), with short delays.
+const fleet = { maxAttempts: 200, initialDelayMs: 1, maxDelayMs: 5, maxElapsedMs: 1_800_000 }
+// A clock the test can jump forward; sleeps stay real.
+const jumpClock = Effect.gen(function* () {
+  const real = yield* Clock.Clock
+  const state = { offset: 0 }
+  const millis = () => real.currentTimeMillisUnsafe() + state.offset
+  const nanos = () => real.currentTimeNanosUnsafe() + BigInt(state.offset) * 1_000_000n
+  return {
+    jump: (ms: number) => {
+      state.offset += ms
+    },
+    clock: {
+      currentTimeMillisUnsafe: millis,
+      currentTimeMillis: Effect.sync(millis),
+      currentTimeNanosUnsafe: nanos,
+      currentTimeNanos: Effect.sync(nanos),
+      sleep: (duration) => real.sleep(duration),
+    } satisfies Clock.Clock,
+  }
+})
+
+itScripted.live("time spent waiting for a started tool does not consume the retry budget", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const time = yield* jumpClock
+        reset((call, input) => {
+          if (call === 1) return cutWhileRunning(input)
+          // The continuation step: a plain retryable failure, no tool started.
+          if (call === 2) return Stream.fail(cut)
+          return answer("done")
+        })
+        const first = yield* run(dir, {
+          lookup: lookup(async (input) => {
+            // The tool outlives the whole budget after the cut.
+            await closed(1)
+            time.jump(31 * 60_000)
+            return found(input.query)
+          }),
+        }).pipe(Effect.provideService(Clock.Clock, time.clock))
+        expect(first.value).toBe("continue")
+        expect(first.message.error).toBeUndefined()
+        expect(toolParts(first.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+        expect(first.resume?.attempts).toBe(1)
+
+        const second = yield* run(dir, {}, first.resume).pipe(Effect.provideService(Clock.Clock, time.clock))
+        expect(calls).toBe(3)
+        expect(second.value).toBe("continue")
+        expect(second.message.error).toBeUndefined()
+        expect(texts(second.parts)).toStrictEqual(["done"])
+      }),
+    { config: cfg({ retry: fleet }) },
+  ),
+)
+
+itScripted.live("a second cut after a tool outlived the retry budget still resumes", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const time = yield* jumpClock
+        const ran: string[] = []
+        reset((call, input) => cutWhileRunning(input, `call_${call}`, `q${call}`))
+        const tools = {
+          lookup: lookup(async (input) => {
+            ran.push(input.query)
+            if (input.query !== "q1") return found(input.query)
+            await closed(1)
+            time.jump(31 * 60_000)
+            return found(input.query)
+          }),
+        }
+        const first = yield* run(dir, tools).pipe(Effect.provideService(Clock.Clock, time.clock))
+        const second = yield* run(dir, tools, first.resume).pipe(Effect.provideService(Clock.Clock, time.clock))
+        expect(calls).toBe(2)
+        expect(ran).toStrictEqual(["q1", "q2"])
+        expect(second.value).toBe("continue")
+        expect(second.message.error).toBeUndefined()
+        expect(toolParts(second.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:q2" })
+        expect(second.resume?.attempts).toBe(2)
+      }),
+    { config: cfg({ retry: fleet }) },
+  ),
+)
+
+itScripted.live("retry time carried from an earlier resume still bounds the turn", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        reset((call) => (call === 1 ? Stream.fail(cut) : answer("never")))
+        const result = yield* run(dir, {}, { attempts: 1, elapsed: fleet.maxElapsedMs })
+        expect(calls).toBe(1)
+        expect(result.value).toBe("stop")
+        const error = result.message.error
+        expect(SessionV1.APIError.isInstance(error)).toBe(true)
+        if (!SessionV1.APIError.isInstance(error)) return
+        expect(error.data.statusCode).toBe(500)
+      }),
+    { config: cfg({ retry: fleet }) },
+  ),
+)
+
+itScripted.live("an execute arriving while its cut attempt settles never runs and is recorded as not executed", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const ran: string[] = []
+        let transport: LLM.StreamInput | undefined
+        let late: unknown
+        reset((_call, input) => {
+          transport = input
+          return Stream.concat(
+            Stream.make(
+              LLMEvent.stepStart({ index: 0 }),
+              ...scriptedCall("call_1", "first"),
+              // Announced to the consumer, but its execute is still to come.
+              ...scriptedCall("call_2", "second"),
+            ),
+            Stream.unwrap(
+              Effect.sync(() => {
+                void invoke(input, "call_1", "first").catch(() => undefined)
+                return Stream.fail(cut)
+              }),
+            ),
+          )
+        })
+        const result = yield* run(dir, {
+          lookup: lookup(async (input) => {
+            ran.push(input.query)
+            if (input.query !== "first" || !transport) return found(input.query)
+            // The first call is still awaited by the settle step when the
+            // transport gets around to the second one.
+            await closed(1)
+            await sleep(50)
+            late = await invoke(transport, "call_2", "second").then(
+              () => "executed",
+              (error: unknown) => error,
+            )
+            return found(input.query)
+          }),
+        })
+        expect(ran).toStrictEqual(["first"])
+        expect(late).toBeInstanceOf(Error)
+        expect(calls).toBe(1)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        const called = toolParts(result.parts)
+        expect(called.map((part) => [part.callID, part.state.status])).toStrictEqual([
+          ["call_1", "completed"],
+          ["call_2", "error"],
+        ])
+        expect(called[1]?.state.status === "error" && called[1].state.metadata?.notExecuted).toBe(true)
+      }),
+    { config: cfg({ retry }) },
+  ),
+)
+
+itScripted.live("an execute that arrives after its attempt was replayed never runs", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        const ran: string[] = []
+        let first: LLM.StreamInput | undefined
+        let late: unknown
+        reset((call, input) => {
+          if (call === 1) {
+            first = input
+            // The call was announced, the cut came before its execute.
+            return Stream.concat(
+              Stream.make(LLMEvent.stepStart({ index: 0 }), LLMEvent.toolInputStart({ id: "call_1", name: "lookup" })),
+              Stream.fail(cut),
+            )
+          }
+          const stale = first
+          if (!stale) return Stream.fail(new Error("no first attempt"))
+          // The replay is streaming when the first attempt's execute shows up.
+          return Stream.unwrap(
+            Effect.promise(() =>
+              invoke(stale, "call_1", "weather").then(
+                () => "executed",
+                (error: unknown) => error,
+              ),
+            ).pipe(
+              Effect.map((outcome) => {
+                late = outcome
+                return answer("final answer")
+              }),
+            ),
+          )
+        })
+        const result = yield* run(dir, {
+          lookup: lookup(async (input) => {
+            ran.push(input.query)
+            return found(input.query)
+          }),
+        })
+        expect(calls).toBe(2)
+        expect(ran).toStrictEqual([])
+        expect(late).toBeInstanceOf(Error)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        expect(toolParts(result.parts)).toHaveLength(0)
+        expect(texts(result.parts)).toStrictEqual(["final answer"])
+      }),
+    { config: cfg({ retry }) },
+  ),
+)
+
+itScripted.live("a cut after the step finished continues even when the retry budget is exhausted", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        reset(() =>
+          Stream.concat(
+            Stream.make(
+              LLMEvent.stepStart({ index: 0 }),
+              ...scriptedCall("call_1", "weather"),
+              LLMEvent.toolResult({ id: "call_1", name: "lookup", result: { type: "json", value: found("weather") } }),
+              LLMEvent.stepFinish({ index: 0, reason: "tool-calls" }),
+            ),
+            Stream.fail(cut),
+          ),
+        )
+        const result = yield* run(dir)
+        expect(calls).toBe(1)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        expect(result.message.finish).toBe("tool-calls")
+        expect(toolParts(result.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+        expect(result.parts.filter((part) => part.type === "step-finish")).toHaveLength(1)
+      }),
+    { config: cfg({ retry: { ...retry, maxAttempts: 1 } }) },
+  ),
+)
+
+itScripted.live("a cancel while a started tool is awaited halts the turn and stops the tool", () =>
+  provideTmpdirInstance(
+    (dir) =>
+      Effect.gen(function* () {
+        let signal: AbortSignal | undefined
+        const stopped = Promise.withResolvers<void>()
+        reset((_call, input) => cutWhileRunning(input))
+        const step = yield* start(dir, {
+          lookup: lookup(async (input, options) => {
+            signal = options.abortSignal
+            // Runs until it is told to stop, and then still reports success.
+            await new Promise<void>((done) =>
+              options.abortSignal?.addEventListener("abort", () => done(), { once: true }),
+            )
+            stopped.resolve()
+            return found(input.query)
+          }),
+        })
+        const fiber = yield* step.process.pipe(Effect.forkChild)
+        yield* Effect.promise(() => closed(1))
+        yield* Effect.sleep("150 millis")
+        // The cut alone left the tool running: the settle step is awaiting it.
+        expect(signal?.aborted).toBe(false)
+        expect(toolParts(yield* step.parts)[0]?.state.status).toBe("running")
+
+        yield* Fiber.interrupt(fiber)
+        yield* Effect.promise(() => Promise.race([stopped.promise, sleep(2_000)]))
+        yield* Effect.sleep("50 millis")
+        expect(signal?.aborted).toBe(true)
+        expect(calls).toBe(1)
+        expect(step.handle.message.error?.name).toBe("MessageAbortedError")
+        expect(step.handle.resume).toBeUndefined()
+        const called = toolParts(yield* step.parts)
+        expect(called).toHaveLength(1)
+        expect(called[0]?.state).toMatchObject({ status: "error", metadata: { interrupted: true } })
+      }),
+    { config: cfg({ retry }) },
+  ),
+)
+
+// The cut lands in the same moment as the tool call, at several offsets. What
+// the race decides may differ; what is recorded must match what ran.
+itServer.live(
+  "a cut right behind a tool call never runs it twice and records what happened",
+  () =>
+    provideTmpdirServer(
+      ({ dir, llm }) =>
+        Effect.gen(function* () {
+          for (const wait of [0, 0, 0, 1, 2, 3, 5, 8, 13, 21]) {
+            let executions = 0
+            const before = yield* llm.calls
+            yield* llm.push(
+              raw({
+                head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')],
+                ...(wait > 0 ? { wait: lazy(() => sleep(wait)) } : {}),
+                tail: [cutLine],
+              }),
+            )
+            const result = yield* run(dir, {
+              lookup: lookup(async (input) => {
+                executions++
+                await sleep(20)
+                return found(input.query)
+              }),
+            })
+            // A detached execute of the cut attempt would show up here.
+            yield* Effect.sleep("200 millis")
+            const called = toolParts(result.parts)
+            expect((yield* llm.calls) - before).toBe(1)
+            expect(executions).toBeLessThanOrEqual(1)
+            expect(called.map((part) => part.callID)).toStrictEqual(["call_1"])
+            const error = result.message.error
+            if (result.value === "stop") {
+              // The cut settled before the transport reached the body: the
+              // call was refused afterwards, so the turn fails without a run.
+              expect(executions).toBe(0)
+              expect(SessionV1.APIError.isInstance(error) && error.data.metadata?.code).toBe("ProviderRetryUnsafeError")
+              continue
+            }
+            expect(error).toBeUndefined()
+            expect(called[0]?.state).toMatchObject(
+              executions === 1
+                ? { status: "completed", output: "result:weather" }
+                : { status: "error", metadata: { notExecuted: true } },
+            )
+          }
+        }),
+      { config: (url) => cfg({ url, retry }) },
+    ),
+  60_000,
 )
