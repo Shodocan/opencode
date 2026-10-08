@@ -72,7 +72,7 @@ const agent = (): Agent.Info => ({
   permission: [{ permission: "*", pattern: "*", action: "allow" }],
 })
 
-const it = testEffect(
+const base = testEffect(
   LayerNode.compile(
     LayerNode.group([
       LayerNode.group([
@@ -104,6 +104,28 @@ const it = testEffect(
     ],
   ),
 )
+
+// No test here waits for the database longer than 20s (the longest budget it
+// sets), so 25s means a wait that did not end; the runner stops a test at 30s.
+const TEST_TIMEOUT = 30_000
+const LIMIT = 25_000
+const it = {
+  effect: base.effect,
+  live: ((name, value, opts) =>
+    base.live(
+      name,
+      Effect.suspend(() => (typeof value === "function" ? value() : value)).pipe(
+        Effect.timeoutOrElse({
+          duration: LIMIT,
+          orElse: () =>
+            Effect.die(
+              new Error(`${name}: not finished after ${LIMIT}ms: something is still waiting for the database lock`),
+            ),
+        }),
+      ),
+      opts ?? TEST_TIMEOUT,
+    )) as typeof base.live,
+}
 
 const BUSY = "database is locked (SQLITE_BUSY) during BEGIN IMMEDIATE; gave up waiting for the write lock"
 const QUEUED = "an earlier write of this process is still waiting for the database; gave up waiting for the write lock"
@@ -180,14 +202,20 @@ const toolPart = (messageID: MessageID) =>
 // the write of its result and by nothing before it.
 const running = async (messageID: MessageID) => {
   const db = new BunDatabase(file, { readonly: true })
-  while (
-    !db
-      .query<{ data: string }, [string]>("SELECT data FROM part WHERE message_id = ?")
-      .all(messageID)
-      .some((row) => row.data.includes('"status":"running"'))
-  )
-    await Bun.sleep(5)
-  db.close()
+  const deadline = Date.now() + 10_000
+  try {
+    while (
+      !db
+        .query<{ data: string }, [string]>("SELECT data FROM part WHERE message_id = ?")
+        .all(messageID)
+        .some((row) => row.data.includes('"status":"running"'))
+    ) {
+      if (Date.now() > deadline) throw new Error("the tool call was not stored as running within 10s")
+      await Bun.sleep(5)
+    }
+  } finally {
+    db.close()
+  }
 }
 
 const statuses = (seen: Array<{ type: string; data: unknown }>) =>
@@ -378,7 +406,14 @@ const lateTool = Effect.fnUntraced(function* (
           const output = { title: "Deploy", output: "deployed", metadata: {} }
           await running(input.msg.id)
           input.other.run("BEGIN IMMEDIATE")
-          await body(() => Effect.runPromiseWith(context)(input.handle.completeToolCall(options.toolCallId, output)))
+          // Bounded like the turn, so a write that is not given up still ends.
+          await body(() =>
+            Effect.runPromiseWith(context)(
+              input.handle
+                .completeToolCall(options.toolCallId, output)
+                .pipe(limits({ budget: 20_000, outcome: 20_000, abort: 150 })),
+            ),
+          )
           state.written.resolve()
           return output
         },

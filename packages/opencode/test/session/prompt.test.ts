@@ -3013,6 +3013,16 @@ const lockedDatabase = testEffect(
 )
 const unixLockedDatabase = process.platform !== "win32" ? lockedDatabase.instance : lockedDatabase.instance.skip
 
+// No test below waits for the database longer than 20s (the longest budget it
+// sets), so 25s means a wait that did not end; the runner stops a test at 30s.
+const LOCK_TEST_TIMEOUT = 30_000
+const finishes = (name: string) =>
+  Effect.timeoutOrElse({
+    duration: 25_000,
+    orElse: () =>
+      Effect.die(new Error(`${name}: not finished after 25s: something is still waiting for the database lock`)),
+  })
+
 // Takes the write lock from another connection once the shell command of the
 // session is stored as running, so the lock is met by the writes that end it.
 const lockOnceRunning = Effect.fn("test.lockOnceRunning")(function* (sessionID: SessionID) {
@@ -3061,8 +3071,9 @@ unixLockedDatabase(
       expect(Exit.isFailure(exit) && Cause.squash(exit.cause)).toBeInstanceOf(Database.LockedError)
       expect(elapsed).toBeGreaterThanOrEqual(500)
       expect(elapsed).toBeLessThan(3_000)
-    }),
+    }).pipe(finishes("shell finish under a held database lock gives up within its one bounded wait")),
   { config: cfg },
+  LOCK_TEST_TIMEOUT,
 )
 
 unixLockedDatabase(
@@ -3092,8 +3103,9 @@ unixLockedDatabase(
 
       expect(elapsed).toBeGreaterThanOrEqual(140)
       expect(elapsed).toBeLessThan(5_000)
-    }),
+    }).pipe(finishes("an aborted shell under a held database lock ends within the abort wait")),
   { config: cfg },
+  LOCK_TEST_TIMEOUT,
 )
 
 const lockedBlockingProcessor = testEffect(
@@ -3152,9 +3164,9 @@ lockedDatabase.instance(
       // The two writes that mark the subtask cancelled share one short wait.
       expect(elapsed).toBeGreaterThanOrEqual(140)
       expect(elapsed).toBeLessThan(2_000)
-    }),
+    }).pipe(finishes("cancelling a subtask under a held database lock ends within the abort wait")),
   { config: cfg },
-  30_000,
+  LOCK_TEST_TIMEOUT,
 )
 
 lockedBlockingProcessor.instance(
@@ -3192,7 +3204,7 @@ lockedBlockingProcessor.instance(
       // The write that marks the message aborted waited, and not for long.
       expect(elapsed).toBeGreaterThanOrEqual(140)
       expect(elapsed).toBeLessThan(2_000)
-    }),
+    }).pipe(finishes("an interrupted assistant message under a held database lock ends within the abort wait")),
   { config: cfg },
-  30_000,
+  LOCK_TEST_TIMEOUT,
 )

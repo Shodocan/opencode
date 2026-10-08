@@ -1458,8 +1458,16 @@ describe("session.compaction.process", () => {
         // Removing the summary message waited for the database, and not for long.
         expect(elapsed).toBeGreaterThanOrEqual(140)
         expect(elapsed).toBeLessThan(2_000)
-      }),
+      }).pipe(
+        // No wait here is longer than 4s: 15s means one that did not end.
+        Effect.timeoutOrElse({
+          duration: 15_000,
+          orElse: () =>
+            Effect.die(new Error("not finished after 15s: something is still waiting for the database lock")),
+        }),
+      ),
     { git: true },
+    { timeout: 20_000 },
   )
 
   itCompaction.instance(

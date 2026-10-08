@@ -8,7 +8,8 @@ const root = path.join(import.meta.dir, "../..")
 const worker = path.join(import.meta.dir, "../fixture/project-start-worker.ts")
 
 const STARTS = 4
-const DEADLINE = 45_000
+// The waits below add up to less than the 60s the runner gives the test.
+const DEADLINE = 20_000
 
 const children = new Set<ChildProcess>()
 
@@ -42,19 +43,37 @@ function start(msg: unknown, dir: string) {
   }
 }
 
+// Kills the process group of the child and waits until the child is gone.
 function stop(child: ChildProcess) {
   children.delete(child)
-  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return
+  if (child.exitCode !== null || child.signalCode !== null || !child.pid) return Promise.resolve()
+  const gone = new Promise<void>((resolve) => child.once("close", () => resolve()))
   try {
     process.kill(-child.pid, "SIGKILL")
   } catch {
     child.kill("SIGKILL")
   }
+  return gone
 }
 
-afterEach(() => {
-  for (const child of children) stop(child)
-})
+const reap = () => Promise.all(Array.from(children, stop))
+
+// Every wait has a limit: past it the children are killed and the test fails
+// saying what it was waiting for.
+async function within<T>(wait: Promise<T>, millis: number, what: string) {
+  const timer = Promise.withResolvers<never>()
+  const timeout = setTimeout(() => timer.reject(new Error(`${what} did not finish within ${millis}ms`)), millis)
+  try {
+    return await Promise.race([wait, timer.promise])
+  } catch (error) {
+    await reap()
+    throw error
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+afterEach(reap)
 
 test.skipIf(process.platform === "win32")(
   "processes that start while the database write lock is held all start",
@@ -62,29 +81,27 @@ test.skipIf(process.platform === "win32")(
     await using tmp = await tmpdir()
     const file = path.join(tmp.path, "shared.sqlite")
     // The first start creates the database, alone.
-    expect((await start({ file, directory: tmp.path }, tmp.path).finished).code).toBe(0)
+    const first = await within(start({ file, directory: tmp.path }, tmp.path).finished, 15_000, "the first start")
+    expect(first.code).toBe(0)
 
     // Another process writes for far longer than a start waits for one
     // statement: every start meets the lock at its project row.
     const other = new BunDatabase(file)
-    other.run("BEGIN IMMEDIATE")
-    const starts = Array.from({ length: STARTS }, () => start({ file, directory: tmp.path, busyTimeout: 5 }, tmp.path))
-    const timer = Promise.withResolvers<"timeout">()
-    const timeout = setTimeout(() => timer.resolve("timeout"), DEADLINE)
-    const results = await Promise.race([
-      (async () => {
-        await Promise.all(starts.map((item) => item.starting))
-        await Bun.sleep(400)
-        other.run("COMMIT")
-        return Promise.all(starts.map((item) => item.finished))
-      })(),
-      timer.promise,
-    ]).finally(() => {
-      clearTimeout(timeout)
-      for (const child of children) stop(child)
+    // Closing the connection frees the lock whatever happens below, so no
+    // start is left waiting for it.
+    const results = await (async () => {
+      other.run("BEGIN IMMEDIATE")
+      const starts = Array.from({ length: STARTS }, () =>
+        start({ file, directory: tmp.path, busyTimeout: 5 }, tmp.path),
+      )
+      await within(Promise.all(starts.map((item) => item.starting)), 15_000, "the starts reaching their first write")
+      await Bun.sleep(400)
+      other.run("COMMIT")
+      return within(Promise.all(starts.map((item) => item.finished)), DEADLINE, "the starts")
+    })().finally(async () => {
+      other.close()
+      await reap()
     })
-    other.close()
-    if (results === "timeout") throw new Error(`the starts did not finish within ${DEADLINE}ms`)
 
     expect(
       results.flatMap((result, index) =>
