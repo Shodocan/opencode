@@ -430,3 +430,194 @@ itServer.live("an executed AI SDK tool is not executed again after a mid-stream 
     { config: (url) => cfg({ url, retry }) },
   ),
 )
+
+// Safe resume: a cut after a tool call started keeps that call (awaited to its
+// terminal state) and lets the loop continue from history; it never replays.
+const line = (delta: Record<string, unknown>) => ({
+  id: "chatcmpl-test",
+  object: "chat.completion.chunk",
+  choices: [{ index: 0, delta }],
+})
+const cutLine = { error: { message: cut.message, type: null, param: null, code: "500" } }
+const lookupCall = (index: number, id: string, args: string) =>
+  line({ tool_calls: [{ index, id, type: "function", function: { name: "lookup", arguments: args } }] })
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
+// One complete lookup call, then the cut once `wait` resolves.
+const cutAfterLookup = (wait: PromiseLike<unknown>) =>
+  raw({ head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')], wait, tail: [cutLine] })
+
+type LookupOutput = { title: string; output: string; metadata: Record<string, unknown> }
+const lookup = (execute: (input: { query: string }, options: { abortSignal?: AbortSignal }) => Promise<LookupOutput>) =>
+  tool({
+    description: "Look up information",
+    inputSchema: z.object({ query: z.string() }),
+    execute: (input, options) => execute(input, options),
+  })
+
+itServer.live("a cut while a started tool is running waits for its result and continues without replay", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        let abortedAtEnd: boolean | undefined
+        const cutSent = sleep(100)
+        yield* llm.push(cutAfterLookup(cutSent))
+        yield* llm.text("never")
+        const result = yield* run(dir, {
+          lookup: lookup(async (input, options) => {
+            executions++
+            await cutSent
+            await sleep(400)
+            abortedAtEnd = options.abortSignal?.aborted
+            if (options.abortSignal?.aborted) throw new Error("aborted by the cut")
+            return { title: "lookup", output: `result:${input.query}`, metadata: {} }
+          }),
+        })
+        expect(executions).toBe(1)
+        expect(abortedAtEnd).toBe(false)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        expect(result.message.finish).toBe("tool-calls")
+        const called = toolParts(result.parts)
+        expect(called).toHaveLength(1)
+        expect(called[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+      }),
+    { config: (url) => cfg({ url, retry }) },
+  ),
+)
+
+itServer.live("a started tool that fails after the cut is recorded as failed and the turn continues", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        const cutSent = sleep(100)
+        yield* llm.push(cutAfterLookup(cutSent))
+        const result = yield* run(dir, {
+          lookup: lookup(async () => {
+            executions++
+            await cutSent
+            await sleep(200)
+            throw new Error("lookup backend down")
+          }),
+        })
+        expect(executions).toBe(1)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        const called = toolParts(result.parts)
+        expect(called).toHaveLength(1)
+        expect(called[0]?.state).toMatchObject({ status: "error", error: "lookup backend down" })
+        expect(called[0]?.state.status === "error" && called[0].state.metadata?.interrupted).toBeFalsy()
+      }),
+    { config: (url) => cfg({ url, retry }) },
+  ),
+)
+
+itServer.live("a cut marks the partial text incomplete and records a never-started call as not executed", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        yield* llm.push(
+          raw({
+            head: [
+              line({ role: "assistant", content: "checking the weath" }),
+              lookupCall(0, "call_1", '{"query":"weather"}'),
+              // A second call whose arguments never finished streaming.
+              lookupCall(1, "call_2", '{"query":"tem'),
+            ],
+            wait: sleep(300),
+            tail: [cutLine],
+          }),
+        )
+        const result = yield* run(dir, {
+          lookup: lookup(async (input) => {
+            executions++
+            return { title: "lookup", output: `result:${input.query}`, metadata: {} }
+          }),
+        })
+        expect(executions).toBe(1)
+        expect(result.value).toBe("continue")
+        expect(result.message.error).toBeUndefined()
+        const text = result.parts.find((part): part is SessionV1.TextPart => part.type === "text")
+        expect(text?.text).toBe("checking the weath")
+        expect(text?.metadata?.incomplete).toBe(true)
+        const called = toolParts(result.parts)
+        expect(called.map((part) => [part.callID, part.state.status])).toStrictEqual([
+          ["call_1", "completed"],
+          ["call_2", "error"],
+        ])
+        expect(called[1]?.state.status === "error" && called[1].state.metadata?.notExecuted).toBe(true)
+        // The internal marker never reaches a provider request.
+        const mdl = yield* (yield* Provider.Service).getModel(ref.providerID, ref.modelID)
+        const history = yield* MessageV2.filterCompactedEffect(result.message.sessionID)
+        const messages = yield* MessageV2.toModelMessagesEffect(history, mdl)
+        expect(JSON.stringify(messages)).not.toContain("incomplete")
+        expect(JSON.stringify(messages)).toContain("checking the weath")
+      }),
+    { config: (url) => cfg({ url, retry }) },
+  ),
+)
+
+itServer.live("an exhausted retry budget fails a cut after a tool call with the unsafe-retry error", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        yield* llm.push(cutAfterLookup(sleep(200)))
+        yield* llm.text("never")
+        const result = yield* run(dir, {
+          lookup: lookup(async (input) => {
+            executions++
+            return { title: "lookup", output: `result:${input.query}`, metadata: {} }
+          }),
+        })
+        expect(executions).toBe(1)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.value).toBe("stop")
+        const error = result.message.error
+        expect(SessionV1.APIError.isInstance(error)).toBe(true)
+        if (!SessionV1.APIError.isInstance(error)) return
+        expect(error.data.isRetryable).toBe(false)
+        expect(error.data.metadata?.code).toBe("ProviderRetryUnsafeError")
+        expect(error.data.metadata?.tools).toBe("lookup")
+      }),
+    { config: (url) => cfg({ url, retry: { ...retry, maxAttempts: 1 } }) },
+  ),
+)
+
+itServer.live("without a retry config a cut still aborts a running tool and fails as before", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        let aborted = false
+        const finished = Promise.withResolvers<void>()
+        const cutSent = sleep(100)
+        yield* llm.push(cutAfterLookup(cutSent))
+        const result = yield* run(dir, {
+          lookup: lookup(async (_input, options) => {
+            executions++
+            await cutSent
+            await sleep(400)
+            aborted = options.abortSignal?.aborted === true
+            finished.resolve()
+            return { title: "lookup", output: "late", metadata: {} }
+          }),
+        }).pipe(Effect.provideService(SessionRetry.RetryLimit, 0))
+        yield* Effect.promise(() => finished.promise)
+        expect(executions).toBe(1)
+        expect(aborted).toBe(true)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.value).toBe("stop")
+        const error = result.message.error
+        expect(SessionV1.APIError.isInstance(error)).toBe(true)
+        if (!SessionV1.APIError.isInstance(error)) return
+        expect(error.data.statusCode).toBe(500)
+        expect(error.data.metadata?.code).toBeUndefined()
+      }),
+    { config: (url) => cfg({ url }) },
+  ),
+)

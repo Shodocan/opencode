@@ -1389,6 +1389,9 @@ const layer = Layer.effect(
         // Consecutive soft-threshold compactions with no step finishing below
         // the threshold in between (see the "compact" branch below).
         let softCompactions = 0
+        // Provider retry budget spent by safe resumes after stream cuts in
+        // this turn; a step that does not resume after a cut resets it.
+        let resume: SessionProcessor.Resume | undefined
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1560,6 +1563,7 @@ const layer = Layer.effect(
               assistantMessage: msg,
               sessionID,
               model,
+              resume,
             })
             .pipe(Effect.onInterrupt(() => finalizeInterruptedAssistant))
 
@@ -1640,6 +1644,7 @@ const layer = Layer.effect(
                 return Effect.void
               },
             })
+            resume = handle.resume
 
             if (structured !== undefined) {
               handle.message.structured = structured
