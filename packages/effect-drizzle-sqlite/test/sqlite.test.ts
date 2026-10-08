@@ -80,6 +80,29 @@ test("rolls back failed transactions", async () => {
   )
 })
 
+test("keeps the error of the body when SQLite already rolled the transaction back", async () => {
+  await run(
+    Effect.gen(function* () {
+      const db = yield* makeDb
+      // A full database: SQLite rolls the transaction back by itself, so the
+      // ROLLBACK that follows fails with "no transaction is active".
+      const pages = yield* db.get<{ page_count: number }>(sql`pragma page_count`)
+      yield* db.run(sql.raw(`pragma max_page_count = ${pages?.page_count}`))
+
+      const error = yield* db
+        .transaction((tx) => tx.run(sql`insert into users (name) values (hex(zeroblob(4000000)))`), {
+          behavior: "immediate",
+        })
+        .pipe(Effect.flip)
+
+      expect(error._tag).toBe("EffectDrizzleQueryError")
+      yield* db.run(sql.raw("pragma max_page_count = 1000000"))
+      yield* db.transaction((tx) => tx.insert(users).values({ name: "Ada" }), { behavior: "immediate" })
+      expect(yield* db.select().from(users)).toEqual([{ id: 1, name: "Ada" }])
+    }),
+  )
+})
+
 test("rolls back explicit transaction rollback", async () => {
   await run(
     Effect.gen(function* () {
