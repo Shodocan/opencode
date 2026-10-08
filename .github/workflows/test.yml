@@ -30,6 +30,9 @@ jobs:
           - name: linux
             host: ubuntu-24.04
     runs-on: ${{ matrix.settings.host }}
+    # A green job takes 12 to 16 minutes. Without a limit a hung step runs for
+    # GitHub's 360 minutes.
+    timeout-minutes: 30
     defaults:
       run:
         shell: bash
@@ -93,6 +96,9 @@ jobs:
 
       - name: Run HttpApi exerciser gates
         if: runner.os == 'Linux'
+        # Takes about 3 minutes. Its effect mode can hang while a scenario
+        # scope closes, which the 30s scenario timeout does not cover.
+        timeout-minutes: 10
         working-directory: packages/opencode
         run: bun run test:httpapi
 
