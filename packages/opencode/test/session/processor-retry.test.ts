@@ -621,3 +621,37 @@ itServer.live("without a retry config a cut still aborts a running tool and fail
     { config: (url) => cfg({ url }) },
   ),
 )
+
+itServer.live("a dropped connection while a started tool runs waits for it and continues without replay", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        let executions = 0
+        const cutSent = sleep(100)
+        // An upstream restart: the socket closes mid-body, no error payload.
+        yield* llm.push(
+          raw({
+            head: [line({ role: "assistant" }), lookupCall(0, "call_1", '{"query":"weather"}')],
+            wait: cutSent,
+            error: new Error("upstream restarted"),
+          }),
+        )
+        yield* llm.text("never")
+        const result = yield* run(dir, {
+          lookup: lookup(async (input, options) => {
+            executions++
+            await cutSent
+            await sleep(400)
+            if (options.abortSignal?.aborted) throw new Error("aborted by the cut")
+            return { title: "lookup", output: `result:${input.query}`, metadata: {} }
+          }),
+        })
+        expect(executions).toBe(1)
+        expect(yield* llm.calls).toBe(1)
+        expect(result.message.error).toBeUndefined()
+        expect(result.value).toBe("continue")
+        expect(toolParts(result.parts)[0]?.state).toMatchObject({ status: "completed", output: "result:weather" })
+      }),
+    { config: (url) => cfg({ url, retry }) },
+  ),
+)
