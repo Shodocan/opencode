@@ -151,3 +151,52 @@ test("closing the instance store disposes a loaded instance and one that is load
     off()
   }
 }, 20_000)
+
+test("closing the instance store over a reload of a load that is still bootstrapping leaves no service started after the last disposal", async () => {
+  await using tmp = await tmpdir({ git: true })
+  // "start" is a service the bootstrap brings up, "dispose" a disposer run.
+  const events: string[] = []
+  const off = registerDisposer(async () => void events.push("dispose"))
+  try {
+    const closed = await Effect.runPromise(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>()
+        const scope = yield* Scope.make()
+        const context = yield* Layer.buildWithScope(
+          LayerNode.compile(LayerNode.group([InstanceStore.node, CrossSpawnSpawner.node]), [
+            [
+              InstanceStore.bootstrapNode,
+              Layer.succeed(
+                InstanceBootstrap.Service,
+                InstanceBootstrap.Service.of({
+                  // A bootstrap that is still starting services while it is cut.
+                  run: Effect.sync(() => events.push("start")).pipe(
+                    Effect.andThen(Deferred.succeed(started, undefined)),
+                    Effect.andThen(Effect.never),
+                    Effect.onInterrupt(() =>
+                      Effect.sleep("200 millis").pipe(Effect.andThen(Effect.sync(() => events.push("start")))),
+                    ),
+                  ),
+                }),
+              ),
+            ],
+          ]),
+          scope,
+        )
+        const store = Context.get(context, InstanceStore.Service)
+        yield* store.load({ directory: tmp.path }).pipe(Effect.exit, Effect.forkDetach)
+        yield* Deferred.await(started)
+        // The reload replaces the entry of the load, which keeps bootstrapping.
+        yield* store.reload({ directory: tmp.path }).pipe(Effect.exit, Effect.forkDetach)
+        yield* Effect.sleep("50 millis")
+        return Option.isSome(yield* close(scope))
+      }),
+    )
+
+    expect(closed).toBe(true)
+    expect(events).toContain("dispose")
+    expect(events.lastIndexOf("start")).toBeLessThan(events.lastIndexOf("dispose"))
+  } finally {
+    off()
+  }
+}, 20_000)

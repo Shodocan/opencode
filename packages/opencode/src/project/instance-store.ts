@@ -83,11 +83,10 @@ const layer: Layer.Layer<Service, never, Project.Service | InstanceBootstrap.Ser
     const settle = (directory: string, entry: Entry) => (exit: Exit.Exit<unknown>) =>
       Effect.gen(function* () {
         if (Exit.isSuccess(exit)) return
-        const current = yield* removeEntry(directory, entry)
+        yield* removeEntry(directory, entry)
         // A bootstrap cut short has started services for the directory that no
-        // instance will ever dispose. A reload that replaced the entry disposes
-        // by itself.
-        if (current) yield* Effect.promise(() => runDisposers(directory))
+        // instance will ever dispose. Disposing twice is harmless.
+        yield* Effect.promise(() => runDisposers(directory))
         yield* Deferred.failCause(entry.deferred, exit.cause)
       })
 
