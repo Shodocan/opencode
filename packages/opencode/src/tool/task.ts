@@ -397,7 +397,14 @@ export const TaskTool = Tool.define(
           execution.failure = { kind: "tool", error: failed.state.error }
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        const answer = result.parts.findLast((item) => item.type === "text")
+        if (answer) return answer.text
+        // A child that ended without a text part gave the parent nothing to
+        // use; an empty string here would look like a real empty answer.
+        const info = result.info.role === "assistant" ? result.info : undefined
+        const message = `Subagent produced no answer (task_id: ${nextSession.id}, finish: ${info?.finish}, reasoning tokens: ${info?.tokens.reasoning})`
+        execution.failure = { kind: "tool", error: message }
+        return yield* Effect.fail(new Error(message))
       })
 
       // An abort during the awaited binding still receives a durable receipt,

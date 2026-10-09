@@ -874,6 +874,127 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
   }),
 )
 
+for (const finish of ["stop", "length"] as const) {
+  it.instance(`loop surfaces reasoning-only ${finish} responses as session errors`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const events = yield* EventV2Bridge.Service
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "Reasoning only" })
+      const errors: NonNullable<SessionV1.Assistant["error"]>[] = []
+      const off = yield* events.listen((event) => {
+        if (event.type !== Session.Event.Error.type) return Effect.void
+        const data = event.data as typeof Session.Event.Error.data.Type
+        if (data.sessionID === chat.id && data.error) errors.push(data.error)
+        return Effect.void
+      })
+
+      yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "hello" }],
+      })
+      yield* llm.push(reply().reason("thinking without an answer")[finish]())
+
+      const result = yield* prompt.loop({ sessionID: chat.id })
+      yield* off
+
+      expect(yield* llm.hits).toHaveLength(1)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") {
+        expect(result.info.error).toMatchObject({ name: "ReasoningOnlyResponseError" })
+        expect(result.info.error).toMatchObject({
+          data: { message: expect.stringContaining(`finish reason "${finish}"`) },
+        })
+      }
+      expect(errors).toContainEqual(expect.objectContaining({ name: "ReasoningOnlyResponseError" }))
+    }),
+  )
+}
+
+it.instance("loop keeps a text response with reasoning unchanged", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Reasoning and text" })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("thinking").text("answer").stop())
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+
+    expect(yield* llm.hits).toHaveLength(1)
+    expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "answer" })]))
+  }),
+)
+
+it.instance("loop keeps a reasoning response that calls a tool unchanged", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const events = yield* EventV2Bridge.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Reasoning and tool" })
+    const errors: string[] = []
+    const off = yield* events.listen((event) => {
+      if (event.type !== Session.Event.Error.type) return Effect.void
+      const data = event.data as typeof Session.Event.Error.data.Type
+      if (data.sessionID === chat.id && data.error) errors.push(data.error.name)
+      return Effect.void
+    })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("thinking").tool("missing_tool", {}).stop())
+
+    yield* prompt.loop({ sessionID: chat.id })
+    yield* off
+
+    expect(errors).not.toContain("ReasoningOnlyResponseError")
+  }),
+)
+
+it.instance("cancelled reasoning-only stream keeps its abort error", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Reasoning cancel" })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("thinking").hang())
+
+    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+    yield* llm.wait(1)
+    yield* waitForBusy(chat.id)
+    yield* prompt.cancel(chat.id)
+    const exit = yield* Fiber.await(fiber)
+
+    expect(Exit.isSuccess(exit)).toBe(true)
+    if (Exit.isSuccess(exit) && exit.value.info.role === "assistant") {
+      expect(exit.value.info.error?.name).toBe("MessageAbortedError")
+    }
+  }),
+)
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({

@@ -1680,6 +1680,27 @@ const layer = Layer.effect(
                 yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
                 return "break" as const
               }
+              // A reasoning-only response ends the turn with no text and no tool
+              // call. Surface it as a named error instead of ending silently.
+              const parts = yield* MessageV2.parts(handle.message.id).pipe(
+                Effect.provideService(Database.Service, database),
+              )
+              const answered = parts.some(
+                (part) => part.type === "tool" || (part.type === "text" && part.text.trim() !== ""),
+              )
+              const finish = handle.message.finish
+              if (
+                (finish === "stop" || finish === "length") &&
+                !answered &&
+                parts.some((part) => part.type === "reasoning")
+              ) {
+                handle.message.error = new SessionV1.ReasoningOnlyResponseError({
+                  message: `The model returned reasoning without an answer (finish reason "${finish}", reasoning tokens ${handle.message.tokens.reasoning}); no text or tool call was produced`,
+                }).toObject()
+                yield* sessions.updateMessage(handle.message)
+                yield* events.publish(Session.Event.Error, { sessionID, error: handle.message.error })
+                return "break" as const
+              }
               if (format.type === "json_schema") {
                 handle.message.error = new SessionV1.StructuredOutputError({
                   message: "Model did not produce structured output",
