@@ -24,6 +24,7 @@ check it on every sync.**
 | MCP channel features | live | see rc.1 merge commit d5e25ebbfd |
 | Configurable auto-compaction threshold (`compaction.threshold` fraction + per-model `compaction.thresholds` fractions) | live | `packages/core/src/v1/config/config.ts`, `packages/core/src/config/compaction.ts`, `packages/core/src/v1/config/migrate.ts`, `packages/opencode/src/session/overflow.ts` |
 | **(7) MinIO auto-update** | live (re-grafted) | `packages/opencode/src/installation/index.ts`, `test/installation/custom-minio.test.ts` |
+| Reasoning-only turns surface as `ReasoningOnlyResponseError`; a subagent with no answer fails the Task (Shodocan/harness-opencode#658, PR #22) | in PR #22 | `packages/opencode/src/session/prompt.ts`, `packages/opencode/src/tool/task.ts`, `packages/sdk/openapi.json`, `packages/sdk/js/src/v2/gen/types.gen.ts`, `test/session/prompt.test.ts`, `test/tool/task.test.ts`, `test/tool/workflow-task-terminal-accuracy.test.ts` |
 
 ## Feature (7) — MinIO auto-update (custom distribution)
 

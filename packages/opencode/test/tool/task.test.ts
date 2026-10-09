@@ -105,6 +105,7 @@ function stubOps(opts?: {
   text?: string
   error?: NonNullable<SessionV1.Assistant["error"]>
   toolError?: string
+  noAnswer?: { finish: string; reasoning: number }
 }): TaskPromptOps {
   return {
     cancel: () => Effect.void,
@@ -112,7 +113,7 @@ function stubOps(opts?: {
     prompt: (input) =>
       Effect.sync(() => {
         opts?.onPrompt?.(input)
-        return reply(input, opts?.text ?? "done", opts?.error, opts?.toolError)
+        return reply(input, opts?.text ?? "done", opts?.error, opts?.toolError, opts?.noAnswer)
       }),
   }
 }
@@ -122,6 +123,7 @@ function reply(
   text: string,
   error?: NonNullable<SessionV1.Assistant["error"]>,
   toolError?: string,
+  noAnswer?: { finish: string; reasoning: number },
 ): SessionV1.WithParts {
   const id = MessageID.ascending()
   return {
@@ -134,21 +136,25 @@ function reply(
       agent: input.agent ?? "general",
       cost: 0,
       path: { cwd: "/tmp", root: "/tmp" },
-      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      tokens: { input: 0, output: 0, reasoning: noAnswer?.reasoning ?? 0, cache: { read: 0, write: 0 } },
       modelID: input.model?.modelID ?? ref.modelID,
       providerID: input.model?.providerID ?? ref.providerID,
       time: { created: Date.now() },
-      finish: "stop",
+      finish: noAnswer?.finish ?? "stop",
       error,
     },
     parts: [
-      {
-        id: PartID.ascending(),
-        messageID: id,
-        sessionID: input.sessionID,
-        type: "text",
-        text,
-      },
+      ...(noAnswer
+        ? []
+        : [
+            {
+              id: PartID.ascending(),
+              messageID: id,
+              sessionID: input.sessionID,
+              type: "text" as const,
+              text,
+            },
+          ]),
       ...(toolError
         ? [
             {
@@ -430,6 +436,202 @@ describe("tool.task", () => {
       expect(failure).toBeInstanceOf(Error)
       if (!(failure instanceof Error)) throw new Error("expected Error defect")
       expect(failure.message).toBe(`Subagent failed (task_id: ${child?.id}): Network connection lost`)
+    }),
+  )
+
+  it.instance("execute reports a child that ends without a text answer as an error", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "look into the cache key path",
+            subagent_type: "general",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "task-no-answer-child",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: stubOps({ noAnswer: { finish: "length", reasoning: 32000 } }),
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) throw new Error("expected task failure")
+      const child = (yield* sessions.children(chat.id))[0]
+      const failure = Cause.squash(exit.cause)
+      if (!(failure instanceof Error)) throw new Error("expected Error defect")
+      expect(failure.message).toBe(
+        `Subagent produced no answer (task_id: ${child?.id}, finish: length, reasoning tokens: 32000)`,
+      )
+    }),
+  )
+
+  it.instance("execute treats a whitespace-only text part as no answer", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "task-blank-text-child",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ text: "   " }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) throw new Error("expected task failure")
+      const child = (yield* sessions.children(chat.id))[0]
+      const failure = Cause.squash(exit.cause)
+      if (!(failure instanceof Error)) throw new Error("expected Error defect")
+      expect(failure.message).toBe(
+        `Subagent produced no answer (task_id: ${child?.id}, finish: stop, reasoning tokens: 0)`,
+      )
+    }),
+  )
+
+  it.instance("execute returns an empty answer when a child finished through a completed tool call", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const child = yield* sessions.create({ parentID: chat.id, title: "Tool-submitted child" })
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: child.id,
+        agent: "general",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      const call = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: user.id,
+        sessionID: child.id,
+        mode: "general",
+        agent: "general",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        finish: "tool-calls",
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: call.id,
+        sessionID: child.id,
+        type: "tool",
+        tool: "submit_result",
+        callID: "submit-result-1",
+        state: {
+          status: "completed",
+          input: {},
+          output: "accepted",
+          title: "submit_result",
+          metadata: {},
+          time: { start: Date.now(), end: Date.now() },
+        },
+      })
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          {
+            description: "inspect bug",
+            prompt: "submit the result",
+            subagent_type: "general",
+            task_id: child.id,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "task-tool-only-child",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ noAnswer: { finish: "stop", reasoning: 0 } }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isSuccess(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) expect(exit.value.output).toContain(`<task id="${child.id}" state="completed">`)
+    }),
+  )
+
+  it.instance("execute reports a child that ends with a reasoning-only error as a failed Task", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+
+      const exit = yield* def
+        .execute(
+          { description: "inspect bug", prompt: "look into the cache key path", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            callID: "task-reasoning-only-child",
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: stubOps({
+                error: {
+                  name: "ReasoningOnlyResponseError",
+                  data: {
+                    message:
+                      'The model returned reasoning without an answer (finish reason "stop", reasoning tokens 32000); no text or tool call was produced',
+                  },
+                },
+                noAnswer: { finish: "stop", reasoning: 32000 },
+              }),
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isSuccess(exit)) throw new Error("expected task failure")
+      const sessions = yield* Session.Service
+      const child = (yield* sessions.children(chat.id))[0]
+      const failure = Cause.squash(exit.cause)
+      if (!(failure instanceof Error)) throw new Error("expected Error defect")
+      expect(failure.message).toBe(
+        `Subagent failed (task_id: ${child?.id}): The model returned reasoning without an answer (finish reason "stop", reasoning tokens 32000); no text or tool call was produced`,
+      )
     }),
   )
 

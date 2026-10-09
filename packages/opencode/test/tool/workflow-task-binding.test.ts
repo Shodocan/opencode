@@ -3,7 +3,7 @@ import { Effect, Exit } from "effect"
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { Session } from "../../src/session/session"
 import { Plugin } from "../../src/plugin"
-import { MessageID } from "../../src/session/schema"
+import { MessageID, PartID } from "../../src/session/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { AppLayer } from "../../src/effect/app-runtime"
@@ -31,7 +31,7 @@ for (const denied of [false, true]) {
     const ops: TaskPromptOps = {
       cancel: () => Effect.void,
       resolvePromptParts: () => Effect.succeed([]),
-      prompt: () => Effect.sync(() => { events.push("prompt"); return { info: user, parts: [] } }),
+      prompt: () => Effect.sync(() => { events.push("prompt"); return { info: user, parts: [{ id: PartID.ascending(), messageID: user.id, sessionID: parent.id, type: "text" as const, text: "done" }] } }),
     }
     const host = Plugin.Service.of({
       init: () => Effect.void, list: () => Effect.succeed([]),

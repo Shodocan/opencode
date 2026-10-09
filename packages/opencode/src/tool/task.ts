@@ -395,7 +395,9 @@ export const TaskTool = Tool.define(
             return yield* Effect.interrupt
           }
           const local = error.name === "UnknownError" || error.name === "StructuredOutputError"
-          execution.failure = { kind: local ? "tool" : "provider", error }
+          // A reasoning-only ending is a definitive remote response, not a provider failure.
+          const definitive = error.name === "ReasoningOnlyResponseError"
+          execution.failure = { kind: local || definitive ? "tool" : "provider", error }
           if (error.name === "APIError" && error.data.quotaReplaySuppressed)
             execution.failure = { kind: "provider", error, quotaReplaySuppressed: true }
           if (error.name === "APIError" && !error.data.quotaReplaySuppressed && error.data.hardQuota)
@@ -403,7 +405,7 @@ export const TaskTool = Tool.define(
           if (error.name === "APIError") {
             const code = error.data.statusCode
             if (code === undefined || code < 100 || code > 599) execution.remoteOutcome = "unknown"
-          } else {
+          } else if (!definitive) {
             execution.remoteOutcome = "unknown"
           }
           const message =
@@ -417,7 +419,20 @@ export const TaskTool = Tool.define(
           execution.failure = { kind: "tool", error: failed.state.error }
           return yield* Effect.fail(new Error(`Subagent failed (task_id: ${nextSession.id}): ${failed.state.error}`))
         }
-        return result.parts.findLast((item) => item.type === "text")?.text ?? ""
+        const answer = result.parts.findLast((item) => item.type === "text" && item.text.trim() !== "")
+        if (answer?.type === "text") return answer.text
+        // A child that finished through a completed tool call handed its result
+        // in through that call (e.g. workflow result submission); "" is its answer.
+        const called = (yield* sessions.messages({ sessionID: nextSession.id })).some((message) =>
+          message.parts.some((part) => part.type === "tool" && part.state.status === "completed"),
+        )
+        if (called) return ""
+        // Otherwise the child gave the parent nothing to use; an empty string
+        // here would look like a real empty answer.
+        const info = result.info.role === "assistant" ? result.info : undefined
+        const message = `Subagent produced no answer (task_id: ${nextSession.id}, finish: ${info?.finish}, reasoning tokens: ${info?.tokens.reasoning})`
+        execution.failure = { kind: "tool", error: message }
+        return yield* Effect.fail(new Error(message))
       })
 
       // An abort during the awaited binding still receives a durable receipt,

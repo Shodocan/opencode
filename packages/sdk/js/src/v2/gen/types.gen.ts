@@ -316,6 +316,13 @@ export type ContentFilterError = {
   }
 }
 
+export type ReasoningOnlyResponseError = {
+  name: "ReasoningOnlyResponseError"
+  data: {
+    message: string
+  }
+}
+
 export type ApiError = {
   name: "APIError"
   data: {
@@ -348,6 +355,7 @@ export type AssistantMessage = {
     | StructuredOutputError
     | ContextOverflowError
     | ContentFilterError
+    | ReasoningOnlyResponseError
     | ApiError
   parentID: string
   modelID: string
@@ -1224,6 +1232,7 @@ export type GlobalEvent = {
             | StructuredOutputError
             | ContextOverflowError
             | ContentFilterError
+            | ReasoningOnlyResponseError
             | ApiError
         }
       }
@@ -5449,6 +5458,7 @@ export type SessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
+      | ReasoningOnlyResponseError
       | ApiError
   }
 }
@@ -6818,6 +6828,7 @@ export type EventSessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
+      | ReasoningOnlyResponseError
       | ApiError
   }
 }

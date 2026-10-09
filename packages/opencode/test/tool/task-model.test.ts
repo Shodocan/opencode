@@ -3,7 +3,7 @@ import { Effect, Exit, Schema } from "effect"
 import { TaskTool, Parameters, type TaskPromptOps } from "../../src/tool/task"
 import { Session } from "../../src/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
-import { MessageID } from "../../src/session/schema"
+import { MessageID, PartID } from "../../src/session/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { AppLayer } from "../../src/effect/app-runtime"
@@ -76,7 +76,18 @@ for (const existing of [false, true]) {
             prompt: (input) =>
               Effect.sync(() => {
                 seen.push(input)
-                return { info: user, parts: [] }
+                return {
+                  info: user,
+                  parts: [
+                    {
+                      id: PartID.ascending(),
+                      messageID: user.id,
+                      sessionID: parent.id,
+                      type: "text" as const,
+                      text: "done",
+                    },
+                  ],
+                }
               }),
           }
           const tool = yield* TaskTool

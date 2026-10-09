@@ -44,6 +44,7 @@ const cases: Array<{
   { label: "local UnknownError", error: { name: "UnknownError", data: { message: "local runtime failure" } }, kind: "tool", status: "failed", remoteOutcome: "unknown" },
   { label: "returned MessageAbortedError", error: { name: "MessageAbortedError", data: { message: "child execution interrupted" } }, status: "cancelled", remoteOutcome: "unknown" },
   { label: "completed failing child tool", toolFailure: true, kind: "tool", status: "failed", remoteOutcome: "completed" },
+  { label: "reasoning-only ending", error: { name: "ReasoningOnlyResponseError", data: { message: "reasoning without an answer" } }, kind: "tool", status: "failed", remoteOutcome: "completed" },
 ]
 for (const item of cases) {
   it.instance(`native terminal accurately describes ${item.label}`, () => Effect.gen(function* () {
