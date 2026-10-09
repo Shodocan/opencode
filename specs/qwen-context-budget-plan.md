@@ -2,6 +2,11 @@
 
 **Review status:** iteration-2 approved after required amendments (2026-08-31).
 
+**Amendment (2026-10-09, QCB-003; refs Shodocan/harness-opencode#660):** compaction output is 8,192
+tokens, not 4,096, and the compaction call runs at low reasoning effort. Every `4,096` used as the
+compaction output allowance or the rolling-summary bound below is superseded by 8,192. The
+`M = 4,096` safety margin, the no-public-config rule and the no-retry rule are unchanged.
+
 ## Authority, repository, and frozen invariants
 
 - **Executing repository:** `/home/wdcas/projects/pessoal/opencode`; commands named `cwd packages/opencode` run from `/home/wdcas/projects/pessoal/opencode/packages/opencode`.

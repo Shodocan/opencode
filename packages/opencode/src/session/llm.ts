@@ -156,7 +156,7 @@ const live: Layer.Layer<
           )
 
       // T04 outgoing output: a defined outgoing cap is clamped down to the
-      // route/runtime allowance (compaction: min(4_096, route output, runtime
+      // route/runtime allowance (compaction: min(8_192, route output, runtime
       // cap) via the T02 budget projection allowance; normal requests keep
       // the full allowance because params and allowance share the same
       // formula). A plugin that strips the cap (e.g. the OpenAI/codex

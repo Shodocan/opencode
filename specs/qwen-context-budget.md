@@ -74,11 +74,19 @@ Recompute after route changes, tool/system growth, compaction, and reactive over
 Compaction uses an explicit output allowance:
 
 ```text
-Oc = min(4,096, route output limit, runtime output cap)
+Oc = min(8,192, route output limit, runtime output cap)
 ```
 
-Every summary request passes the same route-aware formula with `Oc`. Normal generation remains at
-32,000.
+Amended 2026-10-09 (QCB-003, refs Shodocan/harness-opencode#660): `Oc` was `min(4,096, ...)`, which
+reasoning models exhausted. The 4,096 value is superseded; `M = 4,096` above is a different constant
+and is unchanged.
+
+Every summary request passes the same route-aware formula with `Oc`, and the compaction call runs at
+the lowest reasoning effort the model defines. Normal generation remains at 32,000.
+
+Worked example, `C=262,144`, no explicit `I`, `Oc=8,192`: `O + H = 8,192 + 20,480 = 28,672`, so
+`B = 262,144 - 28,672 = 233,472`. 233,472 input tokens fit a compaction request; 233,473 do not, and
+that request is terminal (there is no second compaction).
 
 Before summary generation, build a nonpersistent compacting projection that replaces media with
 placeholders and caps historical tool output at the existing 2,000 characters. Preserve the latest
@@ -145,7 +153,7 @@ helper used by normal and compaction requests.
 - normal output remains 32,000;
 - late system/tool/plugin growth crosses the boundary despite low prior usage;
 - `auto: false` produces zero compaction and zero provider calls for an oversized request;
-- compaction output is at most 4,096 and every chunk fits its route;
+- compaction output is at most 8,192 (amended QCB-003, 2026-10-09) and every chunk fits its route;
 - complete-turn/tool-pair chunking and four-call maximum;
 - fixed-overhead and latest-turn failures produce zero summary calls;
 - one rebuild and no second compaction;

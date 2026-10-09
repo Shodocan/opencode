@@ -101,6 +101,7 @@ type BudgetEvaluation = {
 type ContextBudgetNamespace = {
   readonly GROWTH_HEADROOM: number
   readonly SAFETY_MARGIN: number
+  readonly COMPACTION_OUTPUT_TOKENS: number
   readonly HEADROOM: number
   readonly DEFAULT_RESERVED: number
   evaluate(input: {
@@ -181,6 +182,12 @@ describe("overflow.ContextBudget constants", () => {
     expect(CB.SAFETY_MARGIN).toBe(4_096)
     expect(CB.HEADROOM).toBe(20_480)
     expect(CB.DEFAULT_RESERVED).toBe(20_000)
+  })
+
+  test("pins the compaction output allowance at 8,192, separate from the 4,096 safety margin", () => {
+    const CB = budget()
+    expect(CB.COMPACTION_OUTPUT_TOKENS).toBe(8_192)
+    expect(CB.SAFETY_MARGIN).toBe(4_096)
   })
 })
 

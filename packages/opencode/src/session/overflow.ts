@@ -75,6 +75,10 @@ export function isOverflow(input: {
 const GROWTH_HEADROOM = 16_384
 const SAFETY_MARGIN = 4_096
 const HEADROOM = GROWTH_HEADROOM + SAFETY_MARGIN
+// Compaction output allowance (owner decision 2026-10-09, amends QCB-003; refs
+// Shodocan/harness-opencode#660). Reasoning counts against it, so 4,096 cut
+// summaries. Distinct from SAFETY_MARGIN, which stays 4,096.
+const COMPACTION_OUTPUT_TOKENS = 8_192
 const DEFAULT_RESERVED = 20_000
 const INFINITY = Number.POSITIVE_INFINITY
 
@@ -245,6 +249,7 @@ function estimateTokens(value: unknown): number {
 export const ContextBudget = {
   GROWTH_HEADROOM,
   SAFETY_MARGIN,
+  COMPACTION_OUTPUT_TOKENS,
   HEADROOM,
   DEFAULT_RESERVED,
   evaluate,

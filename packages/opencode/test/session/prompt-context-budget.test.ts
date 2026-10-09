@@ -439,7 +439,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       // history×2, overflow trigger, one compaction, one rebuild — no
       // duplicate transport and no second repair.
       expect(hits).toHaveLength(5)
-      expect(maxTokens(hits[3]!.body)).toBe(4_096)
+      expect(maxTokens(hits[3]!.body)).toBe(8_192)
       expect(maxTokens(hits[4]!.body)).toBe(32_000)
       const seen = new Set(hits.map((hit) => JSON.stringify(hit.body)))
       expect(seen.size).toBe(5)
@@ -520,7 +520,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
       const hits = yield* llm.hits
       expect(hits).toHaveLength(5)
-      expect(maxTokens(hits[3]!.body)).toBe(4_096)
+      expect(maxTokens(hits[3]!.body)).toBe(8_192)
       expect(maxTokens(hits[4]!.body)).toBe(32_000)
       const messages = yield* sessions.messages({ sessionID: chat.id })
       expect(messages.filter((message) => message.parts.some((part) => part.type === "compaction"))).toHaveLength(1)
@@ -642,7 +642,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
     120_000,
   )
 
-  it.instance("bound proofs: Qwen budget 209664, summary 4096, rebuild 32000, reserve 12000", () =>
+  it.instance("bound proofs: Qwen budget 209664, summary 8192, rebuild 32000, reserve 12000", () =>
     Effect.gen(function* () {
       const base = Schema.decodeUnknownSync(ConfigV1.Info)({}) as ConfigV1.Info
       const model = qwenModel()
@@ -656,7 +656,21 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       const reserved = { ...base, compaction: { ...base.compaction, reserved: 12_000 } }
       expect(ContextBudget.evaluate({ model, cfg: reserved, estimate: 0, phase: "dispatch" }).budget).toBe(209_664)
 
-      // Behavioral: the one-shot repair requests respect the 4,096 summary
+      // Compaction request on the same route: Oc = 8,192, so O + H = 28,672 and
+      // B = 262,144 - 28,672 = 233,472. 233,472 admits; 233,473 is terminal (no second compaction).
+      const compactionBudget = (estimate: number) =>
+        ContextBudget.evaluate({
+          model,
+          cfg: base,
+          estimate,
+          phase: "compaction",
+          outputTokens: ContextBudget.COMPACTION_OUTPUT_TOKENS,
+        })
+      expect(compactionBudget(0).budget).toBe(233_472)
+      expect(compactionBudget(233_472).admitted).toBe(true)
+      expect(compactionBudget(233_473).admitted).toBe(false)
+
+      // Behavioral: the one-shot repair requests respect the 8,192 summary
       // and 32,000 rebuild allowances; the admitted rebuild proves
       // E <= 209,664 under the gate.
       const { llm } = yield* useServerConfig(qwenCfg)
@@ -682,7 +696,7 @@ describe("T06 durable-lineage one-shot context-budget repair", () => {
       if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
       const hits = yield* llm.hits
       expect(hits).toHaveLength(5)
-      expect(maxTokens(hits[3]!.body)).toBe(4_096)
+      expect(maxTokens(hits[3]!.body)).toBe(8_192)
       expect(maxTokens(hits[4]!.body)).toBe(32_000)
       const state = decodeLineage(rows)
       expect(state.compaction_count).toBe(1)
@@ -869,7 +883,7 @@ describe("soft compaction threshold crossing (harness-opencode#560)", () => {
       const hits = yield* llm.hits
       // + one compaction, one rebuild; the refused request never hit the wire.
       expect(hits).toHaveLength(7)
-      expect(maxTokens(hits[5]!.body)).toBe(4_096)
+      expect(maxTokens(hits[5]!.body)).toBe(8_192)
       expect(JSON.stringify(hits[6]!.body)).toContain("SOFT-FINAL")
       expect(JSON.stringify(hits[6]!.body)).not.toContain("SOFT-HIST-1")
       const messages = yield* sessions.messages({ sessionID: chat.id })
@@ -931,7 +945,7 @@ const writeBigFiles = Effect.fn("test.writeBigFiles")(function* (dir: string, co
 // Estimated sizes (4 chars per token): prompt ~120k, each read result ~15.5k,
 // the last step's reasoning ~60k. Four read steps stay admitted (~190k with
 // the system prompt and tools); the fifth step takes the next request to
-// ~265k. The single-turn transcript (~257k plus the 4,096 summary reserve)
+// ~265k. The single-turn transcript (~257k plus the 8,192 summary reserve)
 // exceeds the 237,568 compaction-phase budget that the planner applies to
 // the intact latest turn, while the summary request itself (tool results
 // truncated) still fits.
@@ -971,9 +985,9 @@ describe("pre-dispatch budget refusal after durable output (harness-opencode#560
       if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
       const hits = yield* llm.hits
       // read steps, then the refused request never hits the wire: one
-      // compaction (4,096 output) and one continued step.
+      // compaction (8,192 output) and one continued step.
       expect(hits).toHaveLength(READ_STEPS + 2)
-      expect(maxTokens(hits[READ_STEPS]!.body)).toBe(4_096)
+      expect(maxTokens(hits[READ_STEPS]!.body)).toBe(8_192)
       expect(JSON.stringify(hits[READ_STEPS + 1]!.body)).not.toContain("QCB-THINK")
       const messages = yield* sessions.messages({ sessionID: chat.id })
       expect(overflowErrors(messages)).toHaveLength(0)
