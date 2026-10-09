@@ -20,7 +20,7 @@ check it on every sync.**
 
 | Feature | Status | Hot files |
 |---|---|---|
-| QCB — durable context-budget lineage, one-shot repair, recorded proof | live | `packages/opencode/src/session/overflow.ts`, `src/session/prompt.ts`, `test/session/prompt-context-budget.test.ts`, `test/session/qwen-context-budget-recorded.test.ts` |
+| QCB — durable context-budget lineage, one-shot repair, recorded proof, compaction output allowance 8,192 (#660) | live | `packages/opencode/src/session/overflow.ts`, `src/session/prompt.ts`, `src/session/compaction.ts`, `src/session/llm/request.ts`, `test/session/prompt-context-budget.test.ts`, `test/session/qwen-context-budget-recorded.test.ts` |
 | MCP channel features | live | see rc.1 merge commit d5e25ebbfd |
 | Configurable auto-compaction threshold (`compaction.threshold` fraction + per-model `compaction.thresholds` fractions) | live | `packages/core/src/v1/config/config.ts`, `packages/core/src/config/compaction.ts`, `packages/core/src/v1/config/migrate.ts`, `packages/opencode/src/session/overflow.ts` |
 | **(7) MinIO auto-update** | live (re-grafted) | `packages/opencode/src/installation/index.ts`, `test/installation/custom-minio.test.ts` |
@@ -51,6 +51,20 @@ its upstream counterpart (helpers after `getReleaseType`, `upgradeCustomMinio`
 after `upgradeCurl`, the three gates inside `method()`/`latest()`/`upgrade()`).
 Tests: `packages/opencode/test/installation/custom-minio.test.ts` (path
 detection, manifest latest(), in-place swap, RC version scheme).
+
+## Feature (QCB) — compaction output allowance 8,192 (Shodocan/harness-opencode#660)
+
+Owner decision 2026-10-09 amends QCB-003: compaction output is `min(8,192, route output, runtime cap)`
+and the compaction call runs at the lowest effort the model defines (`COMPACTION_EFFORTS` in
+`src/session/llm/request.ts`; `none` is never picked). Normal generation is unchanged. No retry and no
+second compaction call. Spec amendments: `specs/qwen-context-budget-choices.md` (QCB-003).
+
+**Future-merge recipe**: the constant is `COMPACTION_OUTPUT_TOKENS` in `src/session/overflow.ts`
+(`ContextBudget`). `request.ts` (allowance and variant block) and `compaction.ts`
+(`PLANNER_SUMMARY_OUTPUT_TOKENS`, derived) read it. On conflict keep the constant, derive from it, and
+keep `SAFETY_MARGIN = 4_096` (QCB-002, a different constant). Tests:
+`test/session/llm-request-budget.test.ts`, `test/session/compaction-budget.test.ts`,
+`test/session/prompt-context-budget.test.ts`, `test/session/overflow.test.ts`.
 
 ## Version scheme for the custom distribution
 

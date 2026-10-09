@@ -21,7 +21,7 @@ import { MAX_STEPS_PROMPT } from "@opencode-ai/core/session/runner/max-steps"
 //    serialization-affecting provider options, and the output allowance.
 //  - Functions never enter the projection; media is sized conservatively
 //    without dereference; unknown-size media fails closed.
-//  - Normal output allowance stays 32000; compaction gets min(4096, ...).
+//  - Normal output allowance stays 32000; compaction gets min(8192, ...).
 
 const sessionID = "session-llm-request-budget"
 const MODEL_OUTPUT = 32_000
@@ -285,13 +285,13 @@ describe("session.llm-request-budget (T02)", () => {
     expect((projection as any).outputAllowance ?? (projection as any).outputTokens).toBe(32_000)
   })
 
-  test("compaction requests project min(4096, route output) as the output allowance", async () => {
+  test("compaction requests project min(8192, route output) as the output allowance", async () => {
     const atCap = await run(prepareInput({ agent: { name: "compaction" } as Partial<Agent.Info> }))
     expect(
       (atCap as any).budgetProjection.outputAllowance ?? (atCap as any).budgetProjection.outputTokens,
-    ).toBe(4_096)
+    ).toBe(8_192)
 
-    // Route output limit below 4096 wins (min applies to route output too).
+    // Route output limit below 8192 wins (min applies to route output too).
     const smallRoute = await run(
       prepareInput({ agent: { name: "compaction" } as Partial<Agent.Info>, model: { limit: { context: 262_144, output: 2_000 } } as Partial<Provider.Model> }),
     )
@@ -307,6 +307,66 @@ describe("session.llm-request-budget (T02)", () => {
       } as PrepareOverrides),
     )
     expect((smallRuntime as any).budgetProjection).toBeDefined()
+
+    // The runtime output cap binds when it is the lowest of the three.
+    const runtimeCap = await run({
+      ...prepareInput({ agent: { name: "compaction" } as Partial<Agent.Info> }),
+      flags: { outputTokenMax: 3_000, client: "test" },
+    } as never)
+    expect(
+      (runtimeCap as any).budgetProjection.outputAllowance ?? (runtimeCap as any).budgetProjection.outputTokens,
+    ).toBe(3_000)
+  })
+
+  const effortVariants = {
+    reasoning: true,
+    variants: {
+      low: { reasoningEffort: "low" },
+      medium: { reasoningEffort: "medium" },
+      high: { reasoningEffort: "high" },
+      max: { reasoningEffort: "max" },
+    },
+  } as Partial<Provider.Model>
+
+  test("compaction runs at low reasoning effort even when the session variant is max", async () => {
+    const compaction = await run(
+      prepareInput({
+        agent: { name: "compaction" } as Partial<Agent.Info>,
+        user: { model: { providerID: "testq", modelID: "m1", variant: "max" } } as Partial<SessionV1.User>,
+        model: effortVariants,
+      }),
+    )
+    expect((compaction as any).params.options.reasoningEffort).toBe("low")
+  })
+
+  test("normal requests keep the session reasoning variant", async () => {
+    const normal = await run(
+      prepareInput({
+        user: { model: { providerID: "testq", modelID: "m1", variant: "max" } } as Partial<SessionV1.User>,
+        model: effortVariants,
+      }),
+    )
+    expect((normal as any).params.options.reasoningEffort).toBe("max")
+  })
+
+  test("compaction without a low variant takes the lowest defined effort, never none", async () => {
+    const compaction = await run(
+      prepareInput({
+        agent: { name: "compaction" } as Partial<Agent.Info>,
+        model: {
+          reasoning: true,
+          variants: { none: { reasoningEffort: "none" }, high: { reasoningEffort: "high" }, medium: { reasoningEffort: "medium" } },
+        } as Partial<Provider.Model>,
+      }),
+    )
+    expect((compaction as any).params.options.reasoningEffort).toBe("medium")
+  })
+
+  test("compaction on a model with no reasoning variants gets no effort option", async () => {
+    const compaction = await run(
+      prepareInput({ agent: { name: "compaction" } as Partial<Agent.Info>, model: { reasoning: false } as Partial<Provider.Model> }),
+    )
+    expect((compaction as any).params.options.reasoningEffort).toBeUndefined()
   })
 
   test("projection is immutable: later mutation of prepared inputs does not change it", async () => {

@@ -659,7 +659,7 @@ describe("T04 production final admission gates", () => {
 // --- 5. Compaction outgoing allowance ---------------------------------------
 
 describe("T04 production compaction allowance", () => {
-  test("large-route native compaction sends max_tokens 4,096", async () => {
+  test("large-route native compaction sends max_tokens 8,192", async () => {
     const model = nativeRouteModel(cases.nativeRoutes[1]!)
     const client = clientHarness()
     const env = llmHarness({ model, client, native: true })
@@ -682,10 +682,10 @@ describe("T04 production compaction allowance", () => {
     if (!captured) throw new Error("compaction native request was not captured")
     const prepared = await Effect.runPromise(LLMClient.prepare(captured))
     const body = prepared.body as Record<string, unknown>
-    expect(body.max_tokens ?? body.max_output_tokens).toBe(4_096)
+    expect(body.max_tokens ?? body.max_output_tokens).toBe(8_192)
   })
 
-  test("large-route AI SDK compaction sends maxOutputTokens 4,096", async () => {
+  test("large-route AI SDK compaction sends maxOutputTokens 8,192", async () => {
     const model = nativeRouteModel(cases.nativeRoutes[1]!)
     let captured: Record<string, unknown> | undefined
     const language = terminalModel(model.api.id, (options) => {
@@ -708,7 +708,7 @@ describe("T04 production compaction allowance", () => {
     expect(Exit.isSuccess(exit)).toBe(true)
     expect(client.calls()).toBe(0)
     expect(captured).toBeDefined()
-    expect(captured?.maxOutputTokens).toBe(4_096)
+    expect(captured?.maxOutputTokens).toBe(8_192)
   })
 })
 

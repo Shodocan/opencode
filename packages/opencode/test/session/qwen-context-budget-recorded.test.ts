@@ -57,7 +57,7 @@ import { testEffect } from "../lib/effect"
 //
 // The cassette is credential-free no-regression evidence: it replays a
 // Qwen-shaped late crossing (history, a late provider-reported usage total,
-// one 4,096-summary compaction, one 32,000 rebuild) against the recorded HTTP
+// one 8,192-summary compaction, one 32,000 rebuild) against the recorded HTTP
 // client on the NATIVE runtime (experimentalNativeLlm; the repo's supported
 // recording seam, llm-native-recorded.test.ts precedent) — no live network,
 // no credentials. The usage total (240,050) arrives on a normally finished
@@ -340,7 +340,7 @@ describe("Qwen context-budget recorded proof", () => {
       // turn (interaction 3): the replayed provider reports a usage total
       // (240,050) that crosses the model's legacy usable boundary (262,144 -
       // 32,000 = 230,144) at step-finish — the native runtime's reactive
-      // overflow — driving one 4,096-summary compaction (interaction 4) and
+      // overflow — driving one 8,192-summary compaction (interaction 4) and
       // one 32,000 rebuild (interaction 5). The step finished normally, so
       // this is a soft threshold crossing: it compacts without recording or
       // spending the hard-overflow one-shot repair (harness-opencode#560).

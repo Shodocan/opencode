@@ -11,7 +11,7 @@
       "oversizedSystemChars": 300000
     },
     "compaction": {
-      "note": "agent.name = 'compaction'; same normal content; expected Oc = min(4096, route output 32000) = 4096",
+      "note": "agent.name = 'compaction'; same normal content; expected Oc = min(8192, route output 32000) = 8192",
       "agentName": "compaction"
     }
   },

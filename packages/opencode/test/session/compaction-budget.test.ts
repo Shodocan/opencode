@@ -23,11 +23,11 @@
  *   - At most four chunks (`MAX_CHUNK_COUNT = 4`); a fifth required chunk
  *     fails terminally with reason `chunk-limit`.
  *   - Every proposed request (`CompactionPlannerProposal`) is admitted through
- *     ContextBudget.evaluate with phase "compaction" and the 4,096 compaction
+ *     ContextBudget.evaluate with phase "compaction" and the 8,192 compaction
  *     output allowance, and its `requestEstimate` includes the fixed
  *     transformed compaction overhead, the latest intact tail, and a
  *     conservative worst-case prior rolling summary reserve pinned to
- *     4,096 * 4 = 16,384 characters (`SUMMARY_RESERVE_CHARS`) plus canonical
+ *     8,192 * 4 = 32,768 characters (`SUMMARY_RESERVE_CHARS`) plus canonical
  *     message-wrapper overhead measured by the same projection. A proposal
  *     whose estimate only fits with an empty prior summary is never planned.
  *   - Fixed overhead and latest-turn admission are evaluated BEFORE any chunk
@@ -40,8 +40,8 @@
  * Planner contract assumed by these tests (exported from src/session/compaction.ts):
  *
  *   export const CompactionPlanner = {
- *     SUMMARY_RESERVE_CHARS: 16_384,   // 4,096 summary tokens * 4 chars/token
- *     SUMMARY_OUTPUT_TOKENS: 4_096,
+ *     SUMMARY_RESERVE_CHARS: 32_768,   // 8,192 summary tokens * 4 chars/token
+ *     SUMMARY_OUTPUT_TOKENS: 8_192,
  *     MAX_CHUNK_COUNT: 4,
  *     TOOL_OUTPUT_MAX_CHARS: 2_000,
  *     plan(input: {
@@ -67,7 +67,7 @@
  *     requestEstimate: number,   // ContextBudget.estimate of that request
  *                                // INCLUDING the 16,384-char reserve + wrappers
  *     requestHash: string,       // deterministic sha-256 hex
- *     admitted: boolean,         // ContextBudget.evaluate(..., outputTokens: 4_096,
+ *     admitted: boolean,         // ContextBudget.evaluate(..., outputTokens: 8_192,
  *                                // phase "compaction") admission for this proposal
  *   }
  *
@@ -172,7 +172,7 @@ function cfg(compaction?: ConfigV1.Info["compaction"]): ConfigV1.Info {
 }
 
 // The per-request compaction budget for a route: ContextBudget.evaluate with
-// the 4,096 compaction output allowance (QCB-003). Computed from the T01
+// the 8,192 compaction output allowance (QCB-003). Computed from the T01
 // evaluator — this test never duplicates the algebra.
 function compactionBudget(model: Provider.Model, config: ConfigV1.Info): number {
   return Overflow.ContextBudget.evaluate({
@@ -483,10 +483,10 @@ describe("CompactionPlanner — complete user-turn grouping, tool pairs, oversiz
 // ─── Per-chunk ContextBudget admission ───────────────────────────────────────
 
 describe("CompactionPlanner — per-chunk ContextBudget admission with reserve", () => {
-  test("pins summary reserve 16,384 chars, 4,096 summary tokens, four-chunk maximum, 2,000 tool cap", () => {
+  test("pins summary reserve 32,768 chars, 8,192 summary tokens, four-chunk maximum, 2,000 tool cap", () => {
     const P = planner()
-    expect(P.SUMMARY_RESERVE_CHARS).toBe(4_096 * 4)
-    expect(P.SUMMARY_OUTPUT_TOKENS).toBe(4_096)
+    expect(P.SUMMARY_RESERVE_CHARS).toBe(8_192 * 4)
+    expect(P.SUMMARY_OUTPUT_TOKENS).toBe(8_192)
     expect(P.MAX_CHUNK_COUNT).toBe(4)
     expect(P.TOOL_OUTPUT_MAX_CHARS).toBe(2_000)
   })
@@ -501,7 +501,7 @@ describe("CompactionPlanner — per-chunk ContextBudget admission with reserve",
     const messages = [...turn(u1, [a1]), ...turn(u2, [a2]), ...latest]
     const config = cfg()
     const budget = compactionBudget(qwen(), config)
-    expect(budget).toBe(237_568) // Qwen route with the 4,096 compaction allowance
+    expect(budget).toBe(233_472) // Qwen route with the 8,192 compaction allowance
 
     const plan = P.plan({ messages, model: qwen(), cfg: config, requestHash: "seed" })
     expect(plan.proposals.length).toBe(plan.chunks.length)
@@ -530,12 +530,12 @@ describe("CompactionPlanner — per-chunk ContextBudget admission with reserve",
 
   test("a history that only fits when the prior summary is empty is never packed into a single chunk", () => {
     const P = planner()
-    // Two old turns of 472,000 chars each: one chunk = 944,000 chars
-    // (236,000 tokens) + the 16,384-char reserve (4,096 tokens) = 240,096
-    // tokens > the 237,568-token compaction budget, even with zero wrapper
+    // Two old turns of 456,000 chars each: one chunk = 912,000 chars
+    // (228,000 tokens) + the 32,768-char reserve (8,192 tokens) = 236,192
+    // tokens > the 233,472-token compaction budget, even with zero wrapper
     // overhead. A reserve-honoring planner must split; a planner that only
     // fits when the summary is empty would attempt one chunk.
-    const half = "c".repeat(472_000)
+    const half = "c".repeat(456_000)
     const u1 = userMessage({ parts: [{ id: partID(), sessionID, messageID: "pending" as SessionV1.TextPart["messageID"], type: "text", text: half }] })
     const a1 = assistantMessage({})
     const u2 = userMessage({ parts: [{ id: partID(), sessionID, messageID: "pending" as SessionV1.TextPart["messageID"], type: "text", text: half }] })
@@ -584,7 +584,7 @@ describe("CompactionPlanner — per-chunk ContextBudget admission with reserve",
 describe("CompactionPlanner - pre-call rejections before any chunk planning", () => {
   test("a route whose compaction budget is zero fails with fixed-overhead and proposes nothing", () => {
     const P = planner()
-    // Compaction budget = 24,576 - max(20,000, 4,096 + 20,480) = 0: not even
+    // Compaction budget = 24,576 - max(20,000, 8,192 + 20,480) < 0, clamped to 0: not even
     // the fixed transformed overhead fits, so nothing may be planned or sent.
     const model = createModel({ context: 24_576, output: 32_000 })
     expect(compactionBudget(model, cfg())).toBe(0)
@@ -729,7 +729,8 @@ describe("CompactionExecutor - bounded rolling summaries", () => {
         summarize: (request) =>
           Effect.sync(() => {
             requests.push(request)
-            return { text: request.chunk.index === 0 ? "x".repeat(17_000) : `summary-${request.chunk.index}` }
+            // 33,000 chars is about 8,250 tokens: above the 8,192 summary bound.
+            return { text: request.chunk.index === 0 ? "x".repeat(33_000) : `summary-${request.chunk.index}` }
           }),
         persist,
       })

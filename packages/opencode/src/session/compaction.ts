@@ -736,9 +736,9 @@ export * as SessionCompaction from "./compaction"
 // and never mutates the input transcript. It projects older history into at
 // most MAX_CHUNK_COUNT budget-checked chunks, keeps the latest user turn
 // intact outside every chunk, and admits every proposed request through
-// ContextBudget.evaluate with the 4,096 compaction output allowance — always
+// ContextBudget.evaluate with the 8,192 compaction output allowance — always
 // counting the conservative worst-case prior rolling summary reserve
-// (SUMMARY_RESERVE_CHARS = 4,096 * 4), so a chunk that only fits with an
+// (SUMMARY_RESERVE_CHARS = 8,192 * 4), so a chunk that only fits with an
 // empty prior summary is never planned.
 //
 //   - Media parts become deterministic `[Attached <mime>: <filename>]` text
@@ -819,8 +819,10 @@ export type CompactionPlannerInput = {
 }
 
 const PLANNER_PHASE = "compaction"
-const PLANNER_SUMMARY_OUTPUT_TOKENS = 4_096
-// Pinned serialized prior-summary reserve: 4,096 summary tokens * 4 chars/token.
+// Same value as the compaction output allowance: an accepted summary can be as
+// large as the call may produce, so the rolling-summary admission bound follows it.
+const PLANNER_SUMMARY_OUTPUT_TOKENS = ContextBudget.COMPACTION_OUTPUT_TOKENS
+// Pinned serialized prior-summary reserve: 8,192 summary tokens * 4 chars/token.
 const PLANNER_SUMMARY_RESERVE_CHARS = PLANNER_SUMMARY_OUTPUT_TOKENS * 4
 const PLANNER_MAX_CHUNK_COUNT = 4
 // Short deterministic marker standing in for the worst-case prior rolling
@@ -1002,7 +1004,7 @@ function plannerPlan(input: CompactionPlannerInput): CompactionPlannerPlan {
   const seed = input.requestHash ?? ""
   const route = { providerID: model.providerID, modelID: model.id }
 
-  // Compaction-phase route budget with the 4,096 summary output allowance (QCB-003).
+  // Compaction-phase route budget with the 8,192 summary output allowance (QCB-003).
   const evaluation = ContextBudget.evaluate({
     model,
     cfg,
@@ -1139,7 +1141,7 @@ export const CompactionPlanner = {
 // one call per chunk (1..4), each request = prior rolling summary + next
 // chunk + the latest intact turn. Every request is re-admitted through
 // ContextBudget before its call (the actual prior rolling text is
-// materialized, not merely reserved), and the pinned 4,096-token rolling
+// materialized, not merely reserved), and the pinned 8,192-token rolling
 // summary reserve bounds mid-execution growth: once the prior summary
 // outgrows it, no later chunk can ever fit, so execution stops before the
 // next call. The final projection must reduce (E_after < E_before) and fit
@@ -1195,7 +1197,7 @@ export const CompactionExecutor = {
     const admissions: { estimate: number; budget: number; admitted: boolean }[] = []
 
     for (const chunk of plan.chunks) {
-      // Pinned rolling reserve: once the prior summary outgrows the 4,096
+      // Pinned rolling reserve: once the prior summary outgrows the 8,192
       // summary-token allowance, stop before the next call — a later chunk
       // can never be admitted.
       if (calls > 0 && rolling !== undefined && Token.estimate(rolling) > PLANNER_SUMMARY_OUTPUT_TOKENS)

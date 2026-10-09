@@ -16,8 +16,11 @@ import type { Plugin } from "@/plugin"
 import { mergeDeep } from "remeda"
 import z from "zod"
 import type { InferenceCategory } from "@opencode-ai/llm"
+import { ContextBudget } from "../overflow"
 
 const USER_AGENT = `opencode/${InstallationVersion}`
+// Lowest first. Compaction uses the first name the model defines as a variant.
+const COMPACTION_EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"]
 
 type PrepareInput = {
   readonly user: SessionV1.User
@@ -160,10 +163,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
     system.push(header, rest.join("\n"))
   }
 
-  const variant =
-    !input.small && input.model.variants && input.user.model.variant
-      ? input.model.variants[input.user.model.variant]
-      : {}
+  // Compaction replaces the session variant with the lowest effort the model
+  // defines, so reasoning does not eat the summary allowance (#660). "none" is
+  // deliberately absent: it disables reasoning, which not every route accepts.
+  const variantName =
+    input.agent.name === "compaction"
+      ? COMPACTION_EFFORTS.find((effort) => input.model.variants?.[effort])
+      : input.user.model.variant
+  const variant = !input.small && input.model.variants && variantName ? input.model.variants[variantName] : {}
   const base = input.small
     ? ProviderTransform.smallOptions(input.model)
     : ProviderTransform.options({
@@ -269,10 +276,14 @@ export const prepare = Effect.fn("LLMRequestPrep.prepare")(function* (input: Pre
   const sortedTools = Object.fromEntries(Object.entries(tools).toSorted(([a], [b]) => a.localeCompare(b)))
 
   // Output allowance: normal requests keep the full runtime output allowance;
-  // compaction is bounded by min(4_096, route output limit, runtime cap).
+  // compaction is bounded by min(COMPACTION_OUTPUT_TOKENS, route output limit, runtime cap).
   const outputAllowance =
     input.agent.name === "compaction"
-      ? Math.min(4_096, input.model.limit.output, input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER)
+      ? Math.min(
+          ContextBudget.COMPACTION_OUTPUT_TOKENS,
+          input.model.limit.output,
+          input.flags?.outputTokenMax ?? Number.MAX_SAFE_INTEGER,
+        )
       : ProviderTransform.maxOutputTokens(input.model, input.flags?.outputTokenMax)
 
   const budgetProjection = yield* Effect.tryPromise({
