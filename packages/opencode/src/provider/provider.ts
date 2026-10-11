@@ -1103,6 +1103,7 @@ const DefaultModelIDs = Schema.Record(Schema.String, Schema.String)
 
 export const ListResult = Schema.Struct({
   all: Schema.Array(Info),
+  discovery: Schema.optional(Schema.Array(Schema.Struct({ id: ProviderV2.ID, name: Schema.String }))),
   default: DefaultModelIDs,
   connected: Schema.Array(Schema.String),
 })

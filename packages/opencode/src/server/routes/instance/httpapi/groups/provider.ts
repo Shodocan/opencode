@@ -42,7 +42,7 @@ export const ProviderApi = HttpApi.make("provider")
           OpenApi.annotations({
             identifier: "provider.list",
             summary: "List providers",
-            description: "Get a list of all available AI providers, including both available and connected ones.",
+            description: "List active providers for model selection and discoverable providers for connection setup.",
           }),
         ),
         HttpApiEndpoint.get("auth", `${root}/auth`, {

@@ -56,6 +56,15 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       )
       return {
         all: Object.values(providers).map(Provider.toPublicInfo),
+        discovery: [
+          ...Object.values(all).map((item) => ({
+            id: ProviderV2.ID.make(item.id),
+            name: connected[item.id]?.name ?? item.name,
+          })),
+          ...Object.values(connected)
+            .filter((item) => !(item.id in all))
+            .map((item) => ({ id: item.id, name: item.name })),
+        ],
         default: Provider.defaultModelIDs(providers),
         connected: Object.keys(providers).filter((id) => id in connected || credentials[id]),
       }

@@ -44,10 +44,13 @@ type ProviderOption =
       type: "custom"
     })
 
-export function providerOptions(list: { id: string; name: string }[]): ProviderOption[] {
+export function providerOptions(list: {
+  all: { id: string; name: string }[]
+  discovery?: { id: string; name: string }[]
+}): ProviderOption[] {
   return [
     ...pipe(
-      list,
+      list.discovery ?? list.all,
       sortBy(
         (x) => PROVIDER_PRIORITY[x.id] ?? 99,
         (x) => x.name.toLowerCase(),
@@ -115,7 +118,7 @@ export function createDialogProviderOptions() {
 
   const options = createMemo(() => {
     return pipe(
-      providerOptions(sync.data.provider_next.all),
+      providerOptions(sync.data.provider_next),
       map((provider) => {
         if (provider.type === "custom") {
           return {
@@ -126,7 +129,7 @@ export function createDialogProviderOptions() {
             async onSelect() {
               const providerID = await promptCustomProviderID()
               if (!providerID) return
-              return dialog.replace(() => <ApiMethod providerID={providerID} title="API key" custom />)
+              return dialog.replace(() => <ApiMethod providerID={providerID} title="API key" />)
             },
           }
         }
@@ -280,6 +283,14 @@ function AutoMethod(props: AutoMethodProps) {
     }
     await sdk.client.instance.dispose()
     await sync.bootstrap()
+    if (!sync.data.provider.some((provider) => provider.id === props.providerID)) {
+      toast.show({
+        variant: "info",
+        message: `Saved credential for ${props.providerID}. Configure it in opencode.json to use it.`,
+      })
+      dialog.clear()
+      return
+    }
     dialog.replace(() => <DialogModel providerID={props.providerID} />)
   })
 
@@ -316,6 +327,7 @@ function CodeMethod(props: CodeMethodProps) {
   const sdk = useSDK()
   const sync = useSync()
   const dialog = useDialog()
+  const toast = useToast()
   const [error, setError] = createSignal(false)
 
   return (
@@ -331,6 +343,14 @@ function CodeMethod(props: CodeMethodProps) {
         if (!error) {
           await sdk.client.instance.dispose()
           await sync.bootstrap()
+          if (!sync.data.provider.some((provider) => provider.id === props.providerID)) {
+            toast.show({
+              variant: "info",
+              message: `Saved credential for ${props.providerID}. Configure it in opencode.json to use it.`,
+            })
+            dialog.clear()
+            return
+          }
           dialog.replace(() => <DialogModel providerID={props.providerID} />)
           return
         }
@@ -353,7 +373,6 @@ interface ApiMethodProps {
   providerID: string
   title: string
   metadata?: Record<string, string>
-  custom?: boolean
 }
 function ApiMethod(props: ApiMethodProps) {
   const dialog = useDialog()
@@ -394,7 +413,7 @@ function ApiMethod(props: ApiMethodProps) {
       }
       onConfirm={async (value) => {
         if (!value) return
-        await sdk.client.auth.set({
+        const result = await sdk.client.auth.set({
           providerID: props.providerID,
           auth: {
             type: "api",
@@ -402,9 +421,13 @@ function ApiMethod(props: ApiMethodProps) {
             ...(props.metadata ? { metadata: props.metadata } : {}),
           },
         })
+        if (result.error) {
+          toast.show({ variant: "error", message: JSON.stringify(result.error) })
+          return
+        }
         await sdk.client.instance.dispose()
         await sync.bootstrap()
-        if (props.custom && !sync.data.provider_next.all.some((provider) => provider.id === props.providerID)) {
+        if (!sync.data.provider.some((provider) => provider.id === props.providerID)) {
           toast.show({
             variant: "info",
             message: `Saved credential for ${props.providerID}. Configure it in opencode.json to use it.`,

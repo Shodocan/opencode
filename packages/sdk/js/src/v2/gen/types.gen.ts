@@ -329,6 +329,35 @@ export type ApiError = {
     metadata?: {
       [key: string]: string
     }
+    hardQuota?:
+      | {
+          schema_version: "1.0"
+          reason: "account_quota_exhausted" | "account_usage_limit"
+          matrix_sha256: string
+          receipt_id: string
+          observed_at: string
+          reset_at?: string
+          emitted_output_or_action: false
+          source: "provider_rejection"
+          response_complete: true
+          turn_provider_requests: 1
+          status_code?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+          provider_request_id?: string
+        }
+      | {
+          schema_version: "1.0"
+          reason: "account_quota_exhausted" | "account_usage_limit"
+          matrix_sha256: string
+          receipt_id: string
+          observed_at: string
+          reset_at?: string
+          emitted_output_or_action: false
+          source: "open_circuit"
+          original_receipt_id: string
+          turn_provider_requests: 0
+        }
+    quotaFallbackFailed?: boolean
+    quotaReplaySuppressed?: true
   }
 }
 
@@ -562,6 +591,102 @@ export type StepFinishPart = {
   reason: string
   snapshot?: string
   cost: number
+  inference?: {
+    requested: {
+      provider_id: string
+      model_id: string
+      effort?: string
+    }
+    response: {
+      model_id?: string
+      source: "transport_response"
+      upstream_actual_identity: "unknown"
+    }
+    transport_route?:
+      | {
+          source: "managed_gateway_attestation"
+          provider: "is1" | "yolo" | "ollama" | "opencode_go"
+          model: string
+          effort?: string
+          observation_id: string
+          receipt_version?: unknown
+          requested_model?: unknown
+          requested_effort?: unknown
+          generation?: unknown
+          selection_reason?: unknown
+        }
+      | {
+          source: "managed_gateway_attestation"
+          provider: GatewayRouteTarget
+          model: GatewayRouteModel
+          effort: GatewayRouteEffort
+          observation_id: string
+          receipt_version: 2
+          requested_model: GatewayRouteRequestedModel
+          requested_effort: GatewayRouteEffort
+          generation: GatewayRouteGeneration
+          selection_reason: GatewayRouteSelectionReason
+        }
+    category?: {
+      source: "host_policy_resolution" | "workflow_frozen_matrix"
+      category:
+        | "coordinate"
+        | "inspect"
+        | "intermediate"
+        | "reasoning"
+        | "review"
+        | "planning"
+        | "task_review"
+        | "consolidation"
+      matrix_sha256: string
+    }
+    quota_fallback?: {
+      evidence:
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "provider_rejection"
+            response_complete: true
+            turn_provider_requests: 1
+            status_code?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+            provider_request_id?: string
+          }
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "open_circuit"
+            original_receipt_id: string
+            turn_provider_requests: 0
+          }
+      provider_id: string
+      model_id: string
+      effort: string
+    }
+    usage?: {
+      source: "llm_normalized"
+      input_tokens?: number
+      output_tokens?: number
+      total_tokens?: number
+      reasoning_tokens?: number
+      cache_read_input_tokens?: number
+      cache_write_input_tokens?: number
+    }
+    cost: {
+      amount: number
+      semantics: "configured_rate_estimate"
+      actual_bill: "unknown"
+    }
+  }
   tokens: {
     total?: number
     input: number
@@ -1759,6 +1884,18 @@ export type AgentConfig = {
     | undefined
 }
 
+export type ProviderRetryConfig = {
+  maxAttempts?: number
+  initialDelayMs?: number
+  maxDelayMs?: number
+  maxElapsedMs?: number
+  /**
+   * Exponential backoff multiplier (default 2).
+   */
+  backoffFactor?: number | "NaN" | "Infinity" | "-Infinity" | "Infinity" | "-Infinity" | "NaN"
+  retryableStatuses?: Array<number>
+}
+
 export type ProviderConfig = {
   api?: string
   name?: string
@@ -1784,7 +1921,19 @@ export type ProviderConfig = {
      * Timeout in milliseconds between streamed SSE chunks for this provider (default: 300000). If no chunk arrives within this window, the request is aborted. Set to false to disable timeout.
      */
     chunkTimeout?: number | false
-    [key: string]: unknown | string | boolean | number | false | number | false | number | false | undefined
+    retry?: ProviderRetryConfig
+    [key: string]:
+      | unknown
+      | string
+      | boolean
+      | number
+      | false
+      | number
+      | false
+      | number
+      | false
+      | ProviderRetryConfig
+      | undefined
   }
   models?: {
     [key: string]: {
@@ -2857,6 +3006,167 @@ export type OutputFormat1 =
       retryCount?: number
     }
 
+export type ApiError1 = {
+  name: "APIError"
+  data: {
+    message: string
+    statusCode?: number
+    isRetryable: boolean
+    responseHeaders?: {
+      [key: string]: string
+    }
+    responseBody?: string
+    metadata?: {
+      [key: string]: string
+    }
+    hardQuota?:
+      | {
+          schema_version: "1.0"
+          reason: "account_quota_exhausted" | "account_usage_limit"
+          matrix_sha256: string
+          receipt_id: string
+          observed_at: string
+          reset_at?: string
+          emitted_output_or_action: false
+          source: "provider_rejection"
+          response_complete: true
+          turn_provider_requests: 1
+          status_code?: number | "NaN" | "Infinity" | "-Infinity"
+          provider_request_id?: string
+        }
+      | {
+          schema_version: "1.0"
+          reason: "account_quota_exhausted" | "account_usage_limit"
+          matrix_sha256: string
+          receipt_id: string
+          observed_at: string
+          reset_at?: string
+          emitted_output_or_action: false
+          source: "open_circuit"
+          original_receipt_id: string
+          turn_provider_requests: 0
+        }
+    quotaFallbackFailed?: boolean
+    quotaReplaySuppressed?: true
+  }
+}
+
+export type StepFinishPart1 = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: "step-finish"
+  reason: string
+  snapshot?: string
+  cost: number
+  inference?: {
+    requested: {
+      provider_id: string
+      model_id: string
+      effort?: string
+    }
+    response: {
+      model_id?: string
+      source: "transport_response"
+      upstream_actual_identity: "unknown"
+    }
+    transport_route?:
+      | {
+          source: "managed_gateway_attestation"
+          provider: "is1" | "yolo" | "ollama" | "opencode_go"
+          model: string
+          effort?: string
+          observation_id: string
+          receipt_version?: unknown
+          requested_model?: unknown
+          requested_effort?: unknown
+          generation?: unknown
+          selection_reason?: unknown
+        }
+      | {
+          source: "managed_gateway_attestation"
+          provider: GatewayRouteTarget
+          model: GatewayRouteModel
+          effort: GatewayRouteEffort
+          observation_id: string
+          receipt_version: 2
+          requested_model: GatewayRouteRequestedModel
+          requested_effort: GatewayRouteEffort
+          generation: GatewayRouteGeneration
+          selection_reason: GatewayRouteSelectionReason
+        }
+    category?: {
+      source: "host_policy_resolution" | "workflow_frozen_matrix"
+      category:
+        | "coordinate"
+        | "inspect"
+        | "intermediate"
+        | "reasoning"
+        | "review"
+        | "planning"
+        | "task_review"
+        | "consolidation"
+      matrix_sha256: string
+    }
+    quota_fallback?: {
+      evidence:
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "provider_rejection"
+            response_complete: true
+            turn_provider_requests: 1
+            status_code?: number | "NaN" | "Infinity" | "-Infinity"
+            provider_request_id?: string
+          }
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "open_circuit"
+            original_receipt_id: string
+            turn_provider_requests: 0
+          }
+      provider_id: string
+      model_id: string
+      effort: string
+    }
+    usage?: {
+      source: "llm_normalized"
+      input_tokens?: number
+      output_tokens?: number
+      total_tokens?: number
+      reasoning_tokens?: number
+      cache_read_input_tokens?: number
+      cache_write_input_tokens?: number
+    }
+    cost: {
+      amount: number
+      semantics: "configured_rate_estimate"
+      actual_bill: "unknown"
+    }
+  }
+  tokens: {
+    total?: number
+    input: number
+    output: number
+    reasoning: number
+    cache: {
+      read: number
+      write: number
+    }
+  }
+}
+
 export type SessionStatus2 = {
   id: string
   metadata?: {
@@ -3023,6 +3333,122 @@ export type EffectHttpApiErrorForbidden = {
   _tag: "Forbidden"
 }
 
+export type StepFinishPart2 = {
+  id: string
+  sessionID: string
+  messageID: string
+  type: "step-finish"
+  reason: string
+  snapshot?: string
+  cost: number
+  inference?: {
+    requested: {
+      provider_id: string
+      model_id: string
+      effort?: string
+    }
+    response: {
+      model_id?: string
+      source: "transport_response"
+      upstream_actual_identity: "unknown"
+    }
+    transport_route?:
+      | {
+          source: "managed_gateway_attestation"
+          provider: "is1" | "yolo" | "ollama" | "opencode_go"
+          model: string
+          effort?: string
+          observation_id: string
+          receipt_version?: unknown
+          requested_model?: unknown
+          requested_effort?: unknown
+          generation?: unknown
+          selection_reason?: unknown
+        }
+      | {
+          source: "managed_gateway_attestation"
+          provider: GatewayRouteTarget
+          model: GatewayRouteModel
+          effort: GatewayRouteEffort
+          observation_id: string
+          receipt_version: 2
+          requested_model: GatewayRouteRequestedModel
+          requested_effort: GatewayRouteEffort
+          generation: GatewayRouteGeneration
+          selection_reason: GatewayRouteSelectionReason
+        }
+    category?: {
+      source: "host_policy_resolution" | "workflow_frozen_matrix"
+      category:
+        | "coordinate"
+        | "inspect"
+        | "intermediate"
+        | "reasoning"
+        | "review"
+        | "planning"
+        | "task_review"
+        | "consolidation"
+      matrix_sha256: string
+    }
+    quota_fallback?: {
+      evidence:
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "provider_rejection"
+            response_complete: true
+            turn_provider_requests: 1
+            status_code?: number | "NaN" | "Infinity" | "-Infinity"
+            provider_request_id?: string
+          }
+        | {
+            schema_version: "1.0"
+            reason: "account_quota_exhausted" | "account_usage_limit"
+            matrix_sha256: string
+            receipt_id: string
+            observed_at: string
+            reset_at?: string
+            emitted_output_or_action: false
+            source: "open_circuit"
+            original_receipt_id: string
+            turn_provider_requests: 0
+          }
+      provider_id: string
+      model_id: string
+      effort: string
+    }
+    usage?: {
+      source: "llm_normalized"
+      input_tokens?: number
+      output_tokens?: number
+      total_tokens?: number
+      reasoning_tokens?: number
+      cache_read_input_tokens?: number
+      cache_write_input_tokens?: number
+    }
+    cost: {
+      amount: number
+      semantics: "configured_rate_estimate"
+      actual_bill: "unknown"
+    }
+  }
+  tokens: {
+    total?: number
+    input: number
+    output: number
+    reasoning: number
+    cache: {
+      read: number
+      write: number
+    }
+  }
+}
+
 export type EventTuiPromptAppend2 = {
   id: string
   type: "tui.prompt.append"
@@ -3122,6 +3548,45 @@ export type SkillV2Source = SkillV2DirectorySource | SkillV2UrlSource | SkillV2E
 export type MoveSessionDestination = {
   directory: string
 }
+
+export type GatewayRouteTarget =
+  | "is1"
+  | "yolo"
+  | "ollama"
+  | "opencode_go"
+  | "glm_ollama"
+  | "grok"
+  | "minimax_m3_ollama"
+  | "kimi_k27_ollama"
+  | "kimi_k3_ollama"
+  | "nemotron_ollama"
+  | "gemma_ollama"
+  | "minimax_m27_ollama"
+  | "minimax_m25_ollama"
+  | "ornith_sglang"
+
+export type GatewayRouteModel = string
+
+export type GatewayRouteEffort = "low" | "medium" | "high" | "xhigh" | "max" | "unspecified"
+
+export type GatewayRouteRequestedModel =
+  | "qwen3.8-thinking"
+  | "qwen3.8-instruct"
+  | "deepseek-v4-flash"
+  | "deepseek-v4-pro"
+  | "glm-5.3"
+  | "minimax-m3"
+  | "kimi-k2.7-code"
+  | "kimi-k3"
+  | "nemotron-3-super"
+  | "gemma4:31b"
+  | "minimax-m2.7"
+  | "minimax-m2.5"
+  | "ornith-9b"
+
+export type GatewayRouteGeneration = number
+
+export type GatewayRouteSelectionReason = "primary" | "availability" | "capability"
 
 export type ModelRef = {
   id: string
@@ -5449,7 +5914,7 @@ export type SessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
-      | ApiError
+      | ApiError1
   }
 }
 
@@ -6818,7 +7283,7 @@ export type EventSessionError = {
       | StructuredOutputError
       | ContextOverflowError
       | ContentFilterError
-      | ApiError
+      | ApiError1
   }
 }
 
@@ -9455,6 +9920,10 @@ export type ProviderListResponses = {
    */
   200: {
     all: Array<Provider>
+    discovery?: Array<{
+      id: string
+      name: string
+    }>
     default: {
       [key: string]: string
     }

@@ -3298,7 +3298,7 @@ export class Provider extends HeyApiClient {
   /**
    * List providers
    *
-   * Get a list of all available AI providers, including both available and connected ones.
+   * List active providers for model selection and discoverable providers for connection setup.
    */
   public list<ThrowOnError extends boolean = false>(
     parameters?: {

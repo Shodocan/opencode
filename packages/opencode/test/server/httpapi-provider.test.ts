@@ -261,6 +261,64 @@ function setEnvScoped(key: string, value: string) {
 }
 
 describe("provider HttpApi", () => {
+  it.instance(
+    "discovers denied providers without making their models available",
+    Effect.gen(function* () {
+      const directory = (yield* TestInstance).directory
+      yield* setEnvScoped("OPENCODE_AUTH_CONTENT", JSON.stringify({ openai: { type: "api", key: "fake-key" } }))
+      const headers = { "x-opencode-directory": directory }
+      const response = yield* request("/provider", { headers })
+      const config = yield* request("/config/providers", { headers })
+
+      expect(response.status).toBe(200)
+      expect(config.status).toBe(200)
+      const body = (yield* response.json) as {
+        discovery: { id: string; name: string }[]
+        default: Record<string, string>
+        connected: string[]
+      }
+      const active = yield* config.json
+      expect(body.discovery).toContainEqual({ id: "openai", name: "OpenAI" })
+      expect(body.discovery).toContainEqual({ id: "anthropic", name: "Anthropic" })
+      expect(body.discovery).toContainEqual({ id: "google", name: "Managed Google" })
+      expect(providerByID(body, "all", "google")).toBeDefined()
+      expect(providerByID(body, "all", "openai")).toBeUndefined()
+      expect(providerByID(body, "all", "anthropic")).toBeUndefined()
+      expect(providerByID(active, "providers", "openai")).toBeUndefined()
+      expect(body.default.openai).toBeUndefined()
+      expect(body.connected).not.toContain("openai")
+    }),
+    {
+      ...projectOptions,
+      config: {
+        ...projectOptions.config,
+        enabled_providers: ["google", "openai"],
+        disabled_providers: ["openai"],
+        provider: { google: { name: "Managed Google" } },
+      },
+    },
+  )
+
+  it.instance(
+    "makes an explicitly allowed connected provider available without relaxing other denials",
+    Effect.gen(function* () {
+      const directory = (yield* TestInstance).directory
+      yield* setEnvScoped("OPENCODE_AUTH_CONTENT", JSON.stringify({ openai: { type: "api", key: "fake-key" } }))
+      const response = yield* request("/provider", { headers: { "x-opencode-directory": directory } })
+
+      expect(response.status).toBe(200)
+      const body = (yield* response.json) as {
+        discovery: { id: string; name: string }[]
+        connected: string[]
+      }
+      expect(providerByID(body, "all", "openai")).toBeDefined()
+      expect(body.connected).toContain("openai")
+      expect(providerByID(body, "all", "anthropic")).toBeUndefined()
+      expect(body.discovery).toContainEqual({ id: "anthropic", name: "Anthropic" })
+    }),
+    { ...projectOptions, config: { ...projectOptions.config, disabled_providers: ["anthropic"] } },
+  )
+
   it.instance.skip(
     "returns public v2 provider not found errors",
     Effect.gen(function* () {
