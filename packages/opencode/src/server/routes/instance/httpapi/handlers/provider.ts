@@ -57,10 +57,10 @@ export const providerHandlers = HttpApiBuilder.group(InstanceHttpApi, "provider"
       return {
         all: Object.values(providers).map(Provider.toPublicInfo),
         discovery: [
-          ...Object.values(all).map((item) => ({
-            id: ProviderV2.ID.make(item.id),
-            name: connected[item.id]?.name ?? item.name,
-          })),
+          ...Object.values(all).map((item) => {
+            const id = ProviderV2.ID.make(item.id)
+            return { id, name: connected[id]?.name ?? item.name }
+          }),
           ...Object.values(connected)
             .filter((item) => !(item.id in all))
             .map((item) => ({ id: item.id, name: item.name })),
