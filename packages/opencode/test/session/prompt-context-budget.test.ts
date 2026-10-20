@@ -404,6 +404,26 @@ const maxTokens = (body: Record<string, unknown>) => (body.max_tokens ?? body.ma
 
 const FINAL_SMALL = "QCB-FINAL" + "f".repeat(400)
 
+// The NY2 router's refusal: a 400 with code context_length_exceeded.
+const PROVIDER_OVERFLOW = {
+  error: { code: "context_length_exceeded", message: "This model's maximum context length was exceeded" },
+}
+
+// Spend the durable one-shot repair (compaction_count=1): history, one hard
+// overflow, its compaction and the repaired dispatch.
+function spendOneShot(prompt: SessionPrompt.Interface, llm: LLMOps, sessionID: SessionID) {
+  return Effect.gen(function* () {
+    yield* buildHistory(prompt, llm, sessionID)
+    yield* llm.error(413, { error: { message: "request entity too large" } })
+    yield* llm.push(reply().text("ok"))
+    yield* llm.push(reply().text("rebuild ok").stop())
+    yield* prompt.prompt({ sessionID, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+    yield* prompt.loop({ sessionID })
+    expect(yield* llm.hits).toHaveLength(5)
+    expect(decodeLineage(yield* lineageRows(sessionID)).compaction_count).toBe(1)
+  })
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe("T06 durable-lineage one-shot context-budget repair", () => {
@@ -896,27 +916,151 @@ describe("soft compaction threshold crossing (harness-opencode#560)", () => {
     120_000,
   )
 
-  it.instance("a hard overflow after the one-shot repair is spent stays terminal", () =>
+})
+
+// A provider overflow after the durable one-shot repair is spent compacts
+// and retries the request once instead of ending every later turn.
+describe("provider overflow after the one-shot repair is spent", () => {
+  it.instance("a later turn's provider overflow after the one-shot repair is spent compacts and retries once", () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(qwenCfg)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({
-        title: "hard overflow twice",
+        title: "hard overflow on a later turn",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spendOneShot(prompt, llm, chat.id)
+
+      // The provider refuses below the runtime's own trigger (a router clamp
+      // or tokenizer drift): the turn compacts and retries once instead of
+      // ending on the spent one-shot gate.
+      yield* llm.error(400, PROVIDER_OVERFLOW)
+      yield* llm.push(reply().text("summary"))
+      yield* llm.push(reply().text("retry ok").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      // + the refused request, one compaction (8,192 output), one retry.
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(8)
+      expect(maxTokens(hits[6]!.body)).toBe(8_192)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(compactions(messages)).toHaveLength(2)
+    }),
+    120_000,
+  )
+
+  it.instance("a provider overflow that recurs after the overflow compaction ends the turn without looping", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "hard overflow twice in one turn",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spendOneShot(prompt, llm, chat.id)
+
+      yield* llm.error(400, PROVIDER_OVERFLOW)
+      yield* llm.push(reply().text("summary"))
+      yield* llm.error(400, PROVIDER_OVERFLOW)
+      yield* llm.push(reply().text("must never be consumed").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      // + the refused request, one compaction, the refused retry: no second
+      // compaction and no further dispatch.
+      expect(yield* llm.hits).toHaveLength(8)
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") {
+        expect(result.info.error?.name).toBe("ContextOverflowError")
+        expect(JSON.stringify(result.info.error)).toContain("after an overflow compaction")
+      }
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(compactions(messages)).toHaveLength(2)
+    }),
+    120_000,
+  )
+
+  it.instance("a mid-turn provider overflow keeps the finished steps without replaying the prompt", () =>
+    Effect.gen(function* () {
+      const { dir, llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "hard overflow mid-turn",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spendOneShot(prompt, llm, chat.id)
+      for (const index of [0, 1]) yield* writeText(path.join(dir, `step-${index}.txt`), `QCB-STEP-${index}`)
+
+      for (const index of [0, 1]) yield* llm.push(reply().tool("read", { filePath: path.join(dir, `step-${index}.txt`) }))
+      yield* llm.error(400, PROVIDER_OVERFLOW)
+      yield* llm.push(reply().text("summary"))
+      yield* llm.push(reply().text("done").stop())
+      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+      const result = yield* prompt.loop({ sessionID: chat.id })
+
+      // + two read steps, the refused request, one compaction, one continued
+      // step: the finished read steps stay in context, not replayed.
+      const hits = yield* llm.hits
+      expect(hits).toHaveLength(10)
+      expect(maxTokens(hits[8]!.body)).toBe(8_192)
+      expect(JSON.stringify(hits[9]!.body)).toContain("QCB-STEP-1")
+      // The turn's prompt is not replayed after its own finished steps.
+      const prompts = (body: Record<string, unknown>) => JSON.stringify(body).split("QCB-FINAL").length
+      expect(prompts(hits[9]!.body)).toBe(prompts(hits[7]!.body))
+      expect(result.info.role).toBe("assistant")
+      if (result.info.role === "assistant") expect(result.info.error).toBeUndefined()
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(messages.filter((message) => message.info.role === "assistant" && message.info.finish === "tool-calls")).toHaveLength(2)
+    }),
+    120_000,
+  )
+
+  it.instance("auto:false: a provider context_length_exceeded ends the turn without compaction", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => qwenCfg(url, { auto: false }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "provider overflow, auto off",
         permission: [{ permission: "*", pattern: "*", action: "allow" }],
       })
       yield* buildHistory(prompt, llm, chat.id)
-      // First hard overflow: the one-shot repair compacts and rebuilds.
-      yield* llm.error(413, { error: { message: "request entity too large" } })
-      yield* llm.push(reply().text("ok"))
-      yield* llm.push(reply().text("rebuild ok").stop())
-      yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
-      yield* prompt.loop({ sessionID: chat.id })
-      expect(yield* llm.hits).toHaveLength(5)
+      for (const _ of [1, 2]) {
+        yield* llm.error(400, PROVIDER_OVERFLOW)
+        yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
+        const result = yield* prompt.loop({ sessionID: chat.id })
+        expect(result.info.role).toBe("assistant")
+        if (result.info.role === "assistant") expect(result.info.error?.name).toBe("ContextOverflowError")
+      }
 
-      // Second hard overflow (no output): the spent one-shot gate ends the run
-      // without another compaction or rebuild dispatch.
-      yield* llm.error(413, { error: { message: "request entity too large" } })
+      // history×2 + one refused request per turn: never a compaction.
+      expect(yield* llm.hits).toHaveLength(4)
+      const messages = yield* sessions.messages({ sessionID: chat.id })
+      expect(compactions(messages)).toHaveLength(0)
+    }),
+    120_000,
+  )
+
+  it.instance("a child session's provider overflow after the one-shot repair is spent stays terminal", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(qwenCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({ title: "parent" })
+      const chat = yield* sessions.create({
+        parentID: parent.id,
+        title: "child hard overflow twice",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* spendOneShot(prompt, llm, chat.id)
+
+      yield* llm.error(400, PROVIDER_OVERFLOW)
       yield* llm.push(reply().text("must never be consumed"))
       yield* prompt.prompt({ sessionID: chat.id, agent: "build", noReply: true, parts: [{ type: "text", text: FINAL_SMALL }] })
       const result = yield* prompt.loop({ sessionID: chat.id })

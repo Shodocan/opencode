@@ -1397,6 +1397,11 @@ const layer = Layer.effect(
         // Consecutive soft-threshold compactions with no step finishing below
         // the threshold in between (see the "compact" branch below).
         let softCompactions = 0
+        // Set by an overflow compaction until a step finishes after it: the
+        // retried request gets one compaction, and overflowing again ends
+        // the turn instead of looping. (Compaction adds user messages, so the
+        // turn cannot be keyed on the user message ID.)
+        let overflowCompacted = false
         // Provider retry budget spent by safe resumes after stream cuts in
         // this turn. Only the step right after a resume inherits it: every
         // iteration takes it, so a subtask, a compaction or a step that ends
@@ -1742,6 +1747,7 @@ const layer = Layer.effect(
               return "break" as const
             }
             if (result !== "compact") softCompactions = 0
+            if (handle.message.finish && !handle.message.error) overflowCompacted = false
             // A pre-dispatch budget refusal after this turn already finished
             // steps (a subagent's tool results grew the request) sent nothing
             // to the provider, so it is a need to compact, not a provider
@@ -1750,12 +1756,12 @@ const layer = Layer.effect(
             // session is the whole transcript, and a spent counter is
             // terminal for the rest of the session (harness-opencode#560).
             // A refusal on the first step of a turn keeps the one-shot path.
-            const refusedMidTurn =
-              handle.budgetRefused === true &&
+            const finishedThisTurn =
               lastFinished !== undefined &&
               lastFinished.parentID === lastUser.id &&
               !lastFinished.summary &&
               !lastFinished.error
+            const refusedMidTurn = handle.budgetRefused === true && finishedThisTurn
             if (result === "compact" && ((handle.message.finish && !handle.message.error) || refusedMidTurn)) {
               // The step finished without error and only crossed the soft
               // compaction threshold, or was refused mid-turn (above). Its
@@ -1802,6 +1808,42 @@ const layer = Layer.effect(
               return "continue" as const
             }
             if (result === "compact") {
+              // The durable one-shot repair is spent for the whole session, so
+              // a later provider overflow (the provider refusing below the
+              // runtime's own trigger: a router clamp, tokenizer drift) would
+              // end every turn from here on. Such a request compacts and
+              // retries once instead; a pre-dispatch budget refusal, a summary
+              // and a child session keep the one-shot gates.
+              const preDispatch = lineageDraft.preDispatch
+              if (
+                preDispatch &&
+                !lineageDraft.foreign &&
+                (lineageDraft.compaction_count === 1 || lineageDraft.overflowHashes.includes(preDispatch.requestHash)) &&
+                !handle.budgetRefused &&
+                !handle.message.summary &&
+                !session.parentID
+              ) {
+                if (overflowCompacted) {
+                  yield* lineageTerminate(
+                    msg,
+                    "The provider rejected the request as too large again after an overflow compaction and one retry",
+                  )
+                  return "break" as const
+                }
+                overflowCompacted = true
+                lineageDraft.plan = undefined
+                // An overflow compaction replays the turn's prompt and drops
+                // the turn from the summary; once a step of this turn has
+                // finished, keep its tool calls in context instead.
+                yield* compaction.create({
+                  sessionID,
+                  agent: lastUser.agent,
+                  model: lastUser.model,
+                  auto: true,
+                  overflow: !handle.message.finish && !finishedThisTurn,
+                })
+                return "continue" as const
+              }
               // T06: record the overflow before any repair; the bounded
               // planner gates the one-shot repair on an unchanged durable
               // output watermark.
@@ -1828,6 +1870,7 @@ const layer = Layer.effect(
                 }
                 throw e
               }
+              overflowCompacted = true
               yield* compaction.create({
                 sessionID,
                 agent: lastUser.agent,
