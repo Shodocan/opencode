@@ -25,7 +25,7 @@ check it on every sync.**
 | Configurable auto-compaction threshold (`compaction.threshold` fraction + per-model `compaction.thresholds` fractions) | live | `packages/core/src/v1/config/config.ts`, `packages/core/src/config/compaction.ts`, `packages/core/src/v1/config/migrate.ts`, `packages/opencode/src/session/overflow.ts` |
 | **(7) MinIO auto-update** | live (re-grafted) | `packages/opencode/src/installation/index.ts`, `test/installation/custom-minio.test.ts` |
 | Reasoning-only turns surface as `ReasoningOnlyResponseError`; a subagent with no answer fails the Task (Shodocan/harness-opencode#658, PR #22) | in PR #22 | `packages/opencode/src/session/prompt.ts`, `packages/opencode/src/tool/task.ts`, `packages/sdk/openapi.json`, `packages/sdk/js/src/v2/gen/types.gen.ts`, `test/session/prompt.test.ts`, `test/tool/task.test.ts`, `test/tool/workflow-task-terminal-accuracy.test.ts` |
-| A length-capped reasoning-only turn gets one synthetic "answer now" user turn before `ReasoningOnlyResponseError` (Shodocan/harness-opencode#988) | in PR | `packages/opencode/src/session/prompt.ts`, `test/session/prompt.test.ts` |
+| A length-capped reasoning-only turn gets one synthetic "answer now" user turn before `ReasoningOnlyResponseError` (Shodocan/harness-opencode#988, PR #25) | in PR #25 | `packages/opencode/src/session/prompt.ts`, `test/session/prompt.test.ts` |
 
 ## Feature (7) — MinIO auto-update (custom distribution)
 
