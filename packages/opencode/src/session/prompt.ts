@@ -123,6 +123,9 @@ const LINEAGE_TYPE_V1 = EventV2.versionedType(SessionEvent.ContextBudgetLineage.
 const LINEAGE_DATA = SessionEvent.ContextBudgetLineage.data
 // Soft-threshold compactions allowed back to back before the run fails.
 const SOFT_COMPACTION_LIMIT = 2
+// Sent once when a turn reasons until the output cap and ends with no text and
+// no tool call (finish "length"); a second such turn fails as before.
+const REASONING_LENGTH_NUDGE = "Stop reasoning. Answer now or call the tool you need."
 
 // Seam projections may carry non-JSON leaves (undefined properties the
 // canonical form drops); the durable state stores the canonical JSON form.
@@ -1402,6 +1405,9 @@ const layer = Layer.effect(
         // the turn instead of looping. (Compaction adds user messages, so the
         // turn cannot be keyed on the user message ID.)
         let overflowCompacted = false
+        // Set once a length-capped reasoning-only turn got its nudge; never
+        // reset, so this run sends at most one nudge.
+        let reasoningNudged = false
         // Provider retry budget spent by safe resumes after stream cuts in
         // this turn. Only the step right after a resume inherits it: every
         // iteration takes it, so a subtask, a compaction or a step that ends
@@ -1699,6 +1705,37 @@ const layer = Layer.effect(
                 !answered &&
                 parts.some((part) => part.type === "reasoning")
               ) {
+                // A turn cut at the output cap while still reasoning gets one
+                // short continuation turn. The marker also bounds a run that
+                // re-enters with the nudge as its latest user message.
+                const nudgedBefore = msgs
+                  .findLast((m) => m.info.role === "user")
+                  ?.parts.some((part) => part.type === "text" && part.metadata?.reasoning_length_nudge === true)
+                if (finish === "length" && !reasoningNudged && !nudgedBefore) {
+                  reasoningNudged = true
+                  const nudge = yield* sessions.updateMessage({
+                    id: MessageID.ascending(),
+                    role: "user",
+                    sessionID,
+                    time: { created: Date.now() },
+                    agent: lastUser.agent,
+                    model: lastUser.model,
+                    format: lastUser.format,
+                    system: lastUser.system,
+                    tools: lastUser.tools,
+                  })
+                  yield* sessions.updatePart({
+                    id: PartID.ascending(),
+                    messageID: nudge.id,
+                    sessionID,
+                    type: "text",
+                    metadata: { reasoning_length_nudge: true },
+                    synthetic: true,
+                    text: REASONING_LENGTH_NUDGE,
+                    time: { start: Date.now(), end: Date.now() },
+                  })
+                  return "continue" as const
+                }
                 handle.message.error = new SessionV1.ReasoningOnlyResponseError({
                   message: `The model returned reasoning without an answer (finish reason "${finish}", reasoning tokens ${handle.message.tokens.reasoning}); no text or tool call was produced`,
                 }).toObject()

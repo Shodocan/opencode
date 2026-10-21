@@ -874,7 +874,11 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
   }),
 )
 
-for (const finish of ["stop", "length"] as const) {
+for (const [finish, replies] of [
+  ["stop", 1],
+  // A length-capped reasoning-only turn gets one nudge turn; a second one fails.
+  ["length", 2],
+] as const) {
   it.instance(`loop surfaces reasoning-only ${finish} responses as session errors`, () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig(providerCfg)
@@ -896,12 +900,14 @@ for (const finish of ["stop", "length"] as const) {
         noReply: true,
         parts: [{ type: "text", text: "hello" }],
       })
-      yield* llm.push(reply().reason("thinking without an answer")[finish]())
+      for (const _ of Array.from({ length: replies })) {
+        yield* llm.push(reply().reason("thinking without an answer")[finish]())
+      }
 
       const result = yield* prompt.loop({ sessionID: chat.id })
       yield* off
 
-      expect(yield* llm.hits).toHaveLength(1)
+      expect(yield* llm.hits).toHaveLength(replies)
       expect(result.info.role).toBe("assistant")
       if (result.info.role === "assistant") {
         expect(result.info.error).toMatchObject({ name: "ReasoningOnlyResponseError" })
@@ -909,10 +915,147 @@ for (const finish of ["stop", "length"] as const) {
           data: { message: expect.stringContaining(`finish reason "${finish}"`) },
         })
       }
-      expect(errors).toContainEqual(expect.objectContaining({ name: "ReasoningOnlyResponseError" }))
+      expect(errors.filter((error) => error.name === "ReasoningOnlyResponseError")).toHaveLength(1)
+      const nudges = (yield* sessions.messages({ sessionID: chat.id })).filter((msg) =>
+        msg.parts.some((part) => part.type === "text" && part.metadata?.reasoning_length_nudge === true),
+      )
+      expect(nudges).toHaveLength(replies - 1)
     }),
   )
 }
+
+it.instance("loop re-entered on a nudge does not nudge again after another length-capped reasoning-only turn", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const events = yield* EventV2Bridge.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Reasoning length nudge re-entry" })
+    const errors: string[] = []
+    const off = yield* events.listen((event) => {
+      if (event.type !== Session.Event.Error.type) return Effect.void
+      const data = event.data as typeof Session.Event.Error.data.Type
+      if (data.sessionID === chat.id && data.error) errors.push(data.error.name)
+      return Effect.void
+    })
+
+    const hello = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    if (hello.info.role !== "user") throw new Error("expected a user message")
+    // State a run leaves when it stops after sending the nudge: the capped
+    // reasoning-only turn, then the nudge as the latest user message.
+    const capped = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: hello.info.id,
+      sessionID: chat.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: hello.info.model.modelID,
+      providerID: hello.info.model.providerID,
+      time: { created: Date.now(), completed: Date.now() },
+      finish: "length",
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: capped.id,
+      sessionID: chat.id,
+      type: "reasoning",
+      text: "thinking until the output cap",
+      time: { start: Date.now(), end: Date.now() },
+    })
+    const nudge = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "user",
+      sessionID: chat.id,
+      time: { created: Date.now() },
+      agent: hello.info.agent,
+      model: hello.info.model,
+    })
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: nudge.id,
+      sessionID: chat.id,
+      type: "text",
+      metadata: { reasoning_length_nudge: true },
+      synthetic: true,
+      text: "Stop reasoning. Answer now or call the tool you need.",
+      time: { start: Date.now(), end: Date.now() },
+    })
+    yield* llm.push(reply().reason("still thinking").length())
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    yield* off
+
+    expect(yield* llm.hits).toHaveLength(1)
+    expect(result.info.role === "assistant" && result.info.error).toMatchObject({
+      name: "ReasoningOnlyResponseError",
+      data: { message: expect.stringContaining('finish reason "length"') },
+    })
+    expect(errors).toEqual(["ReasoningOnlyResponseError"])
+    const msgs = yield* sessions.messages({ sessionID: chat.id })
+    expect(msgs.map((msg) => msg.info.id)).toEqual([hello.info.id, capped.id, nudge.id, result.info.id])
+    expect(
+      msgs.filter((msg) =>
+        msg.parts.some((part) => part.type === "text" && part.metadata?.reasoning_length_nudge === true),
+      ),
+    ).toHaveLength(1)
+  }),
+)
+
+it.instance("loop nudges a length-capped reasoning-only turn once and returns the answer", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const events = yield* EventV2Bridge.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Reasoning length nudge" })
+    const errors: string[] = []
+    const off = yield* events.listen((event) => {
+      if (event.type !== Session.Event.Error.type) return Effect.void
+      const data = event.data as typeof Session.Event.Error.data.Type
+      if (data.sessionID === chat.id && data.error) errors.push(data.error.name)
+      return Effect.void
+    })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(reply().reason("thinking until the output cap").length())
+    yield* llm.push(reply().text("answer").stop())
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    yield* off
+
+    const hits = yield* llm.hits
+    expect(hits).toHaveLength(2)
+    const second = JSON.stringify(hits[1]?.body)
+    expect(second).toContain("Stop reasoning. Answer now or call the tool you need.")
+    expect(second.lastIndexOf("Stop reasoning.")).toBeGreaterThan(second.lastIndexOf("hello"))
+    expect(result.info.role === "assistant" && result.info.error).toBeFalsy()
+    expect(result.parts).toEqual(expect.arrayContaining([expect.objectContaining({ type: "text", text: "answer" })]))
+    expect(errors).toEqual([])
+
+    const msgs = yield* sessions.messages({ sessionID: chat.id })
+    const capped = msgs.find((msg) => msg.info.role === "assistant" && msg.info.finish === "length")
+    expect(capped?.info.role === "assistant" && capped.info.error).toBeFalsy()
+    const nudge = msgs.find((msg) =>
+      msg.parts.some((part) => part.type === "text" && part.metadata?.reasoning_length_nudge === true),
+    )
+    expect(nudge?.info.role).toBe("user")
+    expect(nudge?.parts).toEqual([expect.objectContaining({ type: "text", synthetic: true })])
+  }),
+)
 
 it.instance("loop keeps a text response with reasoning unchanged", () =>
   Effect.gen(function* () {
