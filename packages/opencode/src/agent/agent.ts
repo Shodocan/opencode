@@ -4,7 +4,7 @@ import { Config } from "@/config/config"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Provider } from "@/provider/provider"
 
-import { generateObject, streamObject, type ModelMessage } from "ai"
+import { streamObject, type ModelMessage } from "ai"
 import { Truncate } from "@/tool/truncate"
 import { Auth } from "../auth"
 import { ProviderTransform } from "@/provider/transform"
@@ -413,26 +413,28 @@ const layer = Layer.effect(
             Schema.toStandardSchemaV1(GeneratedAgent),
             Schema.toStandardJSONSchemaV1(GeneratedAgent),
           ),
-        } satisfies Parameters<typeof generateObject>[0]
+        } satisfies Parameters<typeof streamObject>[0]
 
-        if (isOpenaiOauth) {
-          return yield* Effect.promise(async () => {
-            const result = streamObject({
-              ...params,
-              providerOptions: ProviderTransform.providerOptions(resolved, {
-                instructions: system.join("\n"),
-                store: false,
-              }),
-              onError: () => {},
-            })
-            for await (const part of result.fullStream) {
-              if (part.type === "error") throw part.error
-            }
-            return result.object
+        // Always stream: every LLM call goes out as a streaming request (the
+        // non-stream generateObject path is gone). The collected object is the same.
+        return yield* Effect.promise(async () => {
+          const result = streamObject({
+            ...params,
+            ...(isOpenaiOauth
+              ? {
+                  providerOptions: ProviderTransform.providerOptions(resolved, {
+                    instructions: system.join("\n"),
+                    store: false,
+                  }),
+                }
+              : {}),
+            onError: () => {},
           })
-        }
-
-        return yield* Effect.promise(() => generateObject(params).then((r) => r.object))
+          for await (const part of result.fullStream) {
+            if (part.type === "error") throw part.error
+          }
+          return result.object
+        })
       }),
     })
   }),
