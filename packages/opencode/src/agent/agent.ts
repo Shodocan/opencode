@@ -4,7 +4,7 @@ import { Config } from "@/config/config"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import { Provider } from "@/provider/provider"
 
-import { streamObject, type ModelMessage } from "ai"
+import { APICallError, RetryError, streamObject, type ModelMessage } from "ai"
 import { Truncate } from "@/tool/truncate"
 import { Auth } from "../auth"
 import { ProviderTransform } from "@/provider/transform"
@@ -54,6 +54,11 @@ export const Info = Schema.Struct({
   steps: Schema.optional(Schema.Finite),
 }).annotate({ identifier: "Agent" })
 export type Info = DeepMutable<Schema.Schema.Type<typeof Info>>
+
+// Agent.generate: a stream that broke mid-body is retried this many times (the
+// non-stream call's maxRetries); finish reasons that mean the response is complete.
+const GENERATE_STREAM_RETRIES = 2
+const COMPLETE_FINISH = new Set(["stop", "length", "content-filter", "tool-calls"])
 
 const GeneratedAgent = Schema.Struct({
   identifier: Schema.String,
@@ -417,23 +422,36 @@ const layer = Layer.effect(
 
         // Always stream: every LLM call goes out as a streaming request (the
         // non-stream generateObject path is gone). The collected object is the same.
+        // A stream that breaks after the response started (mid-stream error event,
+        // or a body cut before the finish) is retried like the non-stream 5xx was;
+        // a complete response whose object fails the schema is not.
         return yield* Effect.promise(async () => {
-          const result = streamObject({
-            ...params,
-            ...(isOpenaiOauth
-              ? {
-                  providerOptions: ProviderTransform.providerOptions(resolved, {
-                    instructions: system.join("\n"),
-                    store: false,
-                  }),
-                }
-              : {}),
-            onError: () => {},
-          })
-          for await (const part of result.fullStream) {
-            if (part.type === "error") throw part.error
+          for (let attempt = 0; ; attempt++) {
+            const result = streamObject({
+              ...params,
+              ...(isOpenaiOauth
+                ? {
+                    providerOptions: ProviderTransform.providerOptions(resolved, {
+                      instructions: system.join("\n"),
+                      store: false,
+                    }),
+                  }
+                : {}),
+              onError: () => {},
+            })
+            let error: unknown
+            let finish: string | undefined
+            for await (const part of result.fullStream) {
+              if (part.type === "error") error ??= part.error
+              if (part.type === "finish") finish = part.finishReason
+            }
+            // request failures already went through the SDK's own retries
+            const requestFailed = APICallError.isInstance(error) || RetryError.isInstance(error)
+            const broken = error !== undefined ? !requestFailed : !finish || !COMPLETE_FINISH.has(finish)
+            if (broken && attempt < GENERATE_STREAM_RETRIES) continue
+            if (error !== undefined) throw error
+            return result.object
           }
-          return result.object
         })
       }),
     })
