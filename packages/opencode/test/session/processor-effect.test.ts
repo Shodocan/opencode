@@ -4,7 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { expect } from "bun:test"
 import { tool } from "ai"
-import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
+import { Cause, Effect, Exit, Fiber, Layer, Logger, Stream } from "effect"
 import path from "path"
 import z from "zod"
 import type { Agent } from "../../src/agent/agent"
@@ -958,6 +958,7 @@ it.live("session.processor effect tests compact on structured context overflow",
           model: mdl,
         })
 
+        const records: unknown[] = []
         const value = yield* handle.process({
           user: {
             id: parent.id,
@@ -973,11 +974,96 @@ it.live("session.processor effect tests compact on structured context overflow",
           system: [],
           messages: [{ role: "user", content: "compact json" }],
           tools: {},
-        })
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make<unknown, void>((entry) => {
+                if (entry.logLevel === "Error") records.push(entry.message)
+              }),
+            ]),
+          ),
+        )
 
         expect(value).toBe("compact")
         expect(yield* llm.calls).toBe(1)
         expect(handle.message.error).toBeUndefined()
+        const process = records.filter((entry) => Array.isArray(entry) && entry[0] === "process")
+        expect(process).toHaveLength(1)
+        const fields = process[0] as [string, Record<string, unknown>]
+        expect(fields[1]).toMatchObject({ "session.id": chat.id, messageID: msg.id })
+        expect(fields[1].budgetDiagnostic).toBeUndefined()
+      }),
+    { config: (url) => providerCfg(url) },
+  ),
+)
+
+it.live("session.processor logs typed admission refusal without request content or a provider call", () =>
+  provideTmpdirServer(
+    ({ dir, llm }) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "private prompt marker")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const configured = yield* provider.getModel(ref.providerID, ref.modelID)
+        const mdl = { ...configured, limit: { ...configured.limit, context: 128 } }
+        const handle = yield* processors.create({ assistantMessage: msg, sessionID: chat.id, model: mdl })
+        const records: { level: string; message: unknown }[] = []
+        const outcome = yield* handle.process({
+          user: parent,
+          sessionID: chat.id,
+          model: mdl,
+          agent: agent(),
+          system: [],
+          messages: [{ role: "user", content: "private prompt marker" }],
+          tools: {},
+        }).pipe(
+          Effect.provide(
+            Logger.layer([
+              Logger.make<unknown, void>((entry) => {
+                records.push({ level: entry.logLevel, message: entry.message })
+              }),
+            ]),
+          ),
+        )
+
+        expect(outcome).toBe("compact")
+        expect(handle.budgetRefused).toBe(true)
+        expect(handle.message.error).toBeUndefined()
+        expect(yield* llm.calls).toBe(0)
+        const process = records.filter(
+          (entry) => entry.level === "Error" && Array.isArray(entry.message) && entry.message[0] === "process",
+        )
+        expect(process).toHaveLength(1)
+        const fields = process[0]?.message as [string, Record<string, unknown>]
+        expect(fields[1]).toMatchObject({ "session.id": chat.id, messageID: msg.id })
+        expect(fields[1].budgetDiagnostic).toEqual(expect.objectContaining({
+          classification: "admission-refusal",
+          recoveryOutcome: "not-yet-known",
+          reason: "context-budget-exceeded",
+          phase: "normal",
+          estimate: expect.any(Number),
+          budget: expect.any(Number),
+          route: { providerID: "test", modelID: "test-model" },
+          contextLimit: 128,
+          outputLimit: 10000,
+          outputAllowance: expect.any(Number),
+          requestHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+          runtime: "ai-sdk",
+        }))
+        const diagnostic = fields[1].budgetDiagnostic as Record<string, unknown>
+        expect(diagnostic.estimate as number).toBeGreaterThan(diagnostic.budget as number)
+        expect(Object.keys(diagnostic).sort()).toEqual(
+          [
+            "budget", "chunkCount", "classification", "contextLimit", "estimate", "inputLimit",
+            "outputAllowance", "outputLimit", "phase", "reason", "recoveryOutcome", "requestHash",
+            "route", "runtime",
+          ]
+            .filter((key) => diagnostic[key] !== undefined)
+            .sort(),
+        )
+        expect(JSON.stringify(diagnostic)).not.toContain("private prompt marker")
+        expect(JSON.stringify(diagnostic)).not.toContain("test-key")
       }),
     { config: (url) => providerCfg(url) },
   ),

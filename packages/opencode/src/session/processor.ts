@@ -990,6 +990,28 @@ const layer = Layer.effect(
           messageID: input.assistantMessage.id,
           error: errorMessage(e),
           stack: e instanceof Error ? e.stack : undefined,
+          ...(e instanceof ContextBudgetExceededError
+            ? {
+                budgetDiagnostic: Object.fromEntries(
+                  Object.entries({
+                    classification: "admission-refusal",
+                    recoveryOutcome: "not-yet-known",
+                    reason: e.data.reason,
+                    phase: e.data.phase,
+                    estimate: e.data.estimate,
+                    budget: e.data.budget,
+                    route: e.data.route && { providerID: e.data.route.providerID, modelID: e.data.route.modelID },
+                    contextLimit: e.data.contextLimit,
+                    inputLimit: e.data.inputLimit,
+                    outputLimit: e.data.outputLimit,
+                    outputAllowance: e.data.outputAllowance,
+                    chunkCount: e.data.chunkCount,
+                    requestHash: e.data.requestHash,
+                    runtime: e.data.runtime,
+                  }).filter(([, value]) => value !== undefined),
+                ),
+              }
+            : {}),
         })
         const error = boundaryError(e, parse(e))
         if (SessionV1.ContextOverflowError.isInstance(error)) {
